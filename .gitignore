@@ -1,0 +1,46 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Unit test / coverage reports
+.coverage
+.coverage.*
+.pytest_cache/
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Project specific
+*.tsv
+*.json
+!examples/data/*.tsv
+!examples/data/*.json
+!pyproject.toml
+
+# Temporary files
+*.tmp
+*.bak
+*.log
+
+# Local development files
+extract_collybia_nuda.py
+graph_builder.py
+*.pdf
