@@ -7,17 +7,18 @@ A Python package for DNA barcode clustering that optimizes for the barcode gap b
 gapHACk implements a two-phase clustering algorithm designed specifically for DNA barcoding applications:
 
 1. **Phase 1**: Fast greedy merging below a minimum threshold (default 0.5% distance)
-2. **Phase 2**: Gap-optimized merging with real-time threshold optimization and lookahead mechanisms
+2. **Phase 2**: Gap-aware merging using gap-based heuristic to find optimal clustering
 
 The algorithm focuses on maximizing the "barcode gap" - the separation between intra-species and inter-species distances at a specified percentile (default P95) to handle outliers robustly.
 
 ## Features
 
-- **Gap Optimization**: Actively seeks to maximize the barcode gap during clustering
-- **Percentile-based Linkage**: Uses percentile-based average linkage (default 95th percentile) for robust merge decisions
-- **Two-phase Algorithm**: Fast initial clustering followed by careful gap-aware optimization
-- **Lookahead Mechanism**: Evaluates future merges to avoid premature stopping
-- **Flexible Parameters**: Customizable thresholds and percentiles for different datasets
+- **Gap Optimization**: Uses gap-based heuristic to directly maximize the barcode gap
+- **Percentile-based Linkage**: Uses percentile-based complete linkage (default 95th percentile) for robust merge decisions
+- **Two-phase Algorithm**: Fast initial clustering followed by gap-aware optimization to completion
+- **Progress Tracking**: Unified progress bar with real-time gap and cluster information
+- **Size-ordered Output**: Clusters numbered by size (largest first) for consistent results
+- **Library-friendly**: Configurable progress bars and logging for integration into other applications
 
 ## Installation
 
@@ -114,11 +115,12 @@ distance_matrix = calculate_distance_matrix(
 
 # Initialize clustering with custom parameters
 clustering = GapOptimizedClustering(
-    min_threshold=0.005,    # 0.5% minimum distance
-    max_threshold=0.02,      # 2% maximum distance
+    min_threshold=0.005,     # 0.5% minimum distance for gap-aware phase
+    max_threshold=0.02,      # 2% maximum distance for merging
     target_percentile=95,    # Optimize P95 gap
     merge_percentile=95,     # Use P95 for merge decisions
-    min_gap_size=0.005       # Minimum gap to consider sufficient
+    show_progress=True,      # Show progress bar (default True)
+    logger=None              # Use default logger (default None)
 )
 
 # Perform clustering
@@ -147,6 +149,26 @@ clusters, singletons, metrics = clustering.cluster(distance_matrix)
 
 # The returned values use Python native types (no numpy) for JSON serialization
 print(f"Gap size: {metrics['best_config']['gap_size']}")
+```
+
+#### Library Integration (Headless/Web Applications)
+
+```python
+import logging
+from gaphack import GapOptimizedClustering
+
+# Configure for library usage - no progress bars, custom logger
+app_logger = logging.getLogger("my_app.clustering")
+clustering = GapOptimizedClustering(
+    show_progress=False,  # Disable progress bars in headless environment
+    logger=app_logger     # Use your application's logger
+)
+
+# Silent clustering for web APIs or batch processing
+clusters, singletons, metrics = clustering.cluster(distance_matrix)
+
+# Results include cluster sizes in descending order
+print(f"Created {len(clusters)} clusters: {[len(c) for c in clusters]}")
 ```
 
 #### Traditional Identity for Conservative Clustering
@@ -214,13 +236,13 @@ This approach is useful for:
 - `max_threshold` (default: 0.02): Maximum distance for cluster merging. Beyond this, clusters are assumed to represent distinct species.
 - `target_percentile` (default: 95): Which percentile gap to optimize (P95 provides robustness against outliers).
 - `merge_percentile` (default: 95): Which percentile to use for merge decisions (higher = more conservative).
-- `min_gap_size` (default: 0.005): Minimum gap size to consider "sufficient" for early stopping.
 
 ### Output Formats
 
 - **FASTA format** (default): Creates separate FASTA files for each cluster
   - `basename.cluster_001.fasta`, `basename.cluster_002.fasta`, etc.
-  - `basename.singletons.fasta` for unclustered sequences
+  - `basename.singletons.fasta` for unclustered sequences  
+  - Clusters ordered by size (001 = largest, 002 = second largest, etc.)
   - Cluster numbers are zero-padded for proper sorting
 - **TSV format**: Tab-separated values with columns `sequence_id` and `cluster_id`
 - **Text format**: Human-readable clustering report
@@ -265,11 +287,9 @@ Between `min_threshold` and `max_threshold` (default: 0.02 or 2%):
 1. **Merge evaluation**: For each potential cluster merge, calculate the resulting gap metrics
 2. **Percentile linkage**: Use the `merge_percentile` (default: 95th percentile) of pairwise distances between clusters for merge decisions - more conservative than average linkage
 3. **Gap tracking**: Monitor the `target_percentile` gap size and record the configuration with the best gap
-4. **Lookahead mechanism**: Evaluate multiple future merges to avoid stopping at local optima
-5. **Termination conditions**:
-   - Gap degrades significantly from the best observed
-   - Gap reaches the `min_gap_size` threshold (default: 0.005)
-   - All remaining merges exceed `max_threshold`
+4. **Gap-based heuristic**: At each step, choose the merge that maximizes the barcode gap
+5. **Termination condition**: Stop when all remaining merges exceed `max_threshold`
+6. **Best tracking**: Track and return the clustering configuration that achieved the best gap
 
 ### Parameter Roles
 
@@ -280,8 +300,6 @@ Between `min_threshold` and `max_threshold` (default: 0.02 or 2%):
 - **`target_percentile`**: Which percentile gap to optimize (e.g., 95 = P95 gap). Higher percentiles are more robust to outliers but may be less sensitive to true gaps.
 
 - **`merge_percentile`**: Which percentile of inter-cluster distances to use for merge decisions. Higher values (more conservative) reduce the risk of merging distinct species.
-
-- **`min_gap_size`**: Early stopping threshold. If the gap reaches this size, clustering may terminate early as the gap is considered "sufficient" for species delimitation.
 
 ## Related Work
 
@@ -294,7 +312,7 @@ gapHACk was developed independently but shares conceptual similarities with ABGD
 
 Key differences in gapHACk's approach:
 - **Clustering algorithm**: gapHACk uses hierarchical agglomerative clustering with dynamic gap optimization, while ABGD uses graph-based partitioning with fixed thresholds
-- **Dynamic termination**: gapHACk employs real-time threshold optimization with lookahead mechanisms to avoid local optima, rather than recursive application of fixed thresholds
+- **Gap-based optimization**: gapHACk uses a gap-based heuristic that directly optimizes for the barcode gap at each merge, rather than recursive application of fixed thresholds
 - **Distance calculation**: gapHACk implements Stephen Russell's adjusted identity algorithm (Russell, 2025), which systematically corrects for sequencing artifacts and biological complexity that can obscure true genetic distances. This preprocessing approach can provide clearer barcode gaps than traditional BLAST identity scores
 - **Percentile-based robustness**: gapHACk uses percentile gaps (e.g., P95) to handle outliers, rather than absolute min/max values
 

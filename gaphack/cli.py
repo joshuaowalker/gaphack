@@ -90,12 +90,6 @@ Examples:
         metavar='[50-100]',
         help='Percentile for merge decisions (default: 95)'
     )
-    parser.add_argument(
-        '--min-gap-size',
-        type=float,
-        default=0.005,
-        help='Minimum gap size to consider sufficient (default: 0.005)'
-    )
     
     # Alignment strategy options
     parser.add_argument(
@@ -172,10 +166,6 @@ Examples:
             
             # Calculate distance matrix
             logging.info(f"Calculating pairwise distances using {args.alignment_method} method...")
-            if args.alignment_method == 'adjusted':
-                logging.info(f"Using adjusted identity with MycoBLAST adjustments (end_skip_distance={args.end_skip_distance})")
-            else:
-                logging.info("Using traditional identity (no adjustments)")
             
             distance_matrix = calculate_distance_matrix(
                 sequences, 
@@ -190,26 +180,19 @@ Examples:
             max_threshold=args.max_threshold,
             target_percentile=args.target_percentile,
             merge_percentile=args.merge_percentile,
-            min_gap_size=args.min_gap_size
         )
         
         # Perform clustering
         logging.info("Running gap-optimized clustering...")
         clusters, singletons, metrics = clustering.cluster(distance_matrix)
         
-        # Report results
-        logging.info(f"Clustering complete:")
-        logging.info(f"  - Clusters: {len(clusters)}")
-        logging.info(f"  - Singletons: {len(singletons)}")
-        if metrics['best_config']:
-            logging.info(f"  - Best gap size: {metrics['best_config']['gap_size']:.4f}")
-            logging.info(f"  - Merge distance: {metrics['best_config']['merge_distance']:.4f}")
+        # Results are already reported by core module, no need to repeat
         
         # Save results
         if args.format == 'fasta':
-            logging.info(f"Saving FASTA files with base path: {args.output}")
+            logging.debug(f"Saving FASTA files with base path: {args.output}")
         else:
-            logging.info(f"Saving results to {args.output}")
+            logging.debug(f"Saving results to {args.output}")
         
         # Need sequences for FASTA format
         sequences_for_output = sequences if args.format == 'fasta' and not args.distance_matrix else None
@@ -246,7 +229,7 @@ Examples:
             with open(args.export_metrics, 'w') as f:
                 json.dump(metrics_json, f, indent=2)
         
-        logging.info("Done!")
+        logging.debug("Done!")
         
     except KeyboardInterrupt:
         logging.info("Interrupted by user")

@@ -9,6 +9,7 @@ from typing import List, Tuple, Optional, Literal
 from Bio import SeqIO
 from Bio.Seq import Seq
 import logging
+from tqdm import tqdm
 
 
 def load_sequences_from_fasta(fasta_path: str) -> Tuple[List[str], List[str]]:
@@ -64,8 +65,18 @@ def calculate_distance_matrix(sequences: List[str],
     # Choose alignment parameters based on method
     if alignment_method == "adjusted":
         params = AdjustmentParams(end_skip_distance=end_skip_distance)
+        logging.info(f"Using adjusted identity with MycoBLAST adjustments (end_skip_distance={end_skip_distance})")
     else:  # traditional
         params = RAW_ADJUSTMENT_PARAMS
+        logging.info("Using traditional BLAST-like identity calculation")
+    
+    # Calculate total number of comparisons for progress bar
+    total_comparisons = (n * (n - 1)) // 2
+    
+    # Create progress bar
+    pbar = tqdm(total=total_comparisons, 
+                desc="Calculating pairwise distances", 
+                unit=" comparisons")
     
     for i in range(n):
         for j in range(i + 1, n):
@@ -78,6 +89,9 @@ def calculate_distance_matrix(sequences: List[str],
             
             distance_matrix[i, j] = dist
             distance_matrix[j, i] = dist
+            pbar.update(1)
+    
+    pbar.close()
     
     return distance_matrix
 
@@ -209,7 +223,7 @@ def save_clusters_to_file(clusters: List[List[int]],
             with open(cluster_file, 'w') as f:
                 SeqIO.write(records, f, "fasta")
             
-            logging.info(f"Wrote {len(records)} sequences to {cluster_file}")
+            logging.debug(f"Wrote {len(records)} sequences to {cluster_file}")
         
         # Write singletons to a separate file
         if singletons:
@@ -227,7 +241,7 @@ def save_clusters_to_file(clusters: List[List[int]],
             with open(singleton_file, 'w') as f:
                 SeqIO.write(records, f, "fasta")
             
-            logging.info(f"Wrote {len(records)} singleton sequences to {singleton_file}")
+            logging.debug(f"Wrote {len(records)} singleton sequences to {singleton_file}")
     
     elif format == "tsv":
         # Tab-separated format: sequence_id<tab>cluster_id

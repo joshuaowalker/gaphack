@@ -9,7 +9,10 @@ genetic distances.
 import logging
 import copy
 from typing import List, Dict, Tuple, Optional, Set
+from itertools import combinations
+from functools import lru_cache
 import numpy as np
+from tqdm import tqdm
 
 
 class GapOptimizedClustering:
@@ -19,6 +22,11 @@ class GapOptimizedClustering:
     This algorithm implements a two-phase clustering approach:
     1. Fast greedy merging below a minimum threshold
     2. Gap-optimized merging with real-time threshold optimization
+    
+    For library usage:
+    - Set show_progress=False to disable progress bars in headless environments
+    - Pass a custom logger to integrate with your application's logging system
+    - Default behavior (show_progress=True, logger=None) is appropriate for CLI usage
     """
     
     def __init__(self, 
@@ -26,7 +34,8 @@ class GapOptimizedClustering:
                  max_threshold: float = 0.02,
                  target_percentile: int = 95,
                  merge_percentile: int = 95,
-                 min_gap_size: float = 0.005):
+                 show_progress: bool = True,
+                 logger: Optional[logging.Logger] = None):
         """
         Initialize the gap-optimized clustering algorithm.
         
@@ -35,13 +44,15 @@ class GapOptimizedClustering:
             max_threshold: Maximum distance for cluster merging (default 2%)
             target_percentile: Which percentile gap to optimize (default 95)
             merge_percentile: Which percentile to use for merge decisions (default 95)
-            min_gap_size: Minimum gap size to consider "sufficient" (default 0.5%)
+            show_progress: If True, show progress bars during clustering (default True)
+            logger: Optional logger instance for output; uses default logging if None
         """
         self.min_threshold = min_threshold
         self.max_threshold = max_threshold
         self.target_percentile = target_percentile
         self.merge_percentile = merge_percentile
-        self.min_gap_size = min_gap_size
+        self.show_progress = show_progress
+        self.logger = logger or logging.getLogger(__name__)
         
     def cluster(self, distance_matrix: np.ndarray) -> Tuple[List[List[int]], List[int], Dict]:
         """
@@ -70,102 +81,99 @@ class GapOptimizedClustering:
             'gap_metrics': None
         }
         
-        # Phase 1: Fast merging below minimum threshold
+        # Combined clustering with single progress bar
         step = 0
+        initial_clusters = len(clusters)
+        gap_history = []
+        
+        # Create single progress bar for entire clustering process (if enabled)
+        pbar = None
+        if self.show_progress:
+            # Total is max possible merges (down to 1 cluster)
+            pbar = tqdm(total=initial_clusters - 1, 
+                       desc="Clustering", 
+                       unit=" merges")
+        
+        # Phase 1: Fast merging below minimum threshold
         while len(clusters) > 1:
             min_distance, merge_i, merge_j = self._find_next_merge_candidate(
                 clusters, distance_matrix, self.merge_percentile
             )
             
             if min_distance >= self.min_threshold:
-                logging.debug(f"Gap-optimized clustering: Reached minimum threshold at step {step}")
+                self.logger.debug(f"Gap-optimized clustering: Reached minimum threshold at step {step}")
                 break
             
             # Merge without gap checking (assumed intraspecific)
             clusters = self._perform_cluster_merge(clusters, merge_i, merge_j)
             step += 1
+            if pbar:
+                pbar.update(1)
+                pbar.set_postfix({"phase": "fast", "clusters": len(clusters), "dist": f"{min_distance:.4f}"})
         
         # Phase 2: Gap-aware merging between thresholds
-        gap_history = []
         
         while len(clusters) > 1:
-            min_distance, merge_i, merge_j = self._find_next_merge_candidate(
-                clusters, distance_matrix, self.merge_percentile
+            # Find best merge candidate using gap heuristic
+            best_gap, best_merge_i, best_merge_j, best_merge_distance = self._find_best_gap_merge(
+                clusters, distance_matrix
             )
             
-            # Stop if exceeding maximum threshold
-            if min_distance > self.max_threshold:
-                logging.info(f"Gap optimization stopped at max threshold: {min_distance:.4f} > {self.max_threshold}")
+            # Stop if no valid merges (all exceed max threshold)
+            if best_merge_i == -1:
                 break
             
-            # Tentatively merge
-            new_clusters = self._perform_cluster_merge(copy.deepcopy(clusters), merge_i, merge_j)
+            # Perform the merge that produces the best gap
+            clusters = self._perform_cluster_merge(clusters, best_merge_i, best_merge_j)
             
-            # Calculate gap metrics for new configuration
+            # Calculate gap metrics for this configuration
             gap_metrics = self._calculate_gap_for_clustering(
-                new_clusters, distance_matrix, self.target_percentile
+                clusters, distance_matrix, self.target_percentile
             )
             
+            current_gap = gap_metrics[f'p{self.target_percentile}']['gap_size']
+            
             gap_history.append({
-                'num_clusters': len(new_clusters),
-                'merge_distance': float(min_distance),
-                'gap_size': float(gap_metrics[f'p{self.target_percentile}']['gap_size']),
+                'num_clusters': len(clusters),
+                'merge_distance': float(best_merge_distance),
+                'gap_size': float(current_gap),
                 'gap_exists': bool(gap_metrics[f'p{self.target_percentile}']['gap_exists'])
             })
             
-            # Update best configuration if gap improved
-            current_gap = gap_metrics[f'p{self.target_percentile}']['gap_size']
+            # Track best configuration encountered so far
             if current_gap > best_config['gap_size']:
                 best_config = {
-                    'clusters': copy.deepcopy(new_clusters),
+                    'clusters': copy.deepcopy(clusters),
                     'gap_size': float(current_gap),
-                    'merge_distance': float(min_distance),
+                    'merge_distance': float(best_merge_distance),
                     'gap_percentile': self.target_percentile,
                     'gap_metrics': gap_metrics
                 }
-                
-                # Early termination if sufficient gap achieved
-                if current_gap >= self.min_gap_size:
-                    logging.info(f"Sufficient gap found: {current_gap:.4f} at distance {min_distance:.4f}")
-                    # Look ahead to see if gap improves further
-                    lookahead_improved = False
-                    lookahead_clusters = copy.deepcopy(new_clusters)
-                    
-                    for lookahead_step in range(2):  # Look ahead 2 merges
-                        next_dist, next_i, next_j = self._find_next_merge_candidate(
-                            lookahead_clusters, distance_matrix, self.merge_percentile
-                        )
-                        if next_dist > self.max_threshold:
-                            break
-                        lookahead_clusters = self._perform_cluster_merge(lookahead_clusters, next_i, next_j)
-                        lookahead_gap = self._calculate_gap_for_clustering(
-                            lookahead_clusters, distance_matrix, self.target_percentile
-                        )
-                        if lookahead_gap[f'p{self.target_percentile}']['gap_size'] > current_gap * 1.1:  # 10% improvement
-                            lookahead_improved = True
-                            break
-                    
-                    if not lookahead_improved:
-                        # Gap won't improve significantly, stop here
-                        logging.info(f"Gap optimization complete: No significant improvement expected")
-                        break
+                self.logger.debug(f"New best gap found: {current_gap:.4f} with {len(clusters)} clusters")
             
-            # Check for gap degradation
-            if len(gap_history) > 1:
-                prev_gap = gap_history[-2]['gap_size']
-                if current_gap < prev_gap * 0.8:  # 20% degradation
-                    logging.warning(f"Gap degraded from {prev_gap:.4f} to {current_gap:.4f}")
-                    # Consider stopping if we had a good gap before
-                    if prev_gap >= self.min_gap_size * 0.7:
-                        logging.info("Reverting to previous configuration with better gap")
-                        break  # Use best_config which has the better gap
-            
-            clusters = new_clusters
             step += 1
+            
+            # Update progress bar
+            if pbar:
+                pbar.update(1)
+                pbar.set_postfix({"phase": "gap-aware", 
+                                "clusters": len(clusters), 
+                                "gap": f"{current_gap:.4f}",
+                                "best": f"{best_config['gap_size']:.4f}"})
+        
+        # Close progress bar and report results
+        if pbar:
+            pbar.close()
+            
+        # Report why clustering stopped
+        if len(clusters) > 1:
+            self.logger.info(f"Gap optimization stopped: no more valid merges within max threshold")
+        else:
+            self.logger.debug(f"Gap optimization complete: merged down to single cluster")
         
         # If no gap was ever calculated, use current clustering state
         if best_config['gap_size'] == -1:
-            logging.warning(f"Gap optimization found no gaps within thresholds. Using current clustering state with {len(clusters)} clusters.")
+            self.logger.warning(f"Gap optimization found no gaps within thresholds. Using current clustering state with {len(clusters)} clusters.")
             best_config['clusters'] = clusters
             best_config['merge_distance'] = self.max_threshold
             # Try to calculate a gap for the current configuration
@@ -177,10 +185,10 @@ class GapOptimizedClustering:
                     best_config['gap_size'] = gap_metrics[f'p{self.target_percentile}']['gap_size']
                     best_config['gap_metrics'] = gap_metrics
                 except Exception as e:
-                    logging.warning(f"Could not calculate gap metrics for final configuration: {e}")
+                    self.logger.warning(f"Could not calculate gap metrics for final configuration: {e}")
                     best_config['gap_size'] = 0.0
         
-        # Convert best configuration to required format
+        # Convert best configuration to required format, sorted by cluster size
         final_clusters = []
         singletons_set = set()
         
@@ -190,10 +198,24 @@ class GapOptimizedClustering:
             else:
                 singletons_set.update(cluster_set)
         
+        # Sort clusters by size (largest first) for consistent output ordering
+        final_clusters.sort(key=len, reverse=True)
         singletons = list(singletons_set)
         
-        logging.info(f"Gap optimization complete. Best gap: {best_config['gap_size']:.4f} "
-                    f"at distance {best_config['merge_distance']:.4f} with {len(final_clusters)} clusters")
+        # Report gap components from the best configuration
+        if best_config['gap_metrics']:
+            target_metrics = best_config['gap_metrics'][f'p{self.target_percentile}']
+            self.logger.info(f"Gap optimization complete. Best gap: {best_config['gap_size']:.4f} "
+                        f"(intra≤{target_metrics['intra_upper']:.4f}, inter≥{target_metrics['inter_lower']:.4f})")
+        else:
+            self.logger.info(f"Gap optimization complete. Best gap: {best_config['gap_size']:.4f}")
+        
+        # Report cluster size summary
+        if final_clusters:
+            cluster_sizes = [len(cluster) for cluster in final_clusters]
+            self.logger.info(f"{len(final_clusters)} clusters {cluster_sizes} and {len(singletons)} singletons")
+        elif singletons:
+            self.logger.info(f"No clusters formed, {len(singletons)} singletons")
         
         # Convert sets to lists for JSON serialization
         json_safe_config = {
@@ -300,6 +322,84 @@ class GapOptimizedClustering:
         clusters.append(new_cluster)
         
         return clusters
+    
+    def _find_best_gap_merge(self, clusters: List[Set[int]], 
+                           distance_matrix: np.ndarray) -> Tuple[float, int, int, float]:
+        """
+        Find the merge that produces the best gap using gap-based heuristic.
+        
+        Args:
+            clusters: List of cluster sets
+            distance_matrix: Pairwise distance matrix
+            
+        Returns:
+            Tuple of (best_gap, merge_i, merge_j, merge_distance)
+            Returns (-1, -1, -1, -1) if no valid merges exist
+        """
+        best_gap = float('-inf')
+        best_merge_i, best_merge_j = -1, -1
+        best_merge_distance = -1.0
+        
+        # Cache for percentile distances within clusters to avoid recomputation
+        percentile_distance_cache = {}
+        
+        def get_percentile_cluster_distance(cluster: Set[int]) -> float:
+            """Get percentile pairwise distance within a cluster (cached)."""
+            cluster_key = frozenset(cluster)
+            if cluster_key not in percentile_distance_cache:
+                if len(cluster) == 1:
+                    percentile_distance_cache[cluster_key] = 0.0
+                else:
+                    cluster_list = list(cluster)
+                    distances = []
+                    for i in range(len(cluster_list)):
+                        for j in range(i + 1, len(cluster_list)):
+                            distances.append(distance_matrix[cluster_list[i], cluster_list[j]])
+                    
+                    if distances:
+                        distances.sort()
+                        percentile_idx = int(len(distances) * (self.merge_percentile / 100.0))
+                        if percentile_idx >= len(distances):
+                            percentile_idx = len(distances) - 1
+                        percentile_distance_cache[cluster_key] = distances[percentile_idx]
+                    else:
+                        percentile_distance_cache[cluster_key] = 0.0
+            return percentile_distance_cache[cluster_key]
+        
+        # Try all possible merges
+        n_clusters = len(clusters)
+        for i in range(n_clusters):
+            for j in range(i + 1, n_clusters):
+                # Check if merge would exceed max threshold
+                merged_cluster = clusters[i] | clusters[j]
+                merge_distance = get_percentile_cluster_distance(merged_cluster)
+                
+                if merge_distance > self.max_threshold:
+                    continue
+                
+                # Create new partition with this merge
+                new_clusters = [merged_cluster] + [clusters[k] 
+                                                 for k in range(n_clusters) 
+                                                 if k != i and k != j]
+                
+                # Calculate gap for this partition
+                try:
+                    gap_metrics = self._calculate_gap_for_clustering(
+                        new_clusters, distance_matrix, self.target_percentile
+                    )
+                    gap = gap_metrics[f'p{self.target_percentile}']['gap_size']
+                    
+                    # Update best if this gap is better
+                    if gap > best_gap:
+                        best_gap = gap
+                        best_merge_i, best_merge_j = i, j
+                        best_merge_distance = merge_distance
+                        
+                except Exception:
+                    # If gap calculation fails, skip this merge
+                    continue
+        
+        return best_gap, best_merge_i, best_merge_j, best_merge_distance
     
     def _calculate_gap_for_clustering(self, clusters: List[Set[int]], 
                                      distance_matrix: np.ndarray,
@@ -413,3 +513,4 @@ class GapOptimizedClustering:
             'intra_upper': float(intra_upper),
             'inter_lower': float(inter_lower)
         }
+    

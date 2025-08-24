@@ -30,6 +30,7 @@ dependencies = [
     "numpy>=1.20.0",
     "biopython>=1.79",
     "adjusted-identity @ git+https://github.com/joshuaowalker/adjusted-identity.git",
+    "tqdm>=4.65.0",
 ]
 
 [project.optional-dependencies]
