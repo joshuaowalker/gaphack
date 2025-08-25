@@ -6,8 +6,8 @@ A Python package for DNA barcode clustering that optimizes for the barcode gap b
 
 gapHACk implements a two-phase clustering algorithm designed specifically for DNA barcoding applications:
 
-1. **Phase 1**: Fast greedy merging below a minimum threshold (default 0.5% distance)
-2. **Phase 2**: Gap-aware merging using gap-based heuristic to find optimal clustering
+1. **Phase 1**: Fast greedy lumping below the min-split threshold (default 0.5% distance)  
+2. **Phase 2**: Gap-aware optimization using gap-based heuristic to find optimal clustering
 
 The algorithm focuses on maximizing the "barcode gap" - the separation between intra-species and inter-species distances at a specified percentile (default P95) to handle outliers robustly.
 
@@ -81,8 +81,8 @@ With custom parameters:
 ```bash
 # With adjusted identity (recommended, default)
 gaphack input.fasta \
-    --min-threshold 0.003 \
-    --max-threshold 0.03 \
+    --min-split 0.003 \
+    --max-lump 0.03 \
     --target-percentile 90 \
     --alignment-method adjusted \
     --end-skip-distance 20 \
@@ -93,6 +93,31 @@ gaphack input.fasta \
 gaphack input.fasta \
     --alignment-method traditional \
     -o traditional_clusters
+```
+
+#### Controlling Adjusted Identity Parameters
+
+gapHACk provides fine-grained control over the adjusted identity algorithm:
+
+```bash
+# Disable specific adjustments (all enabled by default)
+gaphack input.fasta \
+    --no-homopolymer-normalization \
+    --no-iupac-overlap \
+    --no-indel-normalization
+
+# Control repeat motif detection
+gaphack input.fasta \
+    --max-repeat-motif-length 1  # Only homopolymers
+gaphack input.fasta \
+    --max-repeat-motif-length 3  # Up to trinucleotides
+
+# Combine different settings for experimentation
+gaphack input.fasta \
+    --no-homopolymer-normalization \
+    --end-skip-distance 10 \
+    --max-repeat-motif-length 1 \
+    --export-metrics experiment.json
 ```
 
 ### Python API
@@ -115,10 +140,9 @@ distance_matrix = calculate_distance_matrix(
 
 # Initialize clustering with custom parameters
 clustering = GapOptimizedClustering(
-    min_threshold=0.005,     # 0.5% minimum distance for gap-aware phase
-    max_threshold=0.02,      # 2% maximum distance for merging
-    target_percentile=95,    # Optimize P95 gap
-    merge_percentile=95,     # Use P95 for merge decisions
+    min_split=0.005,         # 0.5% minimum distance to split clusters
+    max_lump=0.02,           # 2% maximum distance to lump clusters  
+    target_percentile=95,    # Use P95 for gap optimization and linkage decisions
     show_progress=True,      # Show progress bar (default True)
     logger=None              # Use default logger (default None)
 )
@@ -232,10 +256,25 @@ This approach is useful for:
 
 ### Algorithm Parameters
 
-- `min_threshold` (default: 0.005): Minimum distance for gap optimization. Below this, all merges are assumed to be intraspecific variation.
-- `max_threshold` (default: 0.02): Maximum distance for cluster merging. Beyond this, clusters are assumed to represent distinct species.
-- `target_percentile` (default: 95): Which percentile gap to optimize (P95 provides robustness against outliers).
-- `merge_percentile` (default: 95): Which percentile to use for merge decisions (higher = more conservative).
+- `min_split` (default: 0.005): Minimum distance to split clusters. Sequences closer than this are lumped together (assumed intraspecific).
+- `max_lump` (default: 0.02): Maximum distance to lump clusters. Sequences farther than this are kept split (assumed interspecific).
+- `target_percentile` (default: 95): Which percentile to use for gap optimization and linkage decisions (P95 provides robustness against outliers).
+
+### Adjusted Identity Parameters
+
+These parameters control the adjusted identity algorithm when `--alignment-method adjusted` is used (default):
+
+- `end_skip_distance` (default: 20): Number of nucleotides to skip from each sequence end to avoid primer/editing artifacts
+- `normalize_homopolymers` (default: enabled): Ignore homopolymer length differences (e.g., "AAA" vs "AAAA")
+- `handle_iupac_overlap` (default: enabled): Allow IUPAC ambiguity codes to match via nucleotide intersection (e.g., R matches A or G)
+- `normalize_indels` (default: enabled): Count contiguous indels as single evolutionary events rather than per-base penalties
+- `max_repeat_motif_length` (default: 2): Maximum length of repeat motifs to detect (1=homopolymers, 2=dinucleotides, etc.)
+
+**CLI Flags to Disable Defaults:**
+- `--no-homopolymer-normalization`: Disable homopolymer normalization
+- `--no-iupac-overlap`: Disable IUPAC overlap matching
+- `--no-indel-normalization`: Disable indel normalization
+- `--max-repeat-motif-length N`: Set motif length (use 1 to detect only homopolymers)
 
 ### Output Formats
 
@@ -293,13 +332,11 @@ Between `min_threshold` and `max_threshold` (default: 0.02 or 2%):
 
 ### Parameter Roles
 
-- **`min_threshold`**: Defines the boundary between Phase 1 (fast merging) and Phase 2 (gap optimization). Sequences closer than this are assumed to represent intraspecific variation.
+- **`min_split`**: Defines the boundary between Phase 1 (fast lumping) and Phase 2 (gap optimization). Sequences closer than this are assumed to represent intraspecific variation and are lumped together.
 
-- **`max_threshold`**: Upper limit for cluster merging. Distances beyond this are assumed to represent interspecific divergence and will not be merged.
+- **`max_lump`**: Upper limit for cluster lumping. Distances beyond this are assumed to represent interspecific divergence and clusters are kept split.
 
-- **`target_percentile`**: Which percentile gap to optimize (e.g., 95 = P95 gap). Higher percentiles are more robust to outliers but may be less sensitive to true gaps.
-
-- **`merge_percentile`**: Which percentile of inter-cluster distances to use for merge decisions. Higher values (more conservative) reduce the risk of merging distinct species.
+- **`target_percentile`**: Which percentile to use for gap optimization and linkage decisions (e.g., 95 = P95 gap). Higher percentiles are more robust to outliers but may be less sensitive to true gaps.
 
 ## Related Work
 

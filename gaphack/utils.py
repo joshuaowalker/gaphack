@@ -39,7 +39,11 @@ def load_sequences_from_fasta(fasta_path: str) -> Tuple[List[str], List[str]]:
 
 def calculate_distance_matrix(sequences: List[str], 
                             alignment_method: Literal["adjusted", "traditional"] = "adjusted",
-                            end_skip_distance: int = 20) -> np.ndarray:
+                            end_skip_distance: int = 20,
+                            normalize_homopolymers: bool = True,
+                            handle_iupac_overlap: bool = True,
+                            normalize_indels: bool = True,
+                            max_repeat_motif_length: int = 2) -> np.ndarray:
     """
     Calculate pairwise distance matrix for sequences using adjusted-identity.
     
@@ -47,6 +51,10 @@ def calculate_distance_matrix(sequences: List[str],
         sequences: List of DNA sequences as strings
         alignment_method: Either "adjusted" (with MycoBLAST adjustments) or "traditional" (raw BLAST-like)
         end_skip_distance: Distance from sequence ends to skip in alignment (for adjusted method)
+        normalize_homopolymers: Whether to ignore homopolymer length differences (for adjusted method)
+        handle_iupac_overlap: Whether to allow IUPAC ambiguity codes to match via intersection (for adjusted method)
+        normalize_indels: Whether to count contiguous indels as single events (for adjusted method)
+        max_repeat_motif_length: Maximum length of repeat motifs to detect (for adjusted method)
         
     Returns:
         Numpy array of pairwise distances (n x n)
@@ -64,8 +72,20 @@ def calculate_distance_matrix(sequences: List[str],
     
     # Choose alignment parameters based on method
     if alignment_method == "adjusted":
-        params = AdjustmentParams(end_skip_distance=end_skip_distance)
-        logging.info(f"Using adjusted identity with MycoBLAST adjustments (end_skip_distance={end_skip_distance})")
+        params = AdjustmentParams(
+            end_skip_distance=end_skip_distance,
+            normalize_homopolymers=normalize_homopolymers,
+            handle_iupac_overlap=handle_iupac_overlap,
+            normalize_indels=normalize_indels,
+            max_repeat_motif_length=max_repeat_motif_length
+        )
+        adjustments = []
+        if normalize_homopolymers: adjustments.append("homopolymer_norm")
+        if handle_iupac_overlap: adjustments.append("iupac_overlap")
+        if normalize_indels: adjustments.append("indel_norm")
+        adjustments_str = f"({', '.join(adjustments)})" if adjustments else "(no adjustments)"
+        logging.info(f"Using adjusted identity with MycoBLAST adjustments {adjustments_str}, "
+                    f"end_skip_distance={end_skip_distance}, max_repeat_motif_length={max_repeat_motif_length}")
     else:  # traditional
         params = RAW_ADJUSTMENT_PARAMS
         logging.info("Using traditional BLAST-like identity calculation")
@@ -96,35 +116,6 @@ def calculate_distance_matrix(sequences: List[str],
     return distance_matrix
 
 
-def calculate_similarity_matrix(sequences: List[str], 
-                               alignment_method: Literal["adjusted", "traditional"] = "adjusted",
-                               end_skip_distance: int = 20) -> np.ndarray:
-    """
-    Calculate pairwise similarity matrix for sequences.
-    
-    Args:
-        sequences: List of DNA sequences as strings
-        alignment_method: Either "adjusted" (with MycoBLAST adjustments) or "traditional" (raw BLAST-like)
-        end_skip_distance: Distance from sequence ends to skip in alignment (for adjusted method)
-        
-    Returns:
-        Numpy array of pairwise similarities (n x n)
-    """
-    distance_matrix = calculate_distance_matrix(sequences, alignment_method, end_skip_distance)
-    return 1.0 - distance_matrix
-
-
-def similarity_to_distance(similarity_matrix: np.ndarray) -> np.ndarray:
-    """
-    Convert a similarity matrix to a distance matrix.
-    
-    Args:
-        similarity_matrix: Matrix of similarity scores (0-1, where 1 is identical)
-        
-    Returns:
-        Distance matrix (0-1, where 0 is identical)
-    """
-    return 1.0 - similarity_matrix
 
 
 def format_cluster_output(clusters: List[List[int]], 

@@ -38,8 +38,10 @@ Examples:
   gaphack input.fasta                          # Creates input.cluster_001.fasta, etc.
   gaphack input.fasta -o output_base           # Creates output_base.cluster_001.fasta, etc.
   gaphack input.fasta --format tsv -o results.tsv
-  gaphack input.fasta --min-threshold 0.003 --max-threshold 0.03
+  gaphack input.fasta --min-split 0.003 --max-lump 0.03
   gaphack input.fasta --export-metrics gap_analysis.json -v
+  gaphack input.fasta --no-homopolymer-normalization --no-indel-normalization
+  gaphack input.fasta --alignment-method traditional
         """
     )
     
@@ -63,16 +65,16 @@ Examples:
     
     # Algorithm parameters
     parser.add_argument(
-        '--min-threshold',
+        '--min-split',
         type=float,
         default=0.005,
-        help='Minimum distance threshold for gap optimization (default: 0.005)'
+        help='Minimum distance to split clusters (sequences closer than this are lumped together, default: 0.005)'
     )
     parser.add_argument(
-        '--max-threshold',
+        '--max-lump',
         type=float,
         default=0.02,
-        help='Maximum distance threshold for clustering (default: 0.02)'
+        help='Maximum distance to lump clusters (sequences farther than this are kept split, default: 0.02)'
     )
     parser.add_argument(
         '--target-percentile',
@@ -81,14 +83,6 @@ Examples:
         choices=range(50, 101),
         metavar='[50-100]',
         help='Percentile gap to optimize (default: 95)'
-    )
-    parser.add_argument(
-        '--merge-percentile',
-        type=int,
-        default=95,
-        choices=range(50, 101),
-        metavar='[50-100]',
-        help='Percentile for merge decisions (default: 95)'
     )
     
     # Alignment strategy options
@@ -103,6 +97,27 @@ Examples:
         type=int,
         default=20,
         help='Distance from sequence ends to skip in alignment (for adjusted method, default: 20)'
+    )
+    parser.add_argument(
+        '--no-homopolymer-normalization',
+        action='store_true',
+        help='Disable normalization of homopolymer length differences (default: enabled)'
+    )
+    parser.add_argument(
+        '--no-iupac-overlap',
+        action='store_true',
+        help='Disable IUPAC ambiguity code overlap matching (default: enabled)'
+    )
+    parser.add_argument(
+        '--no-indel-normalization',
+        action='store_true',
+        help='Disable normalization of contiguous indels as single events (default: enabled)'
+    )
+    parser.add_argument(
+        '--max-repeat-motif-length',
+        type=int,
+        default=2,
+        help='Maximum length of repeat motifs to detect (1=homopolymers only, 2=dinucleotides, etc., default: 2)'
     )
     
     # Additional options
@@ -170,16 +185,19 @@ Examples:
             distance_matrix = calculate_distance_matrix(
                 sequences, 
                 alignment_method=args.alignment_method,
-                end_skip_distance=args.end_skip_distance
+                end_skip_distance=args.end_skip_distance,
+                normalize_homopolymers=not args.no_homopolymer_normalization,
+                handle_iupac_overlap=not args.no_iupac_overlap,
+                normalize_indels=not args.no_indel_normalization,
+                max_repeat_motif_length=args.max_repeat_motif_length
             )
             logging.info("Distance calculation complete")
         
         # Initialize clustering algorithm
         clustering = GapOptimizedClustering(
-            min_threshold=args.min_threshold,
-            max_threshold=args.max_threshold,
+            min_split=args.min_split,
+            max_lump=args.max_lump,
             target_percentile=args.target_percentile,
-            merge_percentile=args.merge_percentile,
         )
         
         # Perform clustering

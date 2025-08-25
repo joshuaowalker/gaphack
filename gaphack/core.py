@@ -30,27 +30,24 @@ class GapOptimizedClustering:
     """
     
     def __init__(self, 
-                 min_threshold: float = 0.005,
-                 max_threshold: float = 0.02,
+                 min_split: float = 0.005,
+                 max_lump: float = 0.02,
                  target_percentile: int = 95,
-                 merge_percentile: int = 95,
                  show_progress: bool = True,
                  logger: Optional[logging.Logger] = None):
         """
         Initialize the gap-optimized clustering algorithm.
         
         Args:
-            min_threshold: Minimum distance for gap optimization (default 0.5%)
-            max_threshold: Maximum distance for cluster merging (default 2%)
-            target_percentile: Which percentile gap to optimize (default 95)
-            merge_percentile: Which percentile to use for merge decisions (default 95)
+            min_split: Minimum distance to split clusters - sequences closer are lumped together (default 0.5%)
+            max_lump: Maximum distance to lump clusters - sequences farther are kept split (default 2%)
+            target_percentile: Which percentile to use for gap optimization and linkage decisions (default 95)
             show_progress: If True, show progress bars during clustering (default True)
             logger: Optional logger instance for output; uses default logging if None
         """
-        self.min_threshold = min_threshold
-        self.max_threshold = max_threshold
+        self.min_split = min_split
+        self.max_lump = max_lump
         self.target_percentile = target_percentile
-        self.merge_percentile = merge_percentile
         self.show_progress = show_progress
         self.logger = logger or logging.getLogger(__name__)
         
@@ -97,10 +94,10 @@ class GapOptimizedClustering:
         # Phase 1: Fast merging below minimum threshold
         while len(clusters) > 1:
             min_distance, merge_i, merge_j = self._find_next_merge_candidate(
-                clusters, distance_matrix, self.merge_percentile
+                clusters, distance_matrix, self.target_percentile
             )
             
-            if min_distance >= self.min_threshold:
+            if min_distance >= self.min_split:
                 self.logger.debug(f"Gap-optimized clustering: Reached minimum threshold at step {step}")
                 break
             
@@ -167,7 +164,7 @@ class GapOptimizedClustering:
             
         # Report why clustering stopped
         if len(clusters) > 1:
-            self.logger.info(f"Gap optimization stopped: no more valid merges within max threshold")
+            self.logger.info(f"Gap optimization stopped: no more valid merges within max lump threshold")
         else:
             self.logger.debug(f"Gap optimization complete: merged down to single cluster")
         
@@ -175,7 +172,7 @@ class GapOptimizedClustering:
         if best_config['gap_size'] == -1:
             self.logger.warning(f"Gap optimization found no gaps within thresholds. Using current clustering state with {len(clusters)} clusters.")
             best_config['clusters'] = clusters
-            best_config['merge_distance'] = self.max_threshold
+            best_config['merge_distance'] = self.max_lump
             # Try to calculate a gap for the current configuration
             if len(clusters) > 1:
                 try:
@@ -358,7 +355,7 @@ class GapOptimizedClustering:
                     
                     if distances:
                         distances.sort()
-                        percentile_idx = int(len(distances) * (self.merge_percentile / 100.0))
+                        percentile_idx = int(len(distances) * (self.target_percentile / 100.0))
                         if percentile_idx >= len(distances):
                             percentile_idx = len(distances) - 1
                         percentile_distance_cache[cluster_key] = distances[percentile_idx]
@@ -374,7 +371,7 @@ class GapOptimizedClustering:
                 merged_cluster = clusters[i] | clusters[j]
                 merge_distance = get_percentile_cluster_distance(merged_cluster)
                 
-                if merge_distance > self.max_threshold:
+                if merge_distance > self.max_lump:
                     continue
                 
                 # Create new partition with this merge
