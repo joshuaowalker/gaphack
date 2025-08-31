@@ -201,7 +201,7 @@ Examples:
         )
         
         # Perform clustering
-        logging.info("Running gap-optimized clustering...")
+        logging.info("Running clustering...")
         clusters, singletons, metrics = clustering.cluster(distance_matrix)
         
         # Results are already reported by core module, no need to repeat
