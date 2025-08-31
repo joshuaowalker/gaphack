@@ -107,14 +107,81 @@ class GapOptimizedClustering:
             if pbar:
                 pbar.update(1)
                 pbar.set_postfix({"phase": "fast", "clusters": len(clusters), "dist": f"{min_distance:.4f}"})
+
+        if pbar:
+            pbar.close()
+
+        # Cache for both intra-cluster and inter-cluster distances
+        class DistanceCache:
+            def __init__(self):
+                self.intra_cache = {}  # frozenset(cluster) -> sorted list of distances
+                self.inter_cache = {}  # frozenset([cluster1_key, cluster2_key]) -> sorted list of distances
+            
+            def get_intra_distances(self, cluster: Set[int]) -> List[float]:
+                """Get sorted intra-cluster distances."""
+                cluster_key = frozenset(cluster)
+                if cluster_key not in self.intra_cache:
+                    if len(cluster) <= 1:
+                        self.intra_cache[cluster_key] = []
+                    else:
+                        cluster_list = list(cluster)
+                        distances = []
+                        for i in range(len(cluster_list)):
+                            for j in range(i + 1, len(cluster_list)):
+                                distances.append(distance_matrix[cluster_list[i], cluster_list[j]])
+                        distances.sort()
+                        self.intra_cache[cluster_key] = distances
+                return self.intra_cache[cluster_key]
+            
+            def get_inter_distances(self, cluster1: Set[int], cluster2: Set[int]) -> List[float]:
+                """Get sorted inter-cluster distances."""
+                # Create a canonical key that's independent of parameter order
+                cluster1_key = frozenset(cluster1)
+                cluster2_key = frozenset(cluster2)
+                pair_key = frozenset([cluster1_key, cluster2_key])
+                
+                if pair_key not in self.inter_cache:
+                    distances = []
+                    for i in cluster1:
+                        for j in cluster2:
+                            distances.append(distance_matrix[i, j])
+                    distances.sort()
+                    self.inter_cache[pair_key] = distances
+                return self.inter_cache[pair_key]
         
+        cache = DistanceCache()
+
+
+        gap_metrics = self._calculate_gap_for_clustering(
+            clusters, distance_matrix, cache, self.target_percentile
+        )
+
+        current_gap = gap_metrics[f'p{self.target_percentile}']['gap_size']
+
         # Phase 2: Gap-aware merging between thresholds
-        
+        n = len(clusters)
+        expected_pairs = int(n*(n-1)*(n+1)/6)
+        if self.show_progress:
+            pbar = tqdm(total=expected_pairs,
+                       desc="Clustering",
+                       unit="steps")
+            pbar.set_postfix({"phase": "gap-aware",
+                              "clusters": len(clusters),
+                              "gap": f"{current_gap:.4f}",
+                              "best": f"{best_config['gap_size']:.4f}"})
+
+
         while len(clusters) > 1:
+            if pbar:
+                pbar.set_postfix({"phase": "gap-aware",
+                                "clusters": len(clusters),
+                                "gap": f"{current_gap:.4f}",
+                                "best": f"{best_config['gap_size']:.4f}"})
+
             # Find best merge candidate using gap heuristic
-            best_gap, best_merge_i, best_merge_j, best_merge_distance = self._find_best_gap_merge(
-                clusters, distance_matrix
-            )
+            best_gap, best_merge_i, best_merge_j, best_merge_distance = self._find_best_gap_merge(clusters,
+                                                                                                  distance_matrix, pbar,
+                                                                                                  cache)
             
             # Stop if no valid merges (all exceed max threshold)
             if best_merge_i == -1:
@@ -125,7 +192,7 @@ class GapOptimizedClustering:
             
             # Calculate gap metrics for this configuration
             gap_metrics = self._calculate_gap_for_clustering(
-                clusters, distance_matrix, self.target_percentile
+                clusters, distance_matrix, cache, self.target_percentile
             )
             
             current_gap = gap_metrics[f'p{self.target_percentile}']['gap_size']
@@ -149,15 +216,7 @@ class GapOptimizedClustering:
                 self.logger.debug(f"New best gap found: {current_gap:.4f} with {len(clusters)} clusters")
             
             step += 1
-            
-            # Update progress bar
-            if pbar:
-                pbar.update(1)
-                pbar.set_postfix({"phase": "gap-aware", 
-                                "clusters": len(clusters), 
-                                "gap": f"{current_gap:.4f}",
-                                "best": f"{best_config['gap_size']:.4f}"})
-        
+
         # Close progress bar and report results
         if pbar:
             pbar.close()
@@ -177,7 +236,7 @@ class GapOptimizedClustering:
             if len(clusters) > 1:
                 try:
                     gap_metrics = self._calculate_gap_for_clustering(
-                        clusters, distance_matrix, self.target_percentile
+                        clusters, distance_matrix, cache, self.target_percentile
                     )
                     best_config['gap_size'] = gap_metrics[f'p{self.target_percentile}']['gap_size']
                     best_config['gap_metrics'] = gap_metrics
@@ -320,8 +379,8 @@ class GapOptimizedClustering:
         
         return clusters
     
-    def _find_best_gap_merge(self, clusters: List[Set[int]], 
-                           distance_matrix: np.ndarray) -> Tuple[float, int, int, float]:
+    def _find_best_gap_merge(self, clusters: List[Set[int]], distance_matrix: np.ndarray, pbar,
+                             cache) -> Tuple[float, int, int, float]:
         """
         Find the merge that produces the best gap using gap-based heuristic.
         
@@ -336,55 +395,92 @@ class GapOptimizedClustering:
         best_gap = float('-inf')
         best_merge_i, best_merge_j = -1, -1
         best_merge_distance = -1.0
-        
-        # Cache for percentile distances within clusters to avoid recomputation
-        percentile_distance_cache = {}
-        
-        def get_percentile_cluster_distance(cluster: Set[int]) -> float:
-            """Get percentile pairwise distance within a cluster (cached)."""
-            cluster_key = frozenset(cluster)
-            if cluster_key not in percentile_distance_cache:
-                if len(cluster) == 1:
-                    percentile_distance_cache[cluster_key] = 0.0
+
+        def test_percentile_cluster_distance(cluster1: Set[int], cluster2: Set[int]) -> float:
+            """Get percentile distance for merged cluster without materializing the merged cluster."""
+            # Get sorted distances from cache
+            distances1 = cache.get_intra_distances(cluster1)
+            distances2 = cache.get_intra_distances(cluster2)
+            inter_distances = cache.get_inter_distances(cluster1, cluster2)
+            
+            # Calculate target percentile index for the merged list
+            total_distances = len(distances1) + len(distances2) + len(inter_distances)
+            if total_distances == 0:
+                return 0.0
+                
+            percentile_idx = int(total_distances * (self.target_percentile / 100.0))
+            if percentile_idx >= total_distances:
+                percentile_idx = total_distances - 1
+            
+            # Walk the three sorted lists in parallel until we reach the percentile index
+            i1 = i2 = i_inter = 0
+            current_idx = 0
+            
+            while current_idx <= percentile_idx:
+                candidates = []
+                if i1 < len(distances1):
+                    candidates.append((distances1[i1], 1))
+                if i2 < len(distances2):
+                    candidates.append((distances2[i2], 2))
+                if i_inter < len(inter_distances):
+                    candidates.append((inter_distances[i_inter], 3))
+                
+                # Find minimum
+                min_val, source = min(candidates)
+                
+                # If we've reached the target index, return this value
+                if current_idx == percentile_idx:
+                    return min_val
+                
+                # Advance the appropriate pointer
+                if source == 1:
+                    i1 += 1
+                elif source == 2:
+                    i2 += 1
                 else:
-                    cluster_list = list(cluster)
-                    distances = []
-                    for i in range(len(cluster_list)):
-                        for j in range(i + 1, len(cluster_list)):
-                            distances.append(distance_matrix[cluster_list[i], cluster_list[j]])
-                    
-                    if distances:
-                        distances.sort()
-                        percentile_idx = int(len(distances) * (self.target_percentile / 100.0))
-                        if percentile_idx >= len(distances):
-                            percentile_idx = len(distances) - 1
-                        percentile_distance_cache[cluster_key] = distances[percentile_idx]
-                    else:
-                        percentile_distance_cache[cluster_key] = 0.0
-            return percentile_distance_cache[cluster_key]
-        
+                    i_inter += 1
+                
+                current_idx += 1
+            
+            # Should never reach here, but fallback
+            return 0.0
+
         # Try all possible merges
         n_clusters = len(clusters)
+        
+        # Precompute base intra-cluster distances (same for all merge candidates)
+        base_intra_distances = []
+        for cluster in clusters:
+            if len(cluster) > 1:
+                cluster_distances = cache.get_intra_distances(cluster)
+                if cluster_distances:
+                    base_intra_distances.extend(cluster_distances)
+        
+        # Precompute base inter-cluster distances (same for all merge candidates)
+        base_inter_distances = []
+        for k1 in range(n_clusters):
+            for k2 in range(k1 + 1, n_clusters):
+                pair_distances = cache.get_inter_distances(clusters[k1], clusters[k2])
+                if pair_distances:
+                    base_inter_distances.extend(pair_distances)
+        
+        # Sort once
+        sorted_base_inter_distances = sorted(base_inter_distances)
         for i in range(n_clusters):
+            if pbar:
+                pbar.update(n_clusters - i - 1)  # Number of comparisons this outer loop will do
             for j in range(i + 1, n_clusters):
                 # Check if merge would exceed max threshold
-                merged_cluster = clusters[i] | clusters[j]
-                merge_distance = get_percentile_cluster_distance(merged_cluster)
+                merge_distance = test_percentile_cluster_distance(clusters[i], clusters[j])
                 
                 if merge_distance > self.max_lump:
                     continue
-                
-                # Create new partition with this merge
-                new_clusters = [merged_cluster] + [clusters[k] 
-                                                 for k in range(n_clusters) 
-                                                 if k != i and k != j]
-                
-                # Calculate gap for this partition
+
+                # Calculate gap incrementally without materializing hypothetical cluster
                 try:
-                    gap_metrics = self._calculate_gap_for_clustering(
-                        new_clusters, distance_matrix, self.target_percentile
+                    gap = self._calculate_incremental_gap(
+                        clusters, i, j, cache, base_intra_distances, sorted_base_inter_distances, self.target_percentile
                     )
-                    gap = gap_metrics[f'p{self.target_percentile}']['gap_size']
                     
                     # Update best if this gap is better
                     if gap > best_gap:
@@ -392,97 +488,75 @@ class GapOptimizedClustering:
                         best_merge_i, best_merge_j = i, j
                         best_merge_distance = merge_distance
                         
-                except Exception:
-                    # If gap calculation fails, skip this merge
+                except Exception as e:
+                    # If gap calculation fails, log and skip this merge
+                    self.logger.warning(f"Gap calculation failed for merge {i}+{j}: {e}")
                     continue
-        
+
         return best_gap, best_merge_i, best_merge_j, best_merge_distance
     
-    def _calculate_gap_for_clustering(self, clusters: List[Set[int]], 
-                                     distance_matrix: np.ndarray,
-                                     target_percentile: int = 90) -> Dict:
+    def _calculate_incremental_gap(self, clusters: List[Set[int]], merge_i: int, merge_j: int, 
+                                  cache, base_intra_distances: List[float], sorted_base_inter_distances: List[float], 
+                                  target_percentile: int) -> float:
         """
-        Calculate barcode gap metrics for a given clustering configuration.
+        Calculate gap size for a hypothetical merge without materializing the merged cluster.
         
         Args:
-            clusters: List of cluster sets containing sequence indices
-            distance_matrix: Pairwise distance matrix
-            target_percentile: Which percentile to calculate (default 90)
+            clusters: Current cluster configuration
+            merge_i, merge_j: Indices of clusters to hypothetically merge
+            cache: Distance cache
+            target_percentile: Target percentile for gap calculation
             
         Returns:
-            Dict with gap metrics at different percentiles
+            Gap size if the merge were performed
         """
-        # Collect intra-cluster and inter-cluster distances
-        intra_distances = []
-        inter_distances = []
+        # Start with precomputed base intra-cluster distances
+        intra_distances = base_intra_distances[:]
         
-        # Calculate intra-cluster distances
-        for cluster in clusters:
-            if len(cluster) > 1:
-                cluster_list = list(cluster)
-                for i in range(len(cluster_list)):
-                    for j in range(i + 1, len(cluster_list)):
-                        idx1, idx2 = cluster_list[i], cluster_list[j]
-                        intra_distances.append(distance_matrix[idx1, idx2])
+        # Add inter-cluster distances between i and j (now become intra-cluster)
+        cluster_i = clusters[merge_i]
+        cluster_j = clusters[merge_j]
+        ij_distances = cache.get_inter_distances(cluster_i, cluster_j)
+        if ij_distances:
+            intra_distances.extend(ij_distances)
         
-        # Calculate inter-cluster distances
-        for i in range(len(clusters)):
-            for j in range(i + 1, len(clusters)):
-                cluster1, cluster2 = clusters[i], clusters[j]
-                for idx1 in cluster1:
-                    for idx2 in cluster2:
-                        inter_distances.append(distance_matrix[idx1, idx2])
-        
-        # If no intra or inter distances, return empty metrics
-        if not intra_distances or not inter_distances:
-            return {
-                f'p{target_percentile}': {'gap_size': 0.0, 'gap_exists': False, 'intra_upper': 0.0, 'inter_lower': 0.0},
-                'p100': {'gap_size': 0.0, 'gap_exists': False, 'intra_upper': 0.0, 'inter_lower': 0.0},
-                'p95': {'gap_size': 0.0, 'gap_exists': False, 'intra_upper': 0.0, 'inter_lower': 0.0},
-                'p90': {'gap_size': 0.0, 'gap_exists': False, 'intra_upper': 0.0, 'inter_lower': 0.0}
-            }
-        
-        # Calculate gap metrics at standard percentiles
-        result = {
-            'p100': self._calculate_single_percentile_gap(intra_distances, inter_distances, 100),
-            'p95': self._calculate_single_percentile_gap(intra_distances, inter_distances, 95),
-            'p90': self._calculate_single_percentile_gap(intra_distances, inter_distances, 90)
-        }
-        
-        # Add specific target percentile if not standard
-        if target_percentile not in [100, 95, 90]:
-            result[f'p{target_percentile}'] = self._calculate_single_percentile_gap(
-                intra_distances, inter_distances, target_percentile
-            )
+        # Get inter-cluster distances by subtracting inter(i,j) from base
+        if ij_distances:
+            # Sort the distances to subtract
+            sorted_ij_distances = sorted(ij_distances)
+            
+            # Create inter_distances by walking base and skipping ij_distances
+            inter_distances = []
+            base_idx = 0
+            ij_idx = 0
+            
+            while base_idx < len(sorted_base_inter_distances):
+                base_val = sorted_base_inter_distances[base_idx]
+                
+                # Check if this value should be skipped (it's in ij_distances)
+                if ij_idx < len(sorted_ij_distances) and base_val == sorted_ij_distances[ij_idx]:
+                    # Skip this value and advance the ij pointer
+                    ij_idx += 1
+                else:
+                    # Keep this value
+                    inter_distances.append(base_val)
+                
+                base_idx += 1
         else:
-            result[f'p{target_percentile}'] = result[f'p{target_percentile}']
+            # No distances to subtract, use base as-is
+            inter_distances = sorted_base_inter_distances[:]
         
-        return result
-    
-    def _calculate_single_percentile_gap(self, intra_distances: List[float], 
-                                        inter_distances: List[float],
-                                        percentile: int) -> Dict:
-        """
-        Calculate gap at a specific percentile.
+        # Calculate gap (inter_distances already sorted from subtraction)
+        if not intra_distances or not inter_distances:
+            return 0.0
         
-        Args:
-            intra_distances: List of intra-cluster distances
-            inter_distances: List of inter-cluster distances
-            percentile: Percentile to calculate (0-100)
-            
-        Returns:
-            Dict with gap metrics at the specified percentile
-        """
         sorted_intra = sorted(intra_distances)
-        sorted_inter = sorted(inter_distances)
+        sorted_inter = inter_distances  # Already sorted from the subtraction operation
         
-        # Calculate percentile boundaries
-        # For intra: use upper percentile (e.g., 95th percentile of intra distances)
-        # For inter: use lower percentile (e.g., 5th percentile of inter distances for P95 gap)
-        intra_percentile = percentile / 100.0
-        inter_percentile = 1.0 - (percentile / 100.0)
+        # Calculate percentile gap
+        intra_percentile = target_percentile / 100.0
+        inter_percentile = 1.0 - (target_percentile / 100.0)
         
-        # Calculate percentile values
         intra_index = (len(sorted_intra) - 1) * intra_percentile
         if intra_index == int(intra_index):
             intra_upper = sorted_intra[int(intra_index)]
@@ -501,12 +575,119 @@ class GapOptimizedClustering:
             fraction = inter_index - lower_idx
             inter_lower = sorted_inter[lower_idx] + fraction * (sorted_inter[upper_idx] - sorted_inter[lower_idx])
         
+        return inter_lower - intra_upper
+    
+    def _calculate_gap_for_clustering(self, clusters: List[Set[int]], 
+                                     distance_matrix: np.ndarray,
+                                     cache,
+                                     target_percentile: int = 90) -> Dict:
+        """
+        Calculate barcode gap metrics for a given clustering configuration.
+        
+        Args:
+            clusters: List of cluster sets containing sequence indices
+            distance_matrix: Pairwise distance matrix
+            target_percentile: Which percentile to calculate (default 90)
+            
+        Returns:
+            Dict with gap metrics at different percentiles
+        """
+
+        # Collect all distances and sort once
+        intra_distances = []
+        inter_distances = []
+
+        for cluster in clusters:
+            if len(cluster) > 1:
+                cluster_distances = cache.get_intra_distances(cluster)
+                if cluster_distances:  # Only add non-empty lists
+                    intra_distances.extend(cluster_distances)
+        
+        inter_iterables = []
+        for i in range(len(clusters)):
+            for j in range(i + 1, len(clusters)):
+                cluster1, cluster2 = clusters[i], clusters[j]
+                pair_distances = cache.get_inter_distances(cluster1, cluster2)
+                if pair_distances:  # Only add non-empty lists
+                    inter_distances.extend(pair_distances)
+        
+
+        # Sort once outside of _calculate_single_percentile_gap
+        sorted_intra_distances = sorted(intra_distances) if intra_distances else []
+        sorted_inter_distances = sorted(inter_distances) if inter_distances else []
+        
+        # If no intra or inter distances, return empty metrics
+        if not sorted_intra_distances or not sorted_inter_distances:
+            return {
+                f'p{target_percentile}': {'gap_size': 0.0, 'gap_exists': False, 'intra_upper': 0.0, 'inter_lower': 0.0},
+                'p100': {'gap_size': 0.0, 'gap_exists': False, 'intra_upper': 0.0, 'inter_lower': 0.0},
+                'p95': {'gap_size': 0.0, 'gap_exists': False, 'intra_upper': 0.0, 'inter_lower': 0.0},
+                'p90': {'gap_size': 0.0, 'gap_exists': False, 'intra_upper': 0.0, 'inter_lower': 0.0}
+            }
+        
+        # Calculate gap metrics at standard percentiles (pass already-sorted lists)
+        result = {
+            'p100': self._calculate_single_percentile_gap(sorted_intra_distances, sorted_inter_distances, 100),
+            'p95': self._calculate_single_percentile_gap(sorted_intra_distances, sorted_inter_distances, 95),
+            'p90': self._calculate_single_percentile_gap(sorted_intra_distances, sorted_inter_distances, 90)
+        }
+        
+        # Add specific target percentile if not standard
+        if target_percentile not in [100, 95, 90]:
+            result[f'p{target_percentile}'] = self._calculate_single_percentile_gap(
+                sorted_intra_distances, sorted_inter_distances, target_percentile
+            )
+        else:
+            result[f'p{target_percentile}'] = result[f'p{target_percentile}']
+        
+        return result
+    
+    def _calculate_single_percentile_gap(self, sorted_intra_distances: List[float], 
+                                        sorted_inter_distances: List[float],
+                                        percentile: int) -> Dict:
+        """
+        Calculate gap at a specific percentile.
+        
+        Args:
+            sorted_intra_distances: Already-sorted list of intra-cluster distances
+            sorted_inter_distances: Already-sorted list of inter-cluster distances
+            percentile: Percentile to calculate (0-100)
+            
+        Returns:
+            Dict with gap metrics at the specified percentile
+        """
+        
+        # Calculate percentile boundaries
+        # For intra: use upper percentile (e.g., 95th percentile of intra distances)
+        # For inter: use lower percentile (e.g., 5th percentile of inter distances for P95 gap)
+        intra_percentile = percentile / 100.0
+        inter_percentile = 1.0 - (percentile / 100.0)
+        
+        # Calculate percentile values
+        intra_index = (len(sorted_intra_distances) - 1) * intra_percentile
+        if intra_index == int(intra_index):
+            intra_upper = sorted_intra_distances[int(intra_index)]
+        else:
+            lower_idx = int(intra_index)
+            upper_idx = min(lower_idx + 1, len(sorted_intra_distances) - 1)
+            fraction = intra_index - lower_idx
+            intra_upper = sorted_intra_distances[lower_idx] + fraction * (sorted_intra_distances[upper_idx] - sorted_intra_distances[lower_idx])
+        
+        inter_index = (len(sorted_inter_distances) - 1) * inter_percentile
+        if inter_index == int(inter_index):
+            inter_lower = sorted_inter_distances[int(inter_index)]
+        else:
+            lower_idx = int(inter_index)
+            upper_idx = min(lower_idx + 1, len(sorted_inter_distances) - 1)
+            fraction = inter_index - lower_idx
+            inter_lower = sorted_inter_distances[lower_idx] + fraction * (sorted_inter_distances[upper_idx] - sorted_inter_distances[lower_idx])
+        
         # Calculate gap
         gap_size = inter_lower - intra_upper
         
         return {
             'gap_exists': bool(gap_size > 0),
-            'gap_size': float(max(0, gap_size)),
+            'gap_size': float(gap_size),
             'intra_upper': float(intra_upper),
             'inter_lower': float(inter_lower)
         }
