@@ -9,8 +9,6 @@ genetic distances.
 import logging
 import copy
 from typing import List, Dict, Tuple, Optional, Set
-from itertools import combinations
-from functools import lru_cache
 import numpy as np
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor
@@ -46,8 +44,40 @@ class PersistentWorker:
         self.cache.refresh_global_intra(self.current_clusters)
         self.cache.refresh_global_inter(self.current_clusters)
     
-    def evaluate_pairs_range(self, start_i, end_i):
-        """Evaluate merge pairs for a specific range of i values."""
+    
+    def offset_to_pair(self, offset, n_clusters):
+        """
+        Convert linear offset to (i,j) pair coordinates.
+        Uses mathematical formula to avoid iteration.
+        """
+        if offset < 0:
+            raise ValueError("Offset must be non-negative")
+        
+        # Find i using quadratic formula solution
+        # We want largest i where: i*(2*n - i - 1)/2 <= offset
+        # Rearranging: i^2 - i*(2*n - 1) + 2*offset <= 0
+        # Using quadratic formula and taking the floor of the positive root
+        discriminant = (2 * n_clusters - 1) ** 2 - 8 * offset
+        if discriminant < 0:
+            raise ValueError(f"Offset {offset} exceeds maximum pairs for {n_clusters} clusters")
+        
+        i = int(((2 * n_clusters - 1) - discriminant ** 0.5) / 2)
+        
+        # Calculate j from the remaining offset
+        pairs_before_i = i * (2 * n_clusters - i - 1) // 2
+        j = offset - pairs_before_i + i + 1
+        
+        if j >= n_clusters:
+            raise ValueError(f"Invalid offset {offset} for {n_clusters} clusters")
+        
+        return i, j
+    
+    def evaluate_pairs_offset(self, start_offset, count):
+        """
+        Evaluate merge pairs starting from a linear offset for a given count.
+        This provides perfect load balancing with minimal IPC overhead.
+        Uses sequential iteration for maximum efficiency.
+        """
         if self.current_clusters is None:
             raise ValueError("Worker clusters not initialized. Call update_clusters first.")
         
@@ -59,49 +89,19 @@ class PersistentWorker:
         best_merge_distance = -1.0
         processed_count = 0
         
-        # Generate pairs on-the-fly for the assigned range
-        for i in range(start_i, min(end_i, n_clusters)):
-            for j in range(i + 1, n_clusters):
-                # Check if merge would exceed max threshold
-                merge_distance = self.gap_calculator.calculate_percentile_cluster_distance(
-                    clusters[i], clusters[j], self.cache
-                )
-                
-                if merge_distance <= self.max_lump:
-                    # Calculate gap incrementally without materializing hypothetical cluster
-                    try:
-                        gap = self.gap_calculator.calculate_incremental_gap(
-                            clusters, i, j, self.cache
-                        )
-                        
-                        # Update best if this gap is better
-                        if gap > best_gap:
-                            best_gap = gap
-                            best_merge_i, best_merge_j = i, j
-                            best_merge_distance = merge_distance
-                            
-                    except Exception:
-                        # If gap calculation fails, skip this merge
-                        continue
-                
-                processed_count += 1
+        # Convert start offset to initial (i, j) coordinates once
+        try:
+            i, j = self.offset_to_pair(start_offset, n_clusters)
+        except ValueError:
+            # Start offset is beyond valid pairs
+            return best_gap, best_merge_i, best_merge_j, best_merge_distance, processed_count
         
-        return best_gap, best_merge_i, best_merge_j, best_merge_distance, processed_count
-    
-    def evaluate_pairs_list(self, pair_indices):
-        """Evaluate merge pairs for a specific list of (i,j) pair indices."""
-        if self.current_clusters is None:
-            raise ValueError("Worker clusters not initialized. Call update_clusters first.")
-        
-        clusters = self.current_clusters
-        
-        best_gap = float('-inf')
-        best_merge_i, best_merge_j = -1, -1
-        best_merge_distance = -1.0
-        processed_count = 0
-        
-        # Evaluate assigned pairs
-        for i, j in pair_indices:
+        # Process exactly 'count' pairs using sequential iteration
+        for _ in range(count):
+            # Bounds check
+            if i >= n_clusters - 1:
+                break
+            
             # Check if merge would exceed max threshold
             merge_distance = self.gap_calculator.calculate_percentile_cluster_distance(
                 clusters[i], clusters[j], self.cache
@@ -122,9 +122,19 @@ class PersistentWorker:
                         
                 except Exception:
                     # If gap calculation fails, skip this merge
-                    continue
+                    pass
             
             processed_count += 1
+            
+            # Advance to next pair sequentially
+            j += 1
+            if j >= n_clusters:
+                # Move to next row
+                i += 1
+                j = i + 1
+                # Check if we've exhausted all pairs
+                if i >= n_clusters - 1:
+                    break
         
         return best_gap, best_merge_i, best_merge_j, best_merge_distance, processed_count
 
@@ -142,21 +152,17 @@ def _init_worker(distance_matrix, min_split, max_lump, target_percentile):
 def _evaluate_merge_pairs_multiprocess_worker(args):
     """
     Multiprocessing worker function that uses persistent worker instance.
-    Much more efficient than recreating caches for each task.
-    Supports both range-based and list-based pair distribution.
+    Uses offset-based workload distribution for perfect load balancing with minimal IPC overhead.
     """
     global _worker_instance
     
-    if len(args) == 3:
-        # Range-based: (start_i, end_i, clusters_list)
-        start_i, end_i, clusters_list = args
-        _worker_instance.update_clusters(clusters_list)
-        return _worker_instance.evaluate_pairs_range(start_i, end_i)
-    else:
-        # List-based: (pair_indices, clusters_list)
-        pair_indices, clusters_list = args
-        _worker_instance.update_clusters(clusters_list)
-        return _worker_instance.evaluate_pairs_list(pair_indices)
+    # Offset-based: ('offset', start_offset, count, clusters_list)
+    mode, start_offset, count, clusters_list = args
+    if mode != 'offset':
+        raise ValueError(f"Expected 'offset' mode indicator, got: {mode}")
+    
+    _worker_instance.update_clusters(clusters_list)
+    return _worker_instance.evaluate_pairs_offset(start_offset, count)
 
 
 class DistanceCache:
@@ -609,7 +615,7 @@ class GapOptimizedClustering:
                                     "gap": f"{current_gap:.4f}",
                                     "best": f"{best_config['gap_size']:.4f}"})
 
-                # Find best merge candidate using gap heuristic
+                # Find best merge candidate using offset-based gap heuristic
                 best_gap, best_merge_i, best_merge_j, best_merge_distance = self._find_best_gap_merge(
                     clusters, pbar, cache, gap_calculator, executor, num_threads
                 )
@@ -805,65 +811,46 @@ class GapOptimizedClustering:
         return clusters
     
     def _find_best_gap_merge(self, clusters: List[Set[int]], pbar, cache: DistanceCache,
-                             gap_calculator: GapCalculator, executor: ProcessPoolExecutor, 
-                             num_threads: int) -> Tuple[float, int, int, float]:
+                                   gap_calculator: GapCalculator, executor: ProcessPoolExecutor, 
+                                   num_threads: int) -> Tuple[float, int, int, float]:
         """
-        Find the merge that produces the best gap using gap-based heuristic with parallel evaluation.
+        Find the merge that produces the best gap using offset-based workload distribution.
         
-        Args:
-            clusters: List of cluster sets
-            pbar: Progress bar instance
-            cache: Distance cache (not used in multiprocessing, each process gets its own)
-            gap_calculator: Gap calculation instance
-            executor: ProcessPoolExecutor for parallel processing
-            num_threads: Number of processes to use
-            
-        Returns:
-            Tuple of (best_gap, merge_i, merge_j, merge_distance)
-            Returns (-1, -1, -1, -1) if no valid merges exist
+        This version provides perfect load balancing with minimal IPC overhead by distributing
+        work as (start_offset, count) instead of explicit pair lists.
         """
         n_clusters = len(clusters)
         
         if n_clusters <= 1:
             return float('-inf'), -1, -1, -1.0
         
-        # Calculate total number of pairs for progress tracking
+        # Calculate total number of pairs
         total_pairs = n_clusters * (n_clusters - 1) // 2
         
         # Convert clusters to lists for serialization to processes
         clusters_list = [list(cluster) for cluster in clusters]
         
-        # Generate all pairs and distribute evenly among processes for better load balancing
-        all_pairs = [(i, j) for i in range(n_clusters) for j in range(i + 1, n_clusters)]
+        # Distribute pairs evenly using offset-based approach
+        pairs_per_process = total_pairs // num_threads
+        remainder_pairs = total_pairs % num_threads
         
-        # Distribute pairs evenly among processes
-        pairs_per_process = len(all_pairs) // num_threads
-        remainder_pairs = len(all_pairs) % num_threads
-        
-        process_pair_chunks = []
-        start_idx = 0
-        for p in range(num_threads):
-            # Give remainder pairs to first few processes
-            chunk_size = pairs_per_process + (1 if p < remainder_pairs else 0)
-            end_idx = start_idx + chunk_size
-            if start_idx < len(all_pairs):  # Only add non-empty chunks
-                chunk_pairs = all_pairs[start_idx:end_idx]
-                process_pair_chunks.append(chunk_pairs)
-            start_idx = end_idx
-        
-        # Execute in parallel using multiprocessing
+        # Execute in parallel using offset-based distribution
         best_gap = float('-inf')
         best_merge_i, best_merge_j = -1, -1
         best_merge_distance = -1.0
         total_processed = 0
         
-        # Submit all worker tasks with pair-based distribution
+        # Submit worker tasks with offset-based distribution
         futures = []
-        for pair_chunk in process_pair_chunks:
-            if pair_chunk:  # Only submit non-empty chunks
-                worker_args = (pair_chunk, clusters_list)
+        current_offset = 0
+        for p in range(num_threads):
+            # Give remainder pairs to first few processes
+            chunk_size = pairs_per_process + (1 if p < remainder_pairs else 0)
+            if chunk_size > 0:  # Only submit non-empty chunks
+                worker_args = ('offset', current_offset, chunk_size, clusters_list)
                 future = executor.submit(_evaluate_merge_pairs_multiprocess_worker, worker_args)
                 futures.append(future)
+            current_offset += chunk_size
         
         # Collect results from all workers
         for future in futures:
