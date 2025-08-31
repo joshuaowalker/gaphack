@@ -17,8 +17,9 @@ import os
 
 class PersistentWorker:
     """
-    Persistent worker class that maintains caches across multiple work assignments.
+    Persistent worker class for multiprocessing that maintains caches across multiple work assignments.
     This reduces initialization overhead compared to recreating caches for each task.
+    Used only by the ProcessPoolExecutor workers, not by single-process mode.
     """
     
     def __init__(self, distance_matrix, min_split, max_lump, target_percentile):
@@ -494,7 +495,8 @@ class GapOptimizedClustering:
                  target_percentile: int = 95,
                  show_progress: bool = True,
                  logger: Optional[logging.Logger] = None,
-                 num_threads: Optional[int] = None):
+                 num_threads: Optional[int] = None,
+                 single_process: bool = False):
         """
         Initialize the gap-optimized clustering algorithm.
         
@@ -505,6 +507,7 @@ class GapOptimizedClustering:
             show_progress: If True, show progress bars during clustering (default True)
             logger: Optional logger instance for output; uses default logging if None
             num_threads: Number of threads for parallel processing (default: auto-detect)
+            single_process: If True, run entirely in single process for library usage (default False)
         """
         self.min_split = min_split
         self.max_lump = max_lump
@@ -512,6 +515,7 @@ class GapOptimizedClustering:
         self.show_progress = show_progress
         self.logger = logger or logging.getLogger(__name__)
         self.num_threads = num_threads
+        self.single_process = single_process
         
     def cluster(self, distance_matrix: np.ndarray) -> Tuple[List[List[int]], List[int], Dict]:
         """
@@ -597,17 +601,28 @@ class GapOptimizedClustering:
                               "gap": f"{current_gap:.4f}",
                               "best": f"{best_config['gap_size']:.4f}"})
 
-        # Determine number of threads for the entire gap-aware phase
+        # Determine execution mode and number of threads
         max_clusters = len(clusters)
         max_pairs = max_clusters * (max_clusters - 1) // 2
-        num_threads = self.num_threads or min(os.cpu_count() or 4, max_pairs, 4)
         
-        # Create ProcessPoolExecutor with persistent worker initialization
-        with ProcessPoolExecutor(
-            max_workers=num_threads,
-            initializer=_init_worker,
-            initargs=(cache.distance_matrix, self.min_split, self.max_lump, self.target_percentile)
-        ) as executor:
+        # Handle special case: num_threads=0 means single-process mode
+        if self.num_threads == 0:
+            self.single_process = True
+        
+        if self.single_process:
+            # Single-process mode: run everything in main thread
+            executor = None
+            num_threads = 1
+        else:
+            # Multi-process mode: create ProcessPoolExecutor with persistent worker initialization
+            num_threads = self.num_threads or min(os.cpu_count() or 4, max_pairs, 4)
+            executor = ProcessPoolExecutor(
+                max_workers=num_threads,
+                initializer=_init_worker,
+                initargs=(cache.distance_matrix, self.min_split, self.max_lump, self.target_percentile)
+            )
+        
+        try:
             while len(clusters) > 1:
                 if pbar:
                     pbar.set_postfix({"phase": "gap-aware",
@@ -649,6 +664,11 @@ class GapOptimizedClustering:
                         'gap_metrics': gap_metrics
                     }
                     self.logger.debug(f"New best gap found: {current_gap:.4f} with {len(clusters)} clusters")
+        
+        finally:
+            # Clean up executor if we created one
+            if executor is not None:
+                executor.shutdown(wait=True)
 
         # Close progress bar and report results
         if pbar:
@@ -811,13 +831,84 @@ class GapOptimizedClustering:
         return clusters
     
     def _find_best_gap_merge(self, clusters: List[Set[int]], pbar, cache: DistanceCache,
-                                   gap_calculator: GapCalculator, executor: ProcessPoolExecutor, 
+                                   gap_calculator: GapCalculator, executor: Optional[ProcessPoolExecutor], 
                                    num_threads: int) -> Tuple[float, int, int, float]:
         """
-        Find the merge that produces the best gap using offset-based workload distribution.
+        Find the merge that produces the best gap.
+        Delegates to either single-process or multi-process implementation.
+        """
+        if executor is None:
+            return self._find_best_gap_merge_single_process(clusters, pbar, cache, gap_calculator)
+        else:
+            return self._find_best_gap_merge_multiprocess(clusters, pbar, cache, gap_calculator, executor, num_threads)
+    
+    def _find_best_gap_merge_single_process(self, clusters: List[Set[int]], pbar, cache: DistanceCache,
+                                           gap_calculator: GapCalculator) -> Tuple[float, int, int, float]:
+        """
+        Single-process version using simple nested loops - no offset complexity needed.
+        """
+        n_clusters = len(clusters)
         
-        This version provides perfect load balancing with minimal IPC overhead by distributing
-        work as (start_offset, count) instead of explicit pair lists.
+        if n_clusters <= 1:
+            return float('-inf'), -1, -1, -1.0
+        
+        # Refresh global caches for current clustering state (same as workers do)
+        cache.refresh_global_intra(clusters)
+        cache.refresh_global_inter(clusters)
+        
+        best_gap = float('-inf')
+        best_merge_i, best_merge_j = -1, -1
+        best_merge_distance = -1.0
+        processed_count = 0
+        
+        # Calculate total pairs for progress tracking
+        total_pairs = n_clusters * (n_clusters - 1) // 2
+        update_interval = 200  # Update every 200 pairs (~1 second at 200 pairs/sec)
+        
+        # Simple nested loop approach - natural for single process
+        for i in range(n_clusters):
+            for j in range(i + 1, n_clusters):
+                # Check if merge would exceed max threshold
+                merge_distance = gap_calculator.calculate_percentile_cluster_distance(
+                    clusters[i], clusters[j], cache
+                )
+                
+                if merge_distance <= self.max_lump:
+                    # Calculate gap incrementally
+                    try:
+                        gap = gap_calculator.calculate_incremental_gap(
+                            clusters, i, j, cache
+                        )
+                        
+                        # Update best if this gap is better
+                        if gap > best_gap:
+                            best_gap = gap
+                            best_merge_i, best_merge_j = i, j
+                            best_merge_distance = merge_distance
+                            
+                    except Exception:
+                        # If gap calculation fails, skip this merge
+                        pass
+                
+                processed_count += 1
+                
+                # Update progress bar frequently in single-process mode
+                if pbar and processed_count % update_interval == 0:
+                    pbar.update(update_interval)
+        
+        # Final update for any remaining pairs
+        if pbar:
+            remaining = processed_count % update_interval
+            if remaining > 0:
+                pbar.update(remaining)
+        
+        return best_gap, best_merge_i, best_merge_j, best_merge_distance
+    
+    def _find_best_gap_merge_multiprocess(self, clusters: List[Set[int]], pbar, cache: DistanceCache,
+                                         gap_calculator: GapCalculator, executor: ProcessPoolExecutor, 
+                                         num_threads: int) -> Tuple[float, int, int, float]:
+        """
+        Multi-process version using offset-based workload distribution.
         """
         n_clusters = len(clusters)
         
@@ -830,11 +921,10 @@ class GapOptimizedClustering:
         # Convert clusters to lists for serialization to processes
         clusters_list = [list(cluster) for cluster in clusters]
         
-        # Distribute pairs evenly using offset-based approach
+        # Distribute work using offset-based approach
         pairs_per_process = total_pairs // num_threads
         remainder_pairs = total_pairs % num_threads
         
-        # Execute in parallel using offset-based distribution
         best_gap = float('-inf')
         best_merge_i, best_merge_j = -1, -1
         best_merge_distance = -1.0
@@ -864,9 +954,10 @@ class GapOptimizedClustering:
             except Exception as e:
                 self.logger.warning(f"Worker process failed: {e}")
         
-        # Update progress bar with total processed pairs
+        # Update progress bar
         if pbar:
             pbar.update(total_processed)
         
         return best_gap, best_merge_i, best_merge_j, best_merge_distance
+    
     

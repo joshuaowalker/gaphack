@@ -132,7 +132,7 @@ Examples:
     parser.add_argument(
         '-t', '--threads',
         type=int,
-        help='Number of threads to use for parallel processing (default: auto-detect)'
+        help='Number of threads to use for parallel processing (default: auto-detect, 0: single-process)'
     )
     parser.add_argument(
         '-v', '--verbose',
