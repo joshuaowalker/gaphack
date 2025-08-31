@@ -13,26 +13,22 @@ class TestGapOptimizedClustering:
     def test_initialization(self):
         """Test that the clustering object initializes correctly."""
         clustering = GapOptimizedClustering()
-        assert clustering.min_threshold == 0.005
-        assert clustering.max_threshold == 0.02
+        assert clustering.min_split == 0.005
+        assert clustering.max_lump == 0.02
         assert clustering.target_percentile == 95
-        assert clustering.merge_percentile == 95
-        assert clustering.min_gap_size == 0.005
     
     def test_custom_parameters(self):
         """Test initialization with custom parameters."""
         clustering = GapOptimizedClustering(
-            min_threshold=0.01,
-            max_threshold=0.03,
+            min_split=0.01,
+            max_lump=0.03,
             target_percentile=90,
-            merge_percentile=90,
-            min_gap_size=0.01
+            num_threads=0  # Single-process mode for testing
         )
-        assert clustering.min_threshold == 0.01
-        assert clustering.max_threshold == 0.03
+        assert clustering.min_split == 0.01
+        assert clustering.max_lump == 0.03
         assert clustering.target_percentile == 90
-        assert clustering.merge_percentile == 90
-        assert clustering.min_gap_size == 0.01
+        assert clustering.num_threads == 0
     
     def test_simple_clustering(self):
         """Test clustering with a simple distance matrix."""
@@ -105,11 +101,10 @@ class TestGapOptimizedClustering:
         assert 0.6 <= dist <= 0.7
     
     def test_gap_calculation(self):
-        """Test barcode gap calculation."""
-        clustering = GapOptimizedClustering()
+        """Test that clustering produces meaningful results with a clear gap."""
+        clustering = GapOptimizedClustering(num_threads=0)  # Single-process for testing
         
-        # Create clusters with known gap
-        clusters = [{0, 1}, {2, 3}]
+        # Create a distance matrix with a clear gap structure
         distance_matrix = np.array([
             [0.00, 0.01, 0.10, 0.11],  # Clear gap between
             [0.01, 0.00, 0.12, 0.13],  # intra (0.01) and
@@ -117,18 +112,17 @@ class TestGapOptimizedClustering:
             [0.11, 0.13, 0.01, 0.00],
         ])
         
-        gap_metrics = clustering._calculate_gap_for_clustering(
-            clusters, distance_matrix, 95
-        )
+        clusters, singletons, metrics = clustering.cluster(distance_matrix)
         
-        # Should detect a gap
-        assert gap_metrics['p95']['gap_exists']
-        assert gap_metrics['p95']['gap_size'] > 0
+        # Should produce 2 clusters with the clear gap structure
+        assert len(clusters) == 2
+        assert len(singletons) == 0
+        assert metrics['best_config']['gap_size'] > 0
     
     def test_empty_distance_matrix(self):
         """Test handling of empty distance matrix."""
-        clustering = GapOptimizedClustering()
-        distance_matrix = np.array([])
+        clustering = GapOptimizedClustering(num_threads=0)  # Single-process for testing
+        distance_matrix = np.array([]).reshape(0, 0)
         
         clusters, singletons, metrics = clustering.cluster(distance_matrix)
         
@@ -137,7 +131,7 @@ class TestGapOptimizedClustering:
     
     def test_single_sequence(self):
         """Test clustering with a single sequence."""
-        clustering = GapOptimizedClustering()
+        clustering = GapOptimizedClustering(num_threads=0)  # Single-process for testing
         distance_matrix = np.array([[0.0]])
         
         clusters, singletons, metrics = clustering.cluster(distance_matrix)

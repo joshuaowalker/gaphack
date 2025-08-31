@@ -9,8 +9,6 @@ from pathlib import Path
 from gaphack.utils import (
     load_sequences_from_fasta,
     calculate_distance_matrix,
-    calculate_similarity_matrix,
-    similarity_to_distance,
     format_cluster_output,
     save_clusters_to_file,
     validate_sequences
@@ -76,28 +74,6 @@ class TestDistanceCalculations:
             for j in range(4):
                 assert 0.0 <= distance_matrix[i, j] <= 1.0
     
-    def test_calculate_similarity_matrix(self):
-        """Test similarity matrix calculation."""
-        sequences = ["ATCG", "ATCC", "TACG"]
-        similarity_matrix = calculate_similarity_matrix(sequences)
-        
-        # Check shape
-        assert similarity_matrix.shape == (3, 3)
-        
-        # Check diagonal is one
-        for i in range(3):
-            assert similarity_matrix[i, i] == 1.0
-        
-        # Check symmetry
-        for i in range(3):
-            for j in range(3):
-                assert similarity_matrix[i, j] == similarity_matrix[j, i]
-        
-        # Check values are in valid range
-        for i in range(3):
-            for j in range(3):
-                assert 0.0 <= similarity_matrix[i, j] <= 1.0
-    
     def test_alignment_methods(self):
         """Test different alignment methods."""
         sequences = ["ATCG", "ATCC"]
@@ -114,23 +90,6 @@ class TestDistanceCalculations:
         assert distance_matrix_trad[0, 0] == 0.0
         assert distance_matrix_trad[1, 1] == 0.0
     
-    def test_similarity_to_distance(self):
-        """Test conversion from similarity to distance."""
-        similarity_matrix = np.array([
-            [1.0, 0.9, 0.5],
-            [0.9, 1.0, 0.6],
-            [0.5, 0.6, 1.0]
-        ])
-        
-        distance_matrix = similarity_to_distance(similarity_matrix)
-        
-        expected = np.array([
-            [0.0, 0.1, 0.5],
-            [0.1, 0.0, 0.4],
-            [0.5, 0.4, 0.0]
-        ])
-        
-        np.testing.assert_array_almost_equal(distance_matrix, expected)
 
 
 class TestOutputFormatting:

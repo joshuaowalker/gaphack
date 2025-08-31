@@ -5,7 +5,7 @@ A Python package for DNA barcode clustering that optimizes for the barcode gap
 between intra-species and inter-species genetic distances.
 """
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 from .core import GapOptimizedClustering
 from .utils import (
