@@ -13,6 +13,150 @@ from itertools import combinations
 from functools import lru_cache
 import numpy as np
 from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor
+import os
+
+
+class PersistentWorker:
+    """
+    Persistent worker class that maintains caches across multiple work assignments.
+    This reduces initialization overhead compared to recreating caches for each task.
+    """
+    
+    def __init__(self, distance_matrix, min_split, max_lump, target_percentile):
+        """Initialize worker with persistent cache and gap calculator."""
+        self.distance_matrix = distance_matrix
+        self.min_split = min_split
+        self.max_lump = max_lump
+        self.target_percentile = target_percentile
+        
+        # Create persistent instances that will be reused
+        self.cache = DistanceCache(distance_matrix)
+        self.gap_calculator = GapCalculator(target_percentile)
+        
+        # Track current cluster state
+        self.current_clusters = None
+    
+    def update_clusters(self, clusters_list):
+        """Update worker's cluster state and refresh global caches."""
+        # Convert clusters from lists to sets
+        self.current_clusters = [set(cluster) for cluster in clusters_list]
+        
+        # Refresh global caches for new clustering state
+        self.cache.refresh_global_intra(self.current_clusters)
+        self.cache.refresh_global_inter(self.current_clusters)
+    
+    def evaluate_pairs_range(self, start_i, end_i):
+        """Evaluate merge pairs for a specific range of i values."""
+        if self.current_clusters is None:
+            raise ValueError("Worker clusters not initialized. Call update_clusters first.")
+        
+        clusters = self.current_clusters
+        n_clusters = len(clusters)
+        
+        best_gap = float('-inf')
+        best_merge_i, best_merge_j = -1, -1
+        best_merge_distance = -1.0
+        processed_count = 0
+        
+        # Generate pairs on-the-fly for the assigned range
+        for i in range(start_i, min(end_i, n_clusters)):
+            for j in range(i + 1, n_clusters):
+                # Check if merge would exceed max threshold
+                merge_distance = self.gap_calculator.calculate_percentile_cluster_distance(
+                    clusters[i], clusters[j], self.cache
+                )
+                
+                if merge_distance <= self.max_lump:
+                    # Calculate gap incrementally without materializing hypothetical cluster
+                    try:
+                        gap = self.gap_calculator.calculate_incremental_gap(
+                            clusters, i, j, self.cache
+                        )
+                        
+                        # Update best if this gap is better
+                        if gap > best_gap:
+                            best_gap = gap
+                            best_merge_i, best_merge_j = i, j
+                            best_merge_distance = merge_distance
+                            
+                    except Exception:
+                        # If gap calculation fails, skip this merge
+                        continue
+                
+                processed_count += 1
+        
+        return best_gap, best_merge_i, best_merge_j, best_merge_distance, processed_count
+    
+    def evaluate_pairs_list(self, pair_indices):
+        """Evaluate merge pairs for a specific list of (i,j) pair indices."""
+        if self.current_clusters is None:
+            raise ValueError("Worker clusters not initialized. Call update_clusters first.")
+        
+        clusters = self.current_clusters
+        
+        best_gap = float('-inf')
+        best_merge_i, best_merge_j = -1, -1
+        best_merge_distance = -1.0
+        processed_count = 0
+        
+        # Evaluate assigned pairs
+        for i, j in pair_indices:
+            # Check if merge would exceed max threshold
+            merge_distance = self.gap_calculator.calculate_percentile_cluster_distance(
+                clusters[i], clusters[j], self.cache
+            )
+            
+            if merge_distance <= self.max_lump:
+                # Calculate gap incrementally without materializing hypothetical cluster
+                try:
+                    gap = self.gap_calculator.calculate_incremental_gap(
+                        clusters, i, j, self.cache
+                    )
+                    
+                    # Update best if this gap is better
+                    if gap > best_gap:
+                        best_gap = gap
+                        best_merge_i, best_merge_j = i, j
+                        best_merge_distance = merge_distance
+                        
+                except Exception:
+                    # If gap calculation fails, skip this merge
+                    continue
+            
+            processed_count += 1
+        
+        return best_gap, best_merge_i, best_merge_j, best_merge_distance, processed_count
+
+
+# Global worker instance for multiprocessing
+_worker_instance = None
+
+
+def _init_worker(distance_matrix, min_split, max_lump, target_percentile):
+    """Initialize persistent worker instance for this process."""
+    global _worker_instance
+    _worker_instance = PersistentWorker(distance_matrix, min_split, max_lump, target_percentile)
+
+
+def _evaluate_merge_pairs_multiprocess_worker(args):
+    """
+    Multiprocessing worker function that uses persistent worker instance.
+    Much more efficient than recreating caches for each task.
+    Supports both range-based and list-based pair distribution.
+    """
+    global _worker_instance
+    
+    if len(args) == 3:
+        # Range-based: (start_i, end_i, clusters_list)
+        start_i, end_i, clusters_list = args
+        _worker_instance.update_clusters(clusters_list)
+        return _worker_instance.evaluate_pairs_range(start_i, end_i)
+    else:
+        # List-based: (pair_indices, clusters_list)
+        pair_indices, clusters_list = args
+        _worker_instance.update_clusters(clusters_list)
+        return _worker_instance.evaluate_pairs_list(pair_indices)
 
 
 class DistanceCache:
@@ -27,38 +171,54 @@ class DistanceCache:
         self.global_intra_distances = None
         self.global_inter_distances = None
         self.global_inter_sorted = None
+        
     
-    def get_intra_distances(self, cluster: Set[int]) -> List[float]:
-        """Get sorted intra-cluster distances."""
+    def get_intra_distances(self, cluster: Set[int]) -> tuple:
+        """Get sorted intra-cluster distances as immutable tuple."""
         cluster_key = frozenset(cluster)
-        if cluster_key not in self.intra_cache:
-            if len(cluster) <= 1:
-                self.intra_cache[cluster_key] = []
-            else:
-                cluster_list = list(cluster)
-                distances = []
-                for i in range(len(cluster_list)):
-                    for j in range(i + 1, len(cluster_list)):
-                        distances.append(self.distance_matrix[cluster_list[i], cluster_list[j]])
-                distances.sort()
-                self.intra_cache[cluster_key] = distances
-        return self.intra_cache[cluster_key]
+        
+        # Check cache first
+        if cluster_key in self.intra_cache:
+            return self.intra_cache[cluster_key]
+        
+        # Calculate distances
+        if len(cluster) <= 1:
+            calculated_distances = []
+        else:
+            cluster_list = list(cluster)
+            calculated_distances = []
+            for i in range(len(cluster_list)):
+                for j in range(i + 1, len(cluster_list)):
+                    calculated_distances.append(self.distance_matrix[cluster_list[i], cluster_list[j]])
+            calculated_distances.sort()
+        
+        # Convert to immutable tuple and cache
+        calculated_tuple = tuple(calculated_distances)
+        self.intra_cache[cluster_key] = calculated_tuple
+        return calculated_tuple
     
-    def get_inter_distances(self, cluster1: Set[int], cluster2: Set[int]) -> List[float]:
-        """Get sorted inter-cluster distances."""
+    def get_inter_distances(self, cluster1: Set[int], cluster2: Set[int]) -> tuple:
+        """Get sorted inter-cluster distances as immutable tuple."""
         # Create a canonical key that's independent of parameter order
         cluster1_key = frozenset(cluster1)
         cluster2_key = frozenset(cluster2)
         pair_key = frozenset([cluster1_key, cluster2_key])
         
-        if pair_key not in self.inter_cache:
-            distances = []
-            for i in cluster1:
-                for j in cluster2:
-                    distances.append(self.distance_matrix[i, j])
-            distances.sort()
-            self.inter_cache[pair_key] = distances
-        return self.inter_cache[pair_key]
+        # Check cache first
+        if pair_key in self.inter_cache:
+            return self.inter_cache[pair_key]
+        
+        # Calculate distances
+        calculated_distances = []
+        for i in cluster1:
+            for j in cluster2:
+                calculated_distances.append(self.distance_matrix[i, j])
+        calculated_distances.sort()
+        
+        # Convert to immutable tuple and cache
+        calculated_tuple = tuple(calculated_distances)
+        self.inter_cache[pair_key] = calculated_tuple
+        return calculated_tuple
     
     def refresh_global_intra(self, clusters: List[Set[int]]):
         """Refresh global intra-cluster distances for current clustering."""
@@ -327,7 +487,8 @@ class GapOptimizedClustering:
                  max_lump: float = 0.02,
                  target_percentile: int = 95,
                  show_progress: bool = True,
-                 logger: Optional[logging.Logger] = None):
+                 logger: Optional[logging.Logger] = None,
+                 num_threads: Optional[int] = None):
         """
         Initialize the gap-optimized clustering algorithm.
         
@@ -337,12 +498,14 @@ class GapOptimizedClustering:
             target_percentile: Which percentile to use for gap optimization and linkage decisions (default 95)
             show_progress: If True, show progress bars during clustering (default True)
             logger: Optional logger instance for output; uses default logging if None
+            num_threads: Number of threads for parallel processing (default: auto-detect)
         """
         self.min_split = min_split
         self.max_lump = max_lump
         self.target_percentile = target_percentile
         self.show_progress = show_progress
         self.logger = logger or logging.getLogger(__name__)
+        self.num_threads = num_threads
         
     def cluster(self, distance_matrix: np.ndarray) -> Tuple[List[List[int]], List[int], Dict]:
         """
@@ -428,50 +591,58 @@ class GapOptimizedClustering:
                               "gap": f"{current_gap:.4f}",
                               "best": f"{best_config['gap_size']:.4f}"})
 
+        # Determine number of threads for the entire gap-aware phase
+        max_clusters = len(clusters)
+        max_pairs = max_clusters * (max_clusters - 1) // 2
+        num_threads = self.num_threads or min(os.cpu_count() or 4, max_pairs, 4)
+        
+        # Create ProcessPoolExecutor with persistent worker initialization
+        with ProcessPoolExecutor(
+            max_workers=num_threads,
+            initializer=_init_worker,
+            initargs=(cache.distance_matrix, self.min_split, self.max_lump, self.target_percentile)
+        ) as executor:
+            while len(clusters) > 1:
+                if pbar:
+                    pbar.set_postfix({"phase": "gap-aware",
+                                    "clusters": len(clusters),
+                                    "gap": f"{current_gap:.4f}",
+                                    "best": f"{best_config['gap_size']:.4f}"})
 
-        while len(clusters) > 1:
-            if pbar:
-                pbar.set_postfix({"phase": "gap-aware",
-                                "clusters": len(clusters),
-                                "gap": f"{current_gap:.4f}",
-                                "best": f"{best_config['gap_size']:.4f}"})
-
-            # Find best merge candidate using gap heuristic
-            best_gap, best_merge_i, best_merge_j, best_merge_distance = self._find_best_gap_merge(
-                clusters, pbar, cache, gap_calculator
-            )
-            
-            # Stop if no valid merges (all exceed max threshold)
-            if best_merge_i == -1:
-                break
-            
-            # Perform the merge that produces the best gap
-            clusters = self._perform_cluster_merge(clusters, best_merge_i, best_merge_j)
-            
-            # Calculate gap metrics for this configuration
-            gap_metrics = gap_calculator.calculate_gap_for_clustering(clusters, cache)
-            
-            current_gap = gap_metrics[f'p{self.target_percentile}']['gap_size']
-            
-            gap_history.append({
-                'num_clusters': len(clusters),
-                'merge_distance': float(best_merge_distance),
-                'gap_size': float(current_gap),
-                'gap_exists': bool(gap_metrics[f'p{self.target_percentile}']['gap_exists'])
-            })
-            
-            # Track best configuration encountered so far
-            if current_gap > best_config['gap_size']:
-                best_config = {
-                    'clusters': copy.deepcopy(clusters),
-                    'gap_size': float(current_gap),
+                # Find best merge candidate using gap heuristic
+                best_gap, best_merge_i, best_merge_j, best_merge_distance = self._find_best_gap_merge(
+                    clusters, pbar, cache, gap_calculator, executor, num_threads
+                )
+                
+                # Stop if no valid merges (all exceed max threshold)
+                if best_merge_i == -1:
+                    break
+                
+                # Perform the merge that produces the best gap
+                clusters = self._perform_cluster_merge(clusters, best_merge_i, best_merge_j)
+                
+                # Calculate gap metrics for this configuration
+                gap_metrics = gap_calculator.calculate_gap_for_clustering(clusters, cache)
+                
+                current_gap = gap_metrics[f'p{self.target_percentile}']['gap_size']
+                
+                gap_history.append({
+                    'num_clusters': len(clusters),
                     'merge_distance': float(best_merge_distance),
-                    'gap_percentile': self.target_percentile,
-                    'gap_metrics': gap_metrics
-                }
-                self.logger.debug(f"New best gap found: {current_gap:.4f} with {len(clusters)} clusters")
-            
-            step += 1
+                    'gap_size': float(current_gap),
+                    'gap_exists': bool(gap_metrics[f'p{self.target_percentile}']['gap_exists'])
+                })
+                
+                # Track best configuration encountered so far
+                if current_gap > best_config['gap_size']:
+                    best_config = {
+                        'clusters': copy.deepcopy(clusters),
+                        'gap_size': float(current_gap),
+                        'merge_distance': float(best_merge_distance),
+                        'gap_percentile': self.target_percentile,
+                        'gap_metrics': gap_metrics
+                    }
+                    self.logger.debug(f"New best gap found: {current_gap:.4f} with {len(clusters)} clusters")
 
         # Close progress bar and report results
         if pbar:
@@ -634,57 +805,81 @@ class GapOptimizedClustering:
         return clusters
     
     def _find_best_gap_merge(self, clusters: List[Set[int]], pbar, cache: DistanceCache,
-                             gap_calculator: GapCalculator) -> Tuple[float, int, int, float]:
+                             gap_calculator: GapCalculator, executor: ProcessPoolExecutor, 
+                             num_threads: int) -> Tuple[float, int, int, float]:
         """
-        Find the merge that produces the best gap using gap-based heuristic.
+        Find the merge that produces the best gap using gap-based heuristic with parallel evaluation.
         
         Args:
             clusters: List of cluster sets
-            distance_matrix: Pairwise distance matrix
+            pbar: Progress bar instance
+            cache: Distance cache (not used in multiprocessing, each process gets its own)
+            gap_calculator: Gap calculation instance
+            executor: ProcessPoolExecutor for parallel processing
+            num_threads: Number of processes to use
             
         Returns:
             Tuple of (best_gap, merge_i, merge_j, merge_distance)
             Returns (-1, -1, -1, -1) if no valid merges exist
         """
+        n_clusters = len(clusters)
+        
+        if n_clusters <= 1:
+            return float('-inf'), -1, -1, -1.0
+        
+        # Calculate total number of pairs for progress tracking
+        total_pairs = n_clusters * (n_clusters - 1) // 2
+        
+        # Convert clusters to lists for serialization to processes
+        clusters_list = [list(cluster) for cluster in clusters]
+        
+        # Generate all pairs and distribute evenly among processes for better load balancing
+        all_pairs = [(i, j) for i in range(n_clusters) for j in range(i + 1, n_clusters)]
+        
+        # Distribute pairs evenly among processes
+        pairs_per_process = len(all_pairs) // num_threads
+        remainder_pairs = len(all_pairs) % num_threads
+        
+        process_pair_chunks = []
+        start_idx = 0
+        for p in range(num_threads):
+            # Give remainder pairs to first few processes
+            chunk_size = pairs_per_process + (1 if p < remainder_pairs else 0)
+            end_idx = start_idx + chunk_size
+            if start_idx < len(all_pairs):  # Only add non-empty chunks
+                chunk_pairs = all_pairs[start_idx:end_idx]
+                process_pair_chunks.append(chunk_pairs)
+            start_idx = end_idx
+        
+        # Execute in parallel using multiprocessing
         best_gap = float('-inf')
         best_merge_i, best_merge_j = -1, -1
         best_merge_distance = -1.0
-
-
-        # Try all possible merges
-        n_clusters = len(clusters)
+        total_processed = 0
         
-        # Refresh global distance caches for current clustering state
-        cache.refresh_global_intra(clusters)
-        cache.refresh_global_inter(clusters)
-        for i in range(n_clusters):
-            if pbar:
-                pbar.update(n_clusters - i - 1)  # Number of comparisons this outer loop will do
-            for j in range(i + 1, n_clusters):
-                # Check if merge would exceed max threshold
-                merge_distance = gap_calculator.calculate_percentile_cluster_distance(
-                    clusters[i], clusters[j], cache
-                )
-                
-                if merge_distance > self.max_lump:
-                    continue
-
-                # Calculate gap incrementally without materializing hypothetical cluster
-                try:
-                    gap = gap_calculator.calculate_incremental_gap(
-                        clusters, i, j, cache
-                    )
-                    
-                    # Update best if this gap is better
-                    if gap > best_gap:
-                        best_gap = gap
-                        best_merge_i, best_merge_j = i, j
-                        best_merge_distance = merge_distance
-                        
-                except Exception as e:
-                    # If gap calculation fails, log and skip this merge
-                    self.logger.warning(f"Gap calculation failed for merge {i}+{j}: {e}")
-                    continue
-
+        # Submit all worker tasks with pair-based distribution
+        futures = []
+        for pair_chunk in process_pair_chunks:
+            if pair_chunk:  # Only submit non-empty chunks
+                worker_args = (pair_chunk, clusters_list)
+                future = executor.submit(_evaluate_merge_pairs_multiprocess_worker, worker_args)
+                futures.append(future)
+        
+        # Collect results from all workers
+        for future in futures:
+            try:
+                worker_gap, worker_i, worker_j, worker_distance, processed_count = future.result()
+                total_processed += processed_count
+                if worker_gap > best_gap:
+                    best_gap = worker_gap
+                    best_merge_i, best_merge_j = worker_i, worker_j
+                    best_merge_distance = worker_distance
+            except Exception as e:
+                self.logger.warning(f"Worker process failed: {e}")
+        
+        # Update progress bar with total processed pairs
+        if pbar:
+            pbar.update(total_processed)
+        
         return best_gap, best_merge_i, best_merge_j, best_merge_distance
     

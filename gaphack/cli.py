@@ -130,6 +130,11 @@ Examples:
         help='Use pre-computed distance matrix (CSV format) instead of calculating from sequences'
     )
     parser.add_argument(
+        '-t', '--threads',
+        type=int,
+        help='Number of threads to use for parallel processing (default: auto-detect)'
+    )
+    parser.add_argument(
         '-v', '--verbose',
         action='store_true',
         help='Enable verbose logging'
@@ -198,6 +203,7 @@ Examples:
             min_split=args.min_split,
             max_lump=args.max_lump,
             target_percentile=args.target_percentile,
+            num_threads=args.threads,
         )
         
         # Perform clustering
