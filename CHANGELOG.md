@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **New CLI tool**: `gaphack-analyze` for analyzing pre-clustered FASTA files
+- **Target mode clustering**: `--target` parameter for single-cluster focused clustering from seed sequences
 - **Distance analysis functions**: Calculate intra-cluster and inter-cluster distance distributions
 - **Visualization capabilities**: Generate histograms of distance distributions with percentile markers
 - **Multiple output formats**: Text reports, JSON data, and TSV tables
@@ -16,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Comprehensive analysis**: Individual cluster analysis plus global cross-cluster comparisons
 - **Matplotlib integration**: Professional-quality histogram generation with statistics
 - **Full parameter support**: All alignment method options available for analysis
+
+### Changed
+- **FASTA output format**: Now uses two-line format (header + sequence on single line) instead of wrapped sequences
+- **Target mode labeling**: Sequences not processed in target mode are labeled "unclustered" instead of "singleton"
 
 ### Dependencies
 - Added `matplotlib>=3.5.0` for histogram generation and visualization

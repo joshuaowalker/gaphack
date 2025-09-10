@@ -1,0 +1,307 @@
+"""
+Target mode clustering for gapHACk.
+
+This module implements single-target clustering that focuses on growing one cluster
+from a seed set of target sequences. This is algorithmically simpler than full
+gap-optimized clustering since it reduces to complete linkage with gap evaluation.
+"""
+
+import logging
+import copy
+from typing import List, Dict, Tuple, Optional, Set
+import numpy as np
+from tqdm import tqdm
+
+from .core import DistanceCache, GapCalculator
+
+
+class TargetModeClustering:
+    """
+    Target-focused hierarchical agglomerative clustering.
+    
+    This algorithm grows a single cluster from a seed set of target sequences
+    by iteratively merging the closest remaining sequences. The gap calculation
+    focuses only on the target cluster vs. all remaining sequences.
+    
+    This simplifies the optimization problem compared to full gapHACk since
+    we only need to track one cluster's growth, making it equivalent to
+    complete linkage with gap-based stopping criteria.
+    """
+    
+    def __init__(self, 
+                 min_split: float = 0.005,
+                 max_lump: float = 0.02,
+                 target_percentile: int = 95,
+                 show_progress: bool = True,
+                 logger: Optional[logging.Logger] = None):
+        """
+        Initialize the target mode clustering algorithm.
+        
+        Args:
+            min_split: Minimum distance to split clusters - sequences closer are lumped together
+            max_lump: Maximum distance to lump clusters - sequences farther are kept split
+            target_percentile: Which percentile to use for gap optimization and linkage decisions
+            show_progress: If True, show progress bars during clustering
+            logger: Optional logger instance for output; uses default logging if None
+        """
+        self.min_split = min_split
+        self.max_lump = max_lump
+        self.target_percentile = target_percentile
+        self.show_progress = show_progress
+        self.logger = logger or logging.getLogger(__name__)
+        
+    def cluster(self, distance_matrix: np.ndarray, target_indices: List[int]) -> Tuple[List[int], List[int], Dict]:
+        """
+        Perform target mode clustering.
+        
+        Args:
+            distance_matrix: Pairwise distance matrix (n x n numpy array)
+            target_indices: List of sequence indices that form the initial seed cluster
+        
+        Returns:
+            Tuple of (target_cluster, remaining_sequences, clustering_history) where:
+            - target_cluster is List[int] of indices in the final target cluster
+            - remaining_sequences is List[int] of indices not merged into target cluster
+            - clustering_history is Dict containing optimization metrics and history
+        """
+        n = len(distance_matrix)
+        
+        # Validate target indices
+        for idx in target_indices:
+            if idx < 0 or idx >= n:
+                raise ValueError(f"Target index {idx} is out of range for distance matrix of size {n}")
+        
+        # Initialize target cluster and remaining sequences
+        target_cluster = set(target_indices)
+        remaining = set(range(n)) - target_cluster
+        
+        if not remaining:
+            self.logger.warning("All sequences are in target set - no clustering needed")
+            return list(target_cluster), [], {'best_config': {}, 'gap_history': []}
+        
+        # Track best configuration
+        best_config = {
+            'target_cluster': copy.deepcopy(target_cluster),
+            'gap_size': -1,
+            'merge_distance': 0,
+            'gap_percentile': self.target_percentile,
+            'gap_metrics': None
+        }
+        
+        # Initialize caching and gap calculation
+        cache = DistanceCache(distance_matrix)
+        gap_calculator = GapCalculator(self.target_percentile)
+        
+        # Calculate initial gap
+        initial_gap_metrics = self._calculate_target_gap_metrics(
+            target_cluster, remaining, cache, gap_calculator
+        )
+        current_gap = initial_gap_metrics[f'p{self.target_percentile}']['gap_size']
+        
+        # Update best config with initial state
+        if current_gap > best_config['gap_size']:
+            best_config = {
+                'target_cluster': copy.deepcopy(target_cluster),
+                'gap_size': float(current_gap),
+                'merge_distance': 0.0,
+                'gap_percentile': self.target_percentile,
+                'gap_metrics': initial_gap_metrics
+            }
+        
+        self.logger.info(f"Target mode clustering: initial cluster size {len(target_cluster)}, "
+                        f"remaining {len(remaining)} sequences")
+        
+        gap_history = []
+        step = 0
+        
+        # Create progress bar for merging phase
+        pbar = None
+        if self.show_progress:
+            pbar = tqdm(total=len(remaining), 
+                       desc="Target clustering", 
+                       unit=" merges")
+            pbar.set_postfix({
+                "target_size": len(target_cluster),
+                "remaining": len(remaining),
+                "gap": f"{current_gap:.4f}",
+                "best": f"{best_config['gap_size']:.4f}"
+            })
+        
+        # Main clustering loop: grow target cluster by adding closest sequences
+        try:
+            while remaining:
+                # Find closest sequence to target cluster
+                closest_seq, closest_distance = self._find_closest_to_target(
+                    target_cluster, remaining, distance_matrix
+                )
+                
+                # Stop if closest sequence exceeds max threshold
+                if closest_distance > self.max_lump:
+                    self.logger.debug(f"Stopping: closest distance {closest_distance:.4f} exceeds max_lump {self.max_lump}")
+                    break
+                
+                # Add sequence to target cluster
+                target_cluster.add(closest_seq)
+                remaining.remove(closest_seq)
+                
+                # Calculate gap for this configuration
+                if remaining:  # Only calculate gap if there are still remaining sequences
+                    gap_metrics = self._calculate_target_gap_metrics(
+                        target_cluster, remaining, cache, gap_calculator
+                    )
+                    current_gap = gap_metrics[f'p{self.target_percentile}']['gap_size']
+                else:
+                    # No remaining sequences - gap is undefined
+                    gap_metrics = None
+                    current_gap = 0.0
+                
+                # Record history
+                gap_history.append({
+                    'step': step,
+                    'target_cluster_size': len(target_cluster),
+                    'remaining_count': len(remaining),
+                    'merge_distance': float(closest_distance),
+                    'gap_size': float(current_gap),
+                    'gap_exists': bool(current_gap > 0) if gap_metrics else False,
+                    'merged_sequence': int(closest_seq)
+                })
+                
+                # Track best configuration
+                if current_gap > best_config['gap_size']:
+                    best_config = {
+                        'target_cluster': copy.deepcopy(target_cluster),
+                        'gap_size': float(current_gap),
+                        'merge_distance': float(closest_distance),
+                        'gap_percentile': self.target_percentile,
+                        'gap_metrics': gap_metrics
+                    }
+                    self.logger.debug(f"New best gap found: {current_gap:.4f} with target cluster size {len(target_cluster)}")
+                
+                step += 1
+                
+                # Update progress bar
+                if pbar:
+                    pbar.update(1)
+                    pbar.set_postfix({
+                        "target_size": len(target_cluster),
+                        "remaining": len(remaining),
+                        "gap": f"{current_gap:.4f}",
+                        "best": f"{best_config['gap_size']:.4f}"
+                    })
+        
+        finally:
+            if pbar:
+                pbar.close()
+        
+        # Report results
+        final_target_size = len(best_config['target_cluster'])
+        final_remaining = n - final_target_size
+        
+        self.logger.info(f"Target clustering complete. Best gap: {best_config['gap_size']:.4f}")
+        self.logger.info(f"Final target cluster: {final_target_size} sequences, "
+                        f"remaining: {final_remaining} sequences")
+        
+        # Convert to lists for return
+        final_target_cluster = list(best_config['target_cluster'])
+        final_remaining_sequences = [i for i in range(n) if i not in best_config['target_cluster']]
+        
+        return final_target_cluster, final_remaining_sequences, {
+            'best_config': {
+                'target_cluster': final_target_cluster,
+                'gap_size': float(best_config['gap_size']),
+                'merge_distance': float(best_config['merge_distance']),
+                'gap_percentile': int(best_config['gap_percentile']),
+                'gap_metrics': best_config['gap_metrics']
+            },
+            'gap_history': gap_history
+        }
+    
+    def _find_closest_to_target(self, target_cluster: Set[int], remaining: Set[int], 
+                               distance_matrix: np.ndarray) -> Tuple[int, float]:
+        """
+        Find the sequence in remaining that is closest to the target cluster.
+        Uses complete linkage distance (maximum distance to any member of target cluster).
+        
+        Args:
+            target_cluster: Set of indices in current target cluster
+            remaining: Set of indices of remaining sequences
+            distance_matrix: Pairwise distance matrix
+            
+        Returns:
+            Tuple of (closest_sequence_index, distance_to_cluster)
+        """
+        closest_seq = -1
+        min_distance = float('inf')
+        
+        for seq_idx in remaining:
+            # Calculate complete linkage distance to target cluster
+            max_distance_to_cluster = 0.0
+            for target_idx in target_cluster:
+                distance = distance_matrix[seq_idx, target_idx]
+                max_distance_to_cluster = max(max_distance_to_cluster, distance)
+            
+            # Track minimum of the maximum distances (complete linkage)
+            if max_distance_to_cluster < min_distance:
+                min_distance = max_distance_to_cluster
+                closest_seq = seq_idx
+        
+        return closest_seq, min_distance
+    
+    def _calculate_target_gap_metrics(self, target_cluster: Set[int], remaining: Set[int],
+                                     cache: DistanceCache, gap_calculator: GapCalculator) -> Dict:
+        """
+        Calculate gap metrics for target cluster vs remaining sequences.
+        
+        Args:
+            target_cluster: Set of indices in target cluster
+            remaining: Set of indices of remaining sequences
+            cache: Distance cache for efficient calculations
+            gap_calculator: Gap calculation utility
+            
+        Returns:
+            Dict with gap metrics at different percentiles
+        """
+        if not remaining:
+            # No remaining sequences - gap is undefined
+            return {
+                f'p{self.target_percentile}': {'gap_size': 0.0, 'gap_exists': False, 'intra_upper': 0.0, 'inter_lower': 0.0},
+                'p100': {'gap_size': 0.0, 'gap_exists': False, 'intra_upper': 0.0, 'inter_lower': 0.0},
+                'p95': {'gap_size': 0.0, 'gap_exists': False, 'intra_upper': 0.0, 'inter_lower': 0.0},
+                'p90': {'gap_size': 0.0, 'gap_exists': False, 'intra_upper': 0.0, 'inter_lower': 0.0}
+            }
+        
+        # Get intra-cluster distances (within target cluster)
+        intra_distances = cache.get_intra_distances(target_cluster)
+        
+        # Get inter-cluster distances (target cluster to remaining sequences)  
+        remaining_as_cluster = remaining  # Set of remaining sequences
+        inter_distances = cache.get_inter_distances(target_cluster, remaining_as_cluster)
+        
+        # Convert to sorted lists for gap calculation
+        sorted_intra = sorted(intra_distances) if intra_distances else []
+        sorted_inter = sorted(inter_distances) if inter_distances else []
+        
+        # Calculate gap metrics at standard percentiles
+        if not sorted_intra or not sorted_inter:
+            return {
+                f'p{self.target_percentile}': {'gap_size': 0.0, 'gap_exists': False, 'intra_upper': 0.0, 'inter_lower': 0.0},
+                'p100': {'gap_size': 0.0, 'gap_exists': False, 'intra_upper': 0.0, 'inter_lower': 0.0},
+                'p95': {'gap_size': 0.0, 'gap_exists': False, 'intra_upper': 0.0, 'inter_lower': 0.0},
+                'p90': {'gap_size': 0.0, 'gap_exists': False, 'intra_upper': 0.0, 'inter_lower': 0.0}
+            }
+        
+        result = {
+            'p100': gap_calculator._calculate_single_percentile_gap(sorted_intra, sorted_inter, 100),
+            'p95': gap_calculator._calculate_single_percentile_gap(sorted_intra, sorted_inter, 95),
+            'p90': gap_calculator._calculate_single_percentile_gap(sorted_intra, sorted_inter, 90)
+        }
+        
+        # Add specific target percentile if not standard
+        if self.target_percentile not in [100, 95, 90]:
+            result[f'p{self.target_percentile}'] = gap_calculator._calculate_single_percentile_gap(
+                sorted_intra, sorted_inter, self.target_percentile
+            )
+        else:
+            result[f'p{self.target_percentile}'] = result[f'p{self.target_percentile}']
+        
+        return result

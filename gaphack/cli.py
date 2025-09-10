@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 from .core import GapOptimizedClustering
+from .target_clustering import TargetModeClustering
 from .utils import (
     load_sequences_from_fasta,
     calculate_distance_matrix,
@@ -42,6 +43,7 @@ Examples:
   gaphack input.fasta --export-metrics gap_analysis.json -v
   gaphack input.fasta --no-homopolymer-normalization --no-indel-normalization
   gaphack input.fasta --alignment-method traditional
+  gaphack input.fasta --target seeds.fasta    # Target mode: grow cluster from seeds.fasta
         """
     )
     
@@ -120,6 +122,13 @@ Examples:
         help='Maximum length of repeat motifs to detect (1=homopolymers only, 2=dinucleotides, etc., default: 2)'
     )
     
+    # Target mode clustering
+    parser.add_argument(
+        '--target',
+        help='FASTA file containing target/seed sequences for target mode clustering. '
+             'If specified, algorithm will grow one cluster starting from these sequences.'
+    )
+    
     # Additional options
     parser.add_argument(
         '--export-metrics',
@@ -132,7 +141,7 @@ Examples:
     parser.add_argument(
         '-t', '--threads',
         type=int,
-        help='Number of threads to use for parallel processing (default: auto-detect, 0: single-process)'
+        help='Number of threads to use for parallel processing (default: auto-detect, 0: single-process, ignored in target mode)'
     )
     parser.add_argument(
         '-v', '--verbose',
@@ -151,6 +160,29 @@ Examples:
         if not input_path.exists():
             logging.error(f"Input file not found: {args.input}")
             sys.exit(1)
+        
+        # Validate target file if specified
+        target_sequences = None
+        target_headers = None
+        target_indices = None
+        if args.target:
+            target_path = Path(args.target)
+            if not target_path.exists():
+                logging.error(f"Target file not found: {args.target}")
+                sys.exit(1)
+            
+            # Load target sequences
+            logging.info(f"Loading target sequences from {args.target}")
+            target_sequences, target_headers = load_sequences_from_fasta(str(target_path))
+            logging.info(f"Loaded {len(target_sequences)} target sequences")
+            
+            # Validate target sequences
+            is_valid, errors = validate_sequences(target_sequences)
+            if not is_valid:
+                logging.error("Invalid target sequences found:")
+                for error in errors:
+                    logging.error(f"  {error}")
+                sys.exit(1)
         
         # Set default output path based on input if not specified
         if args.output is None:
@@ -198,17 +230,51 @@ Examples:
             )
             logging.info("Distance calculation complete")
         
-        # Initialize clustering algorithm
-        clustering = GapOptimizedClustering(
-            min_split=args.min_split,
-            max_lump=args.max_lump,
-            target_percentile=args.target_percentile,
-            num_threads=args.threads,
-        )
+        # If target mode, find target sequence indices
+        if args.target:
+            # Find indices of target sequences in main sequence set
+            target_indices = []
+            for target_seq in target_sequences:
+                try:
+                    idx = sequences.index(target_seq)
+                    target_indices.append(idx)
+                except ValueError:
+                    # Target sequence not found in main sequence set
+                    logging.error(f"Target sequence not found in input file: {target_seq[:50]}...")
+                    sys.exit(1)
+            
+            if not target_indices:
+                logging.error("No target sequences found in input file")
+                sys.exit(1)
+                
+            logging.info(f"Found {len(target_indices)} target sequences in input file")
         
-        # Perform clustering
-        logging.info("Running clustering...")
-        clusters, singletons, metrics = clustering.cluster(distance_matrix)
+        # Choose clustering mode and run
+        if args.target:
+            # Target mode clustering
+            logging.info("Running target mode clustering...")
+            clustering = TargetModeClustering(
+                min_split=args.min_split,
+                max_lump=args.max_lump,
+                target_percentile=args.target_percentile,
+            )
+            
+            target_cluster, remaining_sequences, metrics = clustering.cluster(distance_matrix, target_indices)
+            
+            # Convert to standard format: clusters list and singletons list
+            clusters = [target_cluster] if len(target_cluster) >= 2 else []
+            singletons = (target_cluster if len(target_cluster) == 1 else []) + remaining_sequences
+        else:
+            # Full mode clustering (original behavior)
+            logging.info("Running full clustering...")
+            clustering = GapOptimizedClustering(
+                min_split=args.min_split,
+                max_lump=args.max_lump,
+                target_percentile=args.target_percentile,
+                num_threads=args.threads,
+            )
+            
+            clusters, singletons, metrics = clustering.cluster(distance_matrix)
         
         # Results are already reported by core module, no need to repeat
         
@@ -221,13 +287,17 @@ Examples:
         # Need sequences for FASTA format
         sequences_for_output = sequences if args.format == 'fasta' and not args.distance_matrix else None
         
+        # Use appropriate label for singletons vs unclustered
+        singleton_label = "unclustered" if args.target else "singleton"
+        
         save_clusters_to_file(
             clusters, 
             singletons, 
             args.output,
             headers=headers,
             sequences=sequences_for_output,
-            format=args.format
+            format=args.format,
+            singleton_label=singleton_label
         )
         
         # Export metrics if requested

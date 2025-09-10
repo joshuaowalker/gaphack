@@ -16,6 +16,7 @@ The algorithm focuses on maximizing the "barcode gap" - the separation between i
 ## Features
 
 - **Gap Optimization**: Uses gap-based heuristic to directly maximize the barcode gap
+- **Target Mode**: Single-cluster focused clustering from seed sequences with `--target` parameter
 - **Percentile-based Linkage**: Uses percentile-based complete linkage (default 95th percentile) for robust merge decisions
 - **Two-phase Algorithm**: Fast initial clustering followed by gap-aware optimization to completion
 - **Progress Tracking**: Unified progress bar with real-time gap and cluster information
@@ -113,6 +114,9 @@ gaphack input.fasta
 
 # Custom output base path
 gaphack input.fasta -o results/myclusters
+
+# Target mode clustering
+gaphack input.fasta --target seeds.fasta -o target_cluster
 ```
 
 With custom parameters:
@@ -134,6 +138,21 @@ gaphack input.fasta \
     --threads 0 \
     -o traditional_clusters
 ```
+
+### Target Mode Clustering
+
+Use `--target` to grow a single cluster from seed sequences:
+
+```bash
+# Basic target mode with seed sequences
+gaphack input.fasta --target seeds.fasta -o target_results
+
+# Target mode produces:
+# - target_results.cluster_001.fasta (sequences in the target cluster)
+# - target_results.unclustereds.fasta (sequences not processed for clustering)
+```
+
+Target mode focuses on growing one cluster from the provided seed sequences, making it suitable for cases where you want to extract sequences similar to specific targets without attempting to cluster all remaining sequences.
 
 ### Analysis Tool (gaphack-analyze)
 
@@ -347,9 +366,10 @@ These parameters control the adjusted identity algorithm when `--alignment-metho
 
 - **FASTA format** (default): Creates separate FASTA files for each cluster
   - `basename.cluster_001.fasta`, `basename.cluster_002.fasta`, etc.
-  - `basename.singletons.fasta` for unclustered sequences  
+  - `basename.singletons.fasta` for unclustered sequences (or `basename.unclustereds.fasta` in target mode)
   - Clusters ordered by size (001 = largest, 002 = second largest, etc.)
   - Cluster numbers are zero-padded for proper sorting
+  - Uses two-line format (header + sequence on single line)
 - **TSV format**: Tab-separated values with columns `sequence_id` and `cluster_id`
 - **Text format**: Human-readable clustering report
 

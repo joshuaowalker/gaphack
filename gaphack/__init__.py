@@ -8,6 +8,7 @@ between intra-species and inter-species genetic distances.
 __version__ = "0.3.0"
 
 from .core import GapOptimizedClustering
+from .target_clustering import TargetModeClustering
 from .utils import (
     calculate_distance_matrix,
     load_sequences_from_fasta,
@@ -27,6 +28,7 @@ from .analyze import (
 
 __all__ = [
     "GapOptimizedClustering",
+    "TargetModeClustering",
     "calculate_distance_matrix",
     "load_sequences_from_fasta",
     "save_clusters_to_file",

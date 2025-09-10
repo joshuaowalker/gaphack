@@ -164,7 +164,8 @@ def save_clusters_to_file(clusters: List[List[int]],
                          output_path: str,
                          headers: Optional[List[str]] = None,
                          sequences: Optional[List[str]] = None,
-                         format: str = "fasta"):
+                         format: str = "fasta",
+                         singleton_label: str = "singleton"):
     """
     Save clustering results to files.
     
@@ -175,6 +176,7 @@ def save_clusters_to_file(clusters: List[List[int]],
         headers: Optional list of sequence headers/names
         sequences: Optional list of sequences (required for FASTA format)
         format: Output format ("fasta", "tsv", or "text")
+        singleton_label: Label for singleton sequences ("singleton" or "unclustered")
     """
     if format == "fasta":
         # FASTA format: create one file per cluster and one for singletons
@@ -212,27 +214,27 @@ def save_clusters_to_file(clusters: List[List[int]],
                 records.append(record)
             
             with open(cluster_file, 'w') as f:
-                SeqIO.write(records, f, "fasta")
+                SeqIO.write(records, f, "fasta-2line")
             
             logging.debug(f"Wrote {len(records)} sequences to {cluster_file}")
         
-        # Write singletons to a separate file
+        # Write singletons/unclustered to a separate file
         if singletons:
-            singleton_file = f"{output_base}.singletons.fasta"
+            singleton_file = f"{output_base}.{singleton_label}s.fasta"
             records = []
             for seq_idx in singletons:
                 header = headers[seq_idx] if headers else f"seq_{seq_idx}"
                 record = SeqRecord(
                     Seq(sequences[seq_idx]),
                     id=header,
-                    description="singleton"
+                    description=singleton_label
                 )
                 records.append(record)
             
             with open(singleton_file, 'w') as f:
-                SeqIO.write(records, f, "fasta")
+                SeqIO.write(records, f, "fasta-2line")
             
-            logging.debug(f"Wrote {len(records)} singleton sequences to {singleton_file}")
+            logging.debug(f"Wrote {len(records)} {singleton_label} sequences to {singleton_file}")
     
     elif format == "tsv":
         # Tab-separated format: sequence_id<tab>cluster_id
@@ -245,10 +247,10 @@ def save_clusters_to_file(clusters: List[List[int]],
                     seq_id = headers[idx] if headers else f"seq_{idx}"
                     f.write(f"{seq_id}\tcluster_{cluster_id}\n")
             
-            # Write singletons
+            # Write singletons/unclustered
             for idx in singletons:
                 seq_id = headers[idx] if headers else f"seq_{idx}"
-                f.write(f"{seq_id}\tsingleton\n")
+                f.write(f"{seq_id}\t{singleton_label}\n")
     
     else:  # text format
         output_text = format_cluster_output(clusters, singletons, headers)
