@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gaphack"
-version = "0.2.0"
+version = "0.3.0"
 description = "Gap-Optimized Hierarchical Agglomerative Clustering for DNA barcoding"
 readme = "README.md"
 authors = [
@@ -31,6 +31,7 @@ dependencies = [
     "biopython>=1.79",
     "adjusted-identity @ git+https://github.com/joshuaowalker/adjusted-identity.git",
     "tqdm>=4.65.0",
+    "matplotlib>=3.5.0",
 ]
 
 [project.optional-dependencies]
@@ -44,6 +45,7 @@ dev = [
 
 [project.scripts]
 gaphack = "gaphack.cli:main"
+gaphack-analyze = "gaphack.analyze_cli:main"
 
 [project.urls]
 Homepage = "https://github.com/joshuaowalker/gaphack"

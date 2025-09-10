@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2025-01-06
+
+### Added
+- **New CLI tool**: `gaphack-analyze` for analyzing pre-clustered FASTA files
+- **Distance analysis functions**: Calculate intra-cluster and inter-cluster distance distributions
+- **Visualization capabilities**: Generate histograms of distance distributions with percentile markers
+- **Multiple output formats**: Text reports, JSON data, and TSV tables
+- **Barcode gap assessment**: Evaluate gap quality and existence for pre-clustered data
+- **Comprehensive analysis**: Individual cluster analysis plus global cross-cluster comparisons
+- **Matplotlib integration**: Professional-quality histogram generation with statistics
+- **Full parameter support**: All alignment method options available for analysis
+
+### Dependencies
+- Added `matplotlib>=3.5.0` for histogram generation and visualization
+
 ## [0.2.0] - 2025-01-06
 
 ### Added

@@ -11,6 +11,8 @@ gapHACk implements a two-phase clustering algorithm designed specifically for DN
 
 The algorithm focuses on maximizing the "barcode gap" - the separation between intra-species and inter-species distances at a specified percentile (default P95) to handle outliers robustly.
 
+**gapHACk also includes `gaphack-analyze`**, a companion tool for analyzing pre-clustered FASTA files to assess distance distributions and barcode gap quality without performing new clustering.
+
 ## Features
 
 - **Gap Optimization**: Uses gap-based heuristic to directly maximize the barcode gap
@@ -19,6 +21,7 @@ The algorithm focuses on maximizing the "barcode gap" - the separation between i
 - **Progress Tracking**: Unified progress bar with real-time gap and cluster information
 - **Size-ordered Output**: Clusters numbered by size (largest first) for consistent results
 - **Library-friendly**: Configurable progress bars and logging for integration into other applications
+- **Analysis Tools**: `gaphack-analyze` for evaluating pre-clustered data and barcode gap quality
 
 ## Performance
 
@@ -131,6 +134,31 @@ gaphack input.fasta \
     --threads 0 \
     -o traditional_clusters
 ```
+
+### Analysis Tool (gaphack-analyze)
+
+The `gaphack-analyze` tool evaluates pre-clustered FASTA files to assess distance distributions and barcode gap quality:
+
+```bash
+# Analyze pre-clustered files (each FASTA = one cluster)
+gaphack-analyze cluster1.fasta cluster2.fasta cluster3.fasta
+
+# Save results to custom directory with JSON format  
+gaphack-analyze *.fasta -o analysis_results --format json
+
+# Skip plots and use TSV output
+gaphack-analyze clusters/*.fasta --no-plots --format tsv -o results.tsv
+
+# Use traditional alignment method
+gaphack-analyze cluster*.fasta --alignment-method traditional -v
+```
+
+**Analysis Output:**
+- **Individual cluster histograms**: Distance distributions within each cluster
+- **Global distance histogram**: Combined intra-cluster vs inter-cluster distances  
+- **Percentile analysis**: P5, P25, P50, P75, P95 values for all distance sets
+- **Barcode gap metrics**: Gap size and existence at P90/P95 levels
+- **Multiple formats**: Text reports, JSON data, or TSV tables
 
 #### Controlling Adjusted Identity Parameters
 
@@ -425,7 +453,9 @@ gaphack/
 │   ├── __init__.py
 │   ├── core.py          # Core clustering algorithm
 │   ├── utils.py         # Utility functions and alignment
-│   └── cli.py           # Command-line interface
+│   ├── cli.py           # Command-line interface
+│   ├── analyze.py       # Analysis functions for pre-clustered data
+│   └── analyze_cli.py   # Analysis tool command-line interface
 ├── tests/               # Unit tests
 ├── examples/            # Example datasets and documentation
 │   ├── data/           # Sample FASTA files
