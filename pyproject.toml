@@ -46,6 +46,7 @@ dev = [
 [project.scripts]
 gaphack = "gaphack.cli:main"
 gaphack-analyze = "gaphack.analyze_cli:main"
+gaphack-decompose = "gaphack.decompose_cli:main"
 
 [project.urls]
 Homepage = "https://github.com/joshuaowalker/gaphack"

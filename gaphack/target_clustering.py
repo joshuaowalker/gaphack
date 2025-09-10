@@ -8,11 +8,12 @@ gap-optimized clustering since it reduces to complete linkage with gap evaluatio
 
 import logging
 import copy
-from typing import List, Dict, Tuple, Optional, Set
+from typing import List, Dict, Tuple, Optional, Set, Union
 import numpy as np
 from tqdm import tqdm
 
 from .core import DistanceCache, GapCalculator
+from .lazy_distances import DistanceProvider, DistanceProviderFactory
 
 
 class TargetModeClustering:
@@ -50,13 +51,17 @@ class TargetModeClustering:
         self.show_progress = show_progress
         self.logger = logger or logging.getLogger(__name__)
         
-    def cluster(self, distance_matrix: np.ndarray, target_indices: List[int]) -> Tuple[List[int], List[int], Dict]:
+    def cluster(self, 
+               distance_provider: Union[np.ndarray, DistanceProvider], 
+               target_indices: List[int],
+               sequences: Optional[List[str]] = None) -> Tuple[List[int], List[int], Dict]:
         """
         Perform target mode clustering.
         
         Args:
-            distance_matrix: Pairwise distance matrix (n x n numpy array)
+            distance_provider: Either a distance matrix (np.ndarray) or DistanceProvider instance
             target_indices: List of sequence indices that form the initial seed cluster
+            sequences: List of sequences (required if distance_provider is not a DistanceProvider)
         
         Returns:
             Tuple of (target_cluster, remaining_sequences, clustering_history) where:
@@ -64,7 +69,26 @@ class TargetModeClustering:
             - remaining_sequences is List[int] of indices not merged into target cluster
             - clustering_history is Dict containing optimization metrics and history
         """
-        n = len(distance_matrix)
+        # Handle backward compatibility and create distance provider
+        if isinstance(distance_provider, np.ndarray):
+            # Legacy mode: precomputed distance matrix
+            distance_matrix = distance_provider
+            n = len(distance_matrix)
+            provider = DistanceProviderFactory.create_precomputed_provider(distance_matrix)
+            self.logger.debug("Using precomputed distance matrix")
+        elif isinstance(distance_provider, DistanceProvider):
+            # Modern mode: distance provider
+            provider = distance_provider
+            if hasattr(provider, 'n'):
+                n = provider.n
+            elif sequences is not None:
+                n = len(sequences)
+            else:
+                # Determine n from target indices (assumes they represent valid range)
+                n = max(target_indices) + 1
+            self.logger.debug("Using distance provider for on-demand computation")
+        else:
+            raise ValueError("distance_provider must be either np.ndarray or DistanceProvider instance")
         
         # Validate target indices
         for idx in target_indices:
@@ -79,6 +103,9 @@ class TargetModeClustering:
             self.logger.warning("All sequences are in target set - no clustering needed")
             return list(target_cluster), [], {'best_config': {}, 'gap_history': []}
         
+        # Note: we don't need to ensure all pairwise distances in target cluster are precomputed
+        # since target clustering uses lazy distance calculation and gets distances on-demand
+        
         # Track best configuration
         best_config = {
             'target_cluster': copy.deepcopy(target_cluster),
@@ -88,13 +115,12 @@ class TargetModeClustering:
             'gap_metrics': None
         }
         
-        # Initialize caching and gap calculation
-        cache = DistanceCache(distance_matrix)
+        # Initialize gap calculation (we'll create DistanceCache on-demand when needed)
         gap_calculator = GapCalculator(self.target_percentile)
         
         # Calculate initial gap
         initial_gap_metrics = self._calculate_target_gap_metrics(
-            target_cluster, remaining, cache, gap_calculator
+            target_cluster, remaining, provider, gap_calculator
         )
         current_gap = initial_gap_metrics[f'p{self.target_percentile}']['gap_size']
         
@@ -108,7 +134,7 @@ class TargetModeClustering:
                 'gap_metrics': initial_gap_metrics
             }
         
-        self.logger.info(f"Target mode clustering: initial cluster size {len(target_cluster)}, "
+        self.logger.debug(f"Target mode clustering: initial cluster size {len(target_cluster)}, "
                         f"remaining {len(remaining)} sequences")
         
         gap_history = []
@@ -132,7 +158,7 @@ class TargetModeClustering:
             while remaining:
                 # Find closest sequence to target cluster
                 closest_seq, closest_distance = self._find_closest_to_target(
-                    target_cluster, remaining, distance_matrix
+                    target_cluster, remaining, provider
                 )
                 
                 # Stop if closest sequence exceeds max threshold
@@ -147,7 +173,7 @@ class TargetModeClustering:
                 # Calculate gap for this configuration
                 if remaining:  # Only calculate gap if there are still remaining sequences
                     gap_metrics = self._calculate_target_gap_metrics(
-                        target_cluster, remaining, cache, gap_calculator
+                        target_cluster, remaining, provider, gap_calculator
                     )
                     current_gap = gap_metrics[f'p{self.target_percentile}']['gap_size']
                 else:
@@ -197,8 +223,8 @@ class TargetModeClustering:
         final_target_size = len(best_config['target_cluster'])
         final_remaining = n - final_target_size
         
-        self.logger.info(f"Target clustering complete. Best gap: {best_config['gap_size']:.4f}")
-        self.logger.info(f"Final target cluster: {final_target_size} sequences, "
+        self.logger.debug(f"Target clustering complete. Best gap: {best_config['gap_size']:.4f}")
+        self.logger.debug(f"Final target cluster: {final_target_size} sequences, "
                         f"remaining: {final_remaining} sequences")
         
         # Convert to lists for return
@@ -217,7 +243,7 @@ class TargetModeClustering:
         }
     
     def _find_closest_to_target(self, target_cluster: Set[int], remaining: Set[int], 
-                               distance_matrix: np.ndarray) -> Tuple[int, float]:
+                               distance_provider: DistanceProvider) -> Tuple[int, float]:
         """
         Find the sequence in remaining that is closest to the target cluster.
         Uses complete linkage distance (maximum distance to any member of target cluster).
@@ -225,7 +251,7 @@ class TargetModeClustering:
         Args:
             target_cluster: Set of indices in current target cluster
             remaining: Set of indices of remaining sequences
-            distance_matrix: Pairwise distance matrix
+            distance_provider: Provider for distance calculations
             
         Returns:
             Tuple of (closest_sequence_index, distance_to_cluster)
@@ -234,11 +260,11 @@ class TargetModeClustering:
         min_distance = float('inf')
         
         for seq_idx in remaining:
+            # Get distances from this sequence to all target cluster members
+            distances_to_cluster = distance_provider.get_distances_from_sequence(seq_idx, target_cluster)
+            
             # Calculate complete linkage distance to target cluster
-            max_distance_to_cluster = 0.0
-            for target_idx in target_cluster:
-                distance = distance_matrix[seq_idx, target_idx]
-                max_distance_to_cluster = max(max_distance_to_cluster, distance)
+            max_distance_to_cluster = max(distances_to_cluster.values())
             
             # Track minimum of the maximum distances (complete linkage)
             if max_distance_to_cluster < min_distance:
@@ -248,14 +274,14 @@ class TargetModeClustering:
         return closest_seq, min_distance
     
     def _calculate_target_gap_metrics(self, target_cluster: Set[int], remaining: Set[int],
-                                     cache: DistanceCache, gap_calculator: GapCalculator) -> Dict:
+                                     distance_provider: DistanceProvider, gap_calculator: GapCalculator) -> Dict:
         """
         Calculate gap metrics for target cluster vs remaining sequences.
         
         Args:
             target_cluster: Set of indices in target cluster
             remaining: Set of indices of remaining sequences
-            cache: Distance cache for efficient calculations
+            distance_provider: Provider for distance calculations
             gap_calculator: Gap calculation utility
             
         Returns:
@@ -270,12 +296,22 @@ class TargetModeClustering:
                 'p90': {'gap_size': 0.0, 'gap_exists': False, 'intra_upper': 0.0, 'inter_lower': 0.0}
             }
         
+        # Note: we don't need to precompute all distances - get_distance will compute on-demand
+        
         # Get intra-cluster distances (within target cluster)
-        intra_distances = cache.get_intra_distances(target_cluster)
+        intra_distances = []
+        target_list = list(target_cluster)
+        for i, seq1 in enumerate(target_list):
+            for j, seq2 in enumerate(target_list):
+                if i < j:  # Avoid duplicates and self-distances
+                    distance = distance_provider.get_distance(seq1, seq2)
+                    intra_distances.append(distance)
         
         # Get inter-cluster distances (target cluster to remaining sequences)  
-        remaining_as_cluster = remaining  # Set of remaining sequences
-        inter_distances = cache.get_inter_distances(target_cluster, remaining_as_cluster)
+        inter_distances = []
+        for target_seq in target_cluster:
+            distances_to_remaining = distance_provider.get_distances_from_sequence(target_seq, remaining)
+            inter_distances.extend(distances_to_remaining.values())
         
         # Convert to sorted lists for gap calculation
         sorted_intra = sorted(intra_distances) if intra_distances else []

@@ -43,7 +43,8 @@ def calculate_distance_matrix(sequences: List[str],
                             normalize_homopolymers: bool = True,
                             handle_iupac_overlap: bool = True,
                             normalize_indels: bool = True,
-                            max_repeat_motif_length: int = 2) -> np.ndarray:
+                            max_repeat_motif_length: int = 2,
+                            show_progress: bool = True) -> np.ndarray:
     """
     Calculate pairwise distance matrix for sequences using adjusted-identity.
     
@@ -55,6 +56,7 @@ def calculate_distance_matrix(sequences: List[str],
         handle_iupac_overlap: Whether to allow IUPAC ambiguity codes to match via intersection (for adjusted method)
         normalize_indels: Whether to count contiguous indels as single events (for adjusted method)
         max_repeat_motif_length: Maximum length of repeat motifs to detect (for adjusted method)
+        show_progress: Whether to show progress bar for distance calculations
         
     Returns:
         Numpy array of pairwise distances (n x n)
@@ -84,7 +86,7 @@ def calculate_distance_matrix(sequences: List[str],
         if handle_iupac_overlap: adjustments.append("iupac_overlap")
         if normalize_indels: adjustments.append("indel_norm")
         adjustments_str = f"({', '.join(adjustments)})" if adjustments else "(no adjustments)"
-        logging.info(f"Using adjusted identity with MycoBLAST adjustments {adjustments_str}, "
+        logging.debug(f"Using adjusted identity with MycoBLAST adjustments {adjustments_str}, "
                     f"end_skip_distance={end_skip_distance}, max_repeat_motif_length={max_repeat_motif_length}")
     else:  # traditional
         params = RAW_ADJUSTMENT_PARAMS
@@ -93,10 +95,12 @@ def calculate_distance_matrix(sequences: List[str],
     # Calculate total number of comparisons for progress bar
     total_comparisons = (n * (n - 1)) // 2
     
-    # Create progress bar
-    pbar = tqdm(total=total_comparisons, 
-                desc="Calculating pairwise distances", 
-                unit=" comparisons")
+    # Create progress bar if requested and meaningful
+    pbar = None
+    if show_progress and total_comparisons > 0:
+        pbar = tqdm(total=total_comparisons, 
+                    desc="Calculating pairwise distances", 
+                    unit=" comparisons")
     
     for i in range(n):
         for j in range(i + 1, n):
@@ -109,9 +113,11 @@ def calculate_distance_matrix(sequences: List[str],
             
             distance_matrix[i, j] = dist
             distance_matrix[j, i] = dist
-            pbar.update(1)
+            if pbar:
+                pbar.update(1)
     
-    pbar.close()
+    if pbar:
+        pbar.close()
     
     return distance_matrix
 

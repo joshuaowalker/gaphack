@@ -11,6 +11,7 @@ from typing import Optional
 
 from .core import GapOptimizedClustering
 from .target_clustering import TargetModeClustering
+from .lazy_distances import DistanceProviderFactory
 from .utils import (
     load_sequences_from_fasta,
     calculate_distance_matrix,
@@ -216,42 +217,57 @@ Examples:
                     logging.error(f"  {error}")
                 sys.exit(1)
             
-            # Calculate distance matrix
-            logging.info(f"Calculating pairwise distances using {args.alignment_method} method...")
-            
-            distance_matrix = calculate_distance_matrix(
-                sequences, 
-                alignment_method=args.alignment_method,
-                end_skip_distance=args.end_skip_distance,
-                normalize_homopolymers=not args.no_homopolymer_normalization,
-                handle_iupac_overlap=not args.no_iupac_overlap,
-                normalize_indels=not args.no_indel_normalization,
-                max_repeat_motif_length=args.max_repeat_motif_length
-            )
-            logging.info("Distance calculation complete")
+            # Conditional distance calculation - only full matrix for non-target mode
+            if not args.target:
+                logging.info(f"Calculating pairwise distances using {args.alignment_method} method...")
+                
+                distance_matrix = calculate_distance_matrix(
+                    sequences, 
+                    alignment_method=args.alignment_method,
+                    end_skip_distance=args.end_skip_distance,
+                    normalize_homopolymers=not args.no_homopolymer_normalization,
+                    handle_iupac_overlap=not args.no_iupac_overlap,
+                    normalize_indels=not args.no_indel_normalization,
+                    max_repeat_motif_length=args.max_repeat_motif_length
+                )
+                logging.info("Distance calculation complete")
         
-        # If target mode, find target sequence indices
+        # If target mode, find matching target sequences using sequence-based matching
         if args.target:
-            # Find indices of target sequences in main sequence set
             target_indices = []
-            for target_seq in target_sequences:
-                try:
-                    idx = sequences.index(target_seq)
-                    target_indices.append(idx)
-                except ValueError:
-                    # Target sequence not found in main sequence set
-                    logging.error(f"Target sequence not found in input file: {target_seq[:50]}...")
-                    sys.exit(1)
+            matched_targets = []
+            
+            # Create sequence-to-index mapping for input sequences
+            input_seq_to_idx = {}
+            for i, seq in enumerate(sequences):
+                normalized_seq = seq.upper().strip()
+                if normalized_seq not in input_seq_to_idx:
+                    input_seq_to_idx[normalized_seq] = i
+            
+            # Find matching sequences
+            for i, target_seq in enumerate(target_sequences):
+                normalized_target = target_seq.upper().strip()
+                if normalized_target in input_seq_to_idx:
+                    target_idx = input_seq_to_idx[normalized_target]
+                    target_indices.append(target_idx)
+                    matched_targets.append({
+                        'target_header': target_headers[i],
+                        'input_header': headers[target_idx],
+                        'index': target_idx
+                    })
+                    logging.debug(f"Matched target '{target_headers[i]}' to input sequence {target_idx} '{headers[target_idx]}'")
+                else:
+                    logging.warning(f"Target sequence '{target_headers[i]}' not found in input sequences")
             
             if not target_indices:
-                logging.error("No target sequences found in input file")
+                logging.error("No target sequences found matching input sequences")
                 sys.exit(1)
-                
-            logging.info(f"Found {len(target_indices)} target sequences in input file")
+            
+            logging.info(f"Found {len(target_indices)} target sequences matching input sequences")
         
         # Choose clustering mode and run
         if args.target:
-            # Target mode clustering
+            # Target mode clustering with lazy distance calculation
             logging.info("Running target mode clustering...")
             clustering = TargetModeClustering(
                 min_split=args.min_split,
@@ -259,7 +275,25 @@ Examples:
                 target_percentile=args.target_percentile,
             )
             
-            target_cluster, remaining_sequences, metrics = clustering.cluster(distance_matrix, target_indices)
+            # Create lazy distance provider
+            distance_provider = DistanceProviderFactory.create_lazy_provider(
+                sequences,
+                alignment_method=args.alignment_method,
+                end_skip_distance=args.end_skip_distance,
+                normalize_homopolymers=not args.no_homopolymer_normalization,
+                handle_iupac_overlap=not args.no_iupac_overlap,
+                normalize_indels=not args.no_indel_normalization,
+                max_repeat_motif_length=args.max_repeat_motif_length
+            )
+            
+            target_cluster, remaining_sequences, metrics = clustering.cluster(distance_provider, target_indices, sequences)
+            
+            # Log optimization statistics
+            if hasattr(distance_provider, 'get_cache_stats'):
+                stats = distance_provider.get_cache_stats()
+                logging.info(f"Distance computation optimization: {stats['cached_distances']} computed "
+                           f"out of {stats['theoretical_max']} possible "
+                           f"({100.0 * stats['cached_distances'] / stats['theoretical_max']:.1f}% coverage)")
             
             # Convert to standard format: clusters list and singletons list
             clusters = [target_cluster] if len(target_cluster) >= 2 else []

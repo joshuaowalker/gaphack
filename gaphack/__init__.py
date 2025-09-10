@@ -9,6 +9,7 @@ __version__ = "0.3.0"
 
 from .core import GapOptimizedClustering
 from .target_clustering import TargetModeClustering
+from .decompose import DecomposeClustering
 from .utils import (
     calculate_distance_matrix,
     load_sequences_from_fasta,
@@ -29,6 +30,7 @@ from .analyze import (
 __all__ = [
     "GapOptimizedClustering",
     "TargetModeClustering",
+    "DecomposeClustering",
     "calculate_distance_matrix",
     "load_sequences_from_fasta",
     "save_clusters_to_file",

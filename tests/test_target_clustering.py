@@ -144,6 +144,8 @@ class TestTargetModeClustering:
     
     def test_find_closest_to_target(self):
         """Test _find_closest_to_target helper method."""
+        from gaphack.lazy_distances import DistanceProviderFactory
+        
         distance_matrix = np.array([
             [0.0,  0.02, 0.04, 0.06],
             [0.02, 0.0,  0.07, 0.08],
@@ -151,11 +153,14 @@ class TestTargetModeClustering:
             [0.06, 0.08, 0.09, 0.0]
         ])
         
+        # Create distance provider from matrix
+        distance_provider = DistanceProviderFactory.create_precomputed_provider(distance_matrix)
+        
         target_cluster = {0}
         remaining = {1, 2, 3}
         
         closest_seq, distance = self.clustering._find_closest_to_target(
-            target_cluster, remaining, distance_matrix
+            target_cluster, remaining, distance_provider
         )
         
         # Sequence 1 is closest to target (distance 0.02)
@@ -167,7 +172,7 @@ class TestTargetModeClustering:
         remaining = {2, 3}
         
         closest_seq, distance = self.clustering._find_closest_to_target(
-            target_cluster, remaining, distance_matrix
+            target_cluster, remaining, distance_provider
         )
         
         # Complete linkage: sequence 2 has max distances [0.04, 0.07] -> 0.07
