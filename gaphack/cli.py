@@ -291,9 +291,14 @@ Examples:
             # Log optimization statistics
             if hasattr(distance_provider, 'get_cache_stats'):
                 stats = distance_provider.get_cache_stats()
-                logging.info(f"Distance computation optimization: {stats['cached_distances']} computed "
-                           f"out of {stats['theoretical_max']} possible "
-                           f"({100.0 * stats['cached_distances'] / stats['theoretical_max']:.1f}% coverage)")
+                if stats['theoretical_max'] > 0:
+                    coverage_pct = 100.0 * stats['cached_distances'] / stats['theoretical_max']
+                    logging.info(f"Distance computation optimization: {stats['cached_distances']} computed "
+                               f"out of {stats['theoretical_max']} possible "
+                               f"({coverage_pct:.1f}% coverage)")
+                else:
+                    logging.info(f"Distance computation optimization: {stats['cached_distances']} computed "
+                               f"(no pairwise distances needed)")
             
             # Convert to standard format: clusters list and singletons list
             clusters = [target_cluster] if len(target_cluster) >= 2 else []

@@ -5,14 +5,14 @@ This module provides helper functions for sequence processing and distance calcu
 """
 
 import numpy as np
-from typing import List, Tuple, Optional, Literal
+from typing import List, Tuple, Optional, Literal, Dict
 from Bio import SeqIO
 from Bio.Seq import Seq
 import logging
 from tqdm import tqdm
 
 
-def load_sequences_from_fasta(fasta_path: str) -> Tuple[List[str], List[str]]:
+def load_sequences_from_fasta(fasta_path: str) -> Tuple[List[str], List[str], Dict[str, str]]:
     """
     Load sequences from a FASTA file.
     
@@ -20,21 +20,29 @@ def load_sequences_from_fasta(fasta_path: str) -> Tuple[List[str], List[str]]:
         fasta_path: Path to the FASTA file
         
     Returns:
-        Tuple of (sequences, headers) where sequences is a list of DNA strings
-        and headers is a list of sequence identifiers
+        Tuple of (sequences, headers, header_mapping) where:
+        - sequences is a list of DNA strings
+        - headers is a list of sequence identifiers  
+        - header_mapping is a dict from sequence ID to full header (ID + description)
     """
     sequences = []
     headers = []
+    header_mapping = {}
     
     try:
         for record in SeqIO.parse(fasta_path, "fasta"):
             sequences.append(str(record.seq).upper())
-            headers.append(record.id)
+            seq_id = record.id
+            headers.append(seq_id)
+            
+            # Preserve full header: ID + description if present
+            full_header = record.description if record.description else record.id
+            header_mapping[seq_id] = full_header
     except Exception as e:
         logging.error(f"Error reading FASTA file: {e}")
         raise
     
-    return sequences, headers
+    return sequences, headers, header_mapping
 
 
 def calculate_distance_matrix(sequences: List[str], 

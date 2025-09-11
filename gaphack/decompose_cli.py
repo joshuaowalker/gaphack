@@ -8,6 +8,80 @@ from typing import Optional
 
 from .decompose import DecomposeClustering, DecomposeResults
 from .utils import save_clusters_to_file
+from typing import Dict, List
+
+
+def _save_decompose_fasta_files(all_clusters: Dict[str, List[str]], unassigned: List[str],
+                               output_base: str, headers: List[str], sequences: List[str],
+                               header_mapping: Dict[str, str]) -> None:
+    """Save decompose clusters to FASTA files with preserved cluster IDs."""
+    from Bio.Seq import Seq
+    from Bio.SeqRecord import SeqRecord
+    from Bio import SeqIO
+    
+    # Create header to index mapping - headers contain sequence IDs
+    header_to_idx = {header: i for i, header in enumerate(headers)}
+    
+    # Save each cluster to a separate FASTA file with original cluster ID
+    for cluster_id, cluster_headers in all_clusters.items():
+        # Convert cluster_id to valid filename (replace problematic characters)
+        safe_cluster_id = cluster_id.replace('_', '_')  # Keep underscores as-is
+        cluster_file = f"{output_base}.{safe_cluster_id}.fasta"
+        
+        records = []
+        for header in cluster_headers:
+            if header in header_to_idx:
+                seq_idx = header_to_idx[header]
+                # Get full header from mapping and preserve original metadata
+                full_header = header_mapping.get(header, header)
+                original_desc = full_header.split(' ', 1)[1] if ' ' in full_header else ""
+                
+                # Combine original description with cluster info
+                if original_desc:
+                    full_description = f"{original_desc} {cluster_id}"
+                else:
+                    full_description = cluster_id
+                
+                record = SeqRecord(
+                    Seq(sequences[seq_idx]),
+                    id=header,  # Use sequence ID as BioPython ID
+                    description=full_description
+                )
+                records.append(record)
+        
+        if records:  # Only create file if it has sequences
+            with open(cluster_file, 'w') as f:
+                SeqIO.write(records, f, "fasta-2line")
+            logging.debug(f"Wrote {len(records)} sequences to {cluster_file}")
+    
+    # Save unassigned sequences
+    if unassigned:
+        unassigned_file = f"{output_base}.unassigneds.fasta"
+        records = []
+        for header in unassigned:
+            if header in header_to_idx:
+                seq_idx = header_to_idx[header]
+                # Get full header from mapping and preserve original metadata
+                full_header = header_mapping.get(header, header)
+                original_desc = full_header.split(' ', 1)[1] if ' ' in full_header else ""
+                
+                # Combine original description with unassigned info
+                if original_desc:
+                    full_description = f"{original_desc} unassigned"
+                else:
+                    full_description = "unassigned"
+                
+                record = SeqRecord(
+                    Seq(sequences[seq_idx]),
+                    id=header,  # Use sequence ID as BioPython ID
+                    description=full_description
+                )
+                records.append(record)
+        
+        if records:
+            with open(unassigned_file, 'w') as f:
+                SeqIO.write(records, f, "fasta-2line")
+            logging.debug(f"Wrote {len(records)} unassigned sequences to {unassigned_file}")
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -28,17 +102,18 @@ def save_decompose_results(results: DecomposeResults, output_base: str,
     # Load sequences from input FASTA if provided (for FASTA output)
     sequences = None
     all_headers = None
+    header_mapping = None
     if input_fasta:
         from .utils import load_sequences_from_fasta
-        sequences, all_headers = load_sequences_from_fasta(input_fasta)
+        sequences, all_headers, header_mapping = load_sequences_from_fasta(input_fasta)
     
     # Create a mapping of headers to indices for the loaded sequences
     if all_headers:
         header_to_idx = {header: i for i, header in enumerate(all_headers)}
         
-        # Convert clusters to index-based format
+        # Convert clusters to index-based format (use all_clusters to include conflicts in FASTA files)
         cluster_list = []
-        for cluster_id, cluster_headers in results.clusters.items():
+        for cluster_id, cluster_headers in results.all_clusters.items():
             cluster_indices = []
             for header in cluster_headers:
                 if header in header_to_idx:
@@ -56,17 +131,9 @@ def save_decompose_results(results: DecomposeResults, output_base: str,
             else:
                 logging.warning(f"Unassigned header '{header}' not found in input sequences")
         
-        # Save FASTA files using existing utility
-        from .utils import save_clusters_to_file
-        save_clusters_to_file(
-            clusters=cluster_list,
-            singletons=unassigned_indices,
-            output_path=output_base,
-            headers=all_headers,
-            sequences=sequences,
-            format='fasta',
-            singleton_label='unassigned'
-        )
+        # Save FASTA files with preserved cluster IDs
+        _save_decompose_fasta_files(results.all_clusters, results.unassigned, output_base, 
+                                   all_headers, sequences, header_mapping)
     
     # Save main TSV assignment file
     tsv_file = f"{output_base}.decompose_assignments.tsv"
@@ -146,6 +213,18 @@ Examples:
   # Supervised mode with target sequences
   gaphack-decompose input.fasta --targets targets.fasta -o results
 
+  # Unsupervised mode with cluster count limit
+  gaphack-decompose input.fasta --strategy unsupervised --max-clusters 50 -o results
+
+  # Unsupervised mode with sequence coverage limit
+  gaphack-decompose input.fasta --strategy unsupervised --max-sequences 1000 -o results
+
+  # Unsupervised mode until input exhausted (cluster all sequences)
+  gaphack-decompose input.fasta --strategy unsupervised -o results
+
+  # Disable overlaps (each sequence in at most one cluster)
+  gaphack-decompose input.fasta --strategy unsupervised --no-overlaps -o results
+
   # Custom BLAST parameters
   gaphack-decompose input.fasta --targets targets.fasta \\
     --blast-max-hits 1000 --min-identity 85.0 -o results
@@ -160,7 +239,15 @@ Examples:
     
     # Target selection arguments
     parser.add_argument('--targets', 
-                       help='FASTA file containing target sequences for supervised mode (required)')
+                       help='FASTA file containing target sequences for supervised mode')
+    parser.add_argument('--strategy', choices=['supervised', 'unsupervised'], default='supervised',
+                       help='Target selection strategy (default: supervised)')
+    parser.add_argument('--max-clusters', type=int,
+                       help='Maximum clusters to create (unsupervised mode, optional)')
+    parser.add_argument('--max-sequences', type=int,
+                       help='Maximum sequences to assign (unsupervised mode, optional)')
+    parser.add_argument('--no-overlaps', action='store_true',
+                       help='Disable sequence overlaps - each sequence assigned to at most one cluster')
     
     # BLAST parameters
     parser.add_argument('--blast-max-hits', type=int, default=500,
@@ -197,13 +284,19 @@ Examples:
         logger.error(f"Input FASTA file not found: {args.input_fasta}")
         sys.exit(1)
     
-    if not args.targets:
-        logger.error("--targets is required for supervised mode")
-        sys.exit(1)
-    
-    if not Path(args.targets).exists():
-        logger.error(f"Targets FASTA file not found: {args.targets}")
-        sys.exit(1)
+    # Strategy-specific validation
+    if args.strategy == "supervised":
+        if not args.targets:
+            logger.error("--targets is required for supervised mode")
+            sys.exit(1)
+        if not Path(args.targets).exists():
+            logger.error(f"Targets FASTA file not found: {args.targets}")
+            sys.exit(1)
+    elif args.strategy == "unsupervised":
+        if args.targets:
+            logger.warning("--targets specified but ignored in unsupervised mode")
+        if not args.max_clusters and not args.max_sequences:
+            logger.info("No stopping criteria specified - will cluster until input is exhausted")
     
     # Initialize decomposition clustering
     logger.info("Initializing gaphack-decompose")
@@ -216,6 +309,7 @@ Examples:
         blast_threads=args.blast_threads,
         blast_evalue=args.blast_evalue,
         min_identity=args.min_identity,
+        allow_overlaps=not args.no_overlaps,
         show_progress=not args.no_progress,
         logger=logger
     )
@@ -225,7 +319,9 @@ Examples:
         results = decomposer.decompose(
             input_fasta=args.input_fasta,
             targets_fasta=args.targets,
-            strategy="supervised"
+            strategy=args.strategy,
+            max_clusters=args.max_clusters,
+            max_sequences=args.max_sequences
         )
         
         # Save results

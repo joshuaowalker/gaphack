@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 @dataclass
 class DecomposeResults:
     """Results from decomposition clustering."""
-    clusters: Dict[str, List[str]] = field(default_factory=dict)  # cluster_id -> sequence headers
+    clusters: Dict[str, List[str]] = field(default_factory=dict)  # cluster_id -> sequence headers (non-conflicted only)
+    all_clusters: Dict[str, List[str]] = field(default_factory=dict)  # cluster_id -> sequence headers (including conflicts)
     unassigned: List[str] = field(default_factory=list)  # sequence headers never assigned
     conflicts: Dict[str, List[str]] = field(default_factory=dict)  # seq_id -> cluster_ids (multi-assigned)
     iteration_summaries: List[Dict] = field(default_factory=list)  # per-iteration statistics
@@ -68,6 +69,10 @@ class AssignmentTracker:
                 single_assignments[seq_id] = cluster_id
         return single_assignments
     
+    def get_all_assignments(self) -> Dict[str, List[Tuple[str, int]]]:
+        """Get all assignments including conflicts."""
+        return self.assignments.copy()
+    
     def get_unassigned(self, all_sequence_ids: List[str]) -> List[str]:
         """Get sequences that were never assigned."""
         return [seq_id for seq_id in all_sequence_ids if not self.is_assigned(seq_id)]
@@ -98,6 +103,143 @@ class SupervisedTargetSelector:
                 not assignment_tracker.is_assigned(target_header)):
                 return True
         return False
+    
+    def add_blast_neighborhood(self, target_header: str, neighborhood_headers: List[str]) -> None:
+        """No-op for supervised mode - doesn't use BLAST memory."""
+        pass
+    
+    def mark_sequences_processed(self, processed_headers: List[str], allow_overlaps: bool = True) -> None:
+        """No-op for supervised mode - doesn't need memory management."""
+        pass
+
+
+class BlastResultMemory:
+    """Memory pool for storing BLAST neighborhoods for spiral target selection."""
+    
+    def __init__(self):
+        self.unprocessed_neighborhoods: Dict[str, Set[str]] = {}  # target_header -> neighborhood_headers
+        self.candidate_pool: Set[str] = set()  # All unassigned sequences from previous neighborhoods
+        self.fully_processed_targets: Set[str] = set()
+    
+    def add_neighborhood(self, target_header: str, neighborhood_headers: List[str]) -> None:
+        """Add a BLAST neighborhood to memory."""
+        neighborhood_set = set(neighborhood_headers)
+        self.unprocessed_neighborhoods[target_header] = neighborhood_set
+        self.candidate_pool.update(neighborhood_set)
+        logger.debug(f"Added neighborhood for {target_header}: {len(neighborhood_headers)} sequences, "
+                    f"total pool: {len(self.candidate_pool)}")
+    
+    def get_spiral_candidates(self, assignment_tracker: AssignmentTracker) -> List[str]:
+        """Get unassigned sequences from BLAST neighborhoods for spiral selection."""
+        candidates = []
+        for seq_header in self.candidate_pool:
+            if not assignment_tracker.is_assigned(seq_header):
+                candidates.append(seq_header)
+        return candidates
+    
+    def mark_processed(self, processed_headers: List[str], allow_overlaps: bool = True) -> None:
+        """Mark sequences as processed and clean up empty neighborhoods."""
+        processed_set = set(processed_headers)
+        
+        if not allow_overlaps:
+            # No overlaps mode: remove processed sequences from candidate pool
+            self.candidate_pool -= processed_set
+            
+            # Clean up neighborhoods that are now fully processed
+            targets_to_remove = []
+            for target_header, neighborhood in self.unprocessed_neighborhoods.items():
+                neighborhood -= processed_set
+                if not neighborhood:  # Neighborhood is empty
+                    targets_to_remove.append(target_header)
+            
+            # Remove empty neighborhoods
+            for target_header in targets_to_remove:
+                del self.unprocessed_neighborhoods[target_header]
+                self.fully_processed_targets.add(target_header)
+            
+            logger.debug(f"Processed {len(processed_headers)} sequences (no overlaps), "
+                        f"pool now: {len(self.candidate_pool)}, "
+                        f"active neighborhoods: {len(self.unprocessed_neighborhoods)}")
+        else:
+            # Overlap mode: keep sequences in candidate pool for future clusters
+            logger.debug(f"Processed {len(processed_headers)} sequences (overlaps allowed), "
+                        f"pool unchanged: {len(self.candidate_pool)}, "
+                        f"active neighborhoods: {len(self.unprocessed_neighborhoods)}")
+
+
+class SpiralTargetSelector:
+    """Target selection strategy using spiral exploration with random fallback."""
+    
+    def __init__(self, all_headers: List[str], max_clusters: Optional[int] = None, 
+                 max_sequences: Optional[int] = None):
+        self.all_headers = all_headers
+        self.max_clusters = max_clusters
+        self.max_sequences = max_sequences
+        self.iteration_count = 0
+        self.blast_memory = BlastResultMemory()
+        self.used_targets: Set[str] = set()
+        
+        # Initialize with random seed if no BLAST history available
+        import random
+        self.random_state = random.Random(42)  # Deterministic for reproducibility
+    
+    def get_next_target(self, assignment_tracker: AssignmentTracker) -> Optional[List[str]]:
+        """Get next target using spiral logic with random fallback."""
+        self.iteration_count += 1
+        
+        # Try spiral selection first: pick from previous BLAST neighborhoods
+        spiral_candidates = self.blast_memory.get_spiral_candidates(assignment_tracker)
+        spiral_candidates = [h for h in spiral_candidates if h not in self.used_targets]
+        
+        target_header = None
+        selection_method = ""
+        
+        if spiral_candidates:
+            # Spiral selection: choose from BLAST neighborhood candidates
+            target_header = self.random_state.choice(spiral_candidates)
+            selection_method = "spiral"
+        else:
+            # Random fallback: choose any unassigned sequence
+            unassigned_candidates = [h for h in self.all_headers 
+                                   if (not assignment_tracker.is_assigned(h) and 
+                                       h not in self.used_targets)]
+            if unassigned_candidates:
+                target_header = self.random_state.choice(unassigned_candidates)
+                selection_method = "random"
+        
+        if target_header:
+            self.used_targets.add(target_header)
+            logger.debug(f"Iteration {self.iteration_count}: selected '{target_header}' via {selection_method} "
+                        f"(spiral_pool: {len(spiral_candidates)}, total_unassigned: {len([h for h in self.all_headers if not assignment_tracker.is_assigned(h)])})")
+            return [target_header]
+        
+        return None  # No more targets available
+    
+    def has_more_targets(self, assignment_tracker: AssignmentTracker) -> bool:
+        """Check if there are more targets to process based on stopping criteria."""
+        # Check cluster count limit
+        if self.max_clusters and self.iteration_count >= self.max_clusters:
+            return False
+        
+        # Check sequence assignment limit
+        if self.max_sequences:
+            assigned_count = len(assignment_tracker.assigned_sequences)
+            if assigned_count >= self.max_sequences:
+                return False
+        
+        # Check if any unassigned sequences remain
+        unassigned_candidates = [h for h in self.all_headers 
+                               if (not assignment_tracker.is_assigned(h) and 
+                                   h not in self.used_targets)]
+        return len(unassigned_candidates) > 0
+    
+    def add_blast_neighborhood(self, target_header: str, neighborhood_headers: List[str]) -> None:
+        """Store BLAST neighborhood before pruning for future spiral selection."""
+        self.blast_memory.add_neighborhood(target_header, neighborhood_headers)
+    
+    def mark_sequences_processed(self, processed_headers: List[str], allow_overlaps: bool = True) -> None:
+        """Update memory after clustering iteration."""
+        self.blast_memory.mark_processed(processed_headers, allow_overlaps)
 
 
 class DecomposeClustering:
@@ -111,6 +253,7 @@ class DecomposeClustering:
                  blast_threads: Optional[int] = None,
                  blast_evalue: float = 1e-5,
                  min_identity: Optional[float] = None,
+                 allow_overlaps: bool = True,
                  show_progress: bool = True,
                  logger: Optional[logging.Logger] = None):
         """Initialize decomposition clustering.
@@ -123,6 +266,7 @@ class DecomposeClustering:
             blast_threads: BLAST thread count (auto if None)
             blast_evalue: BLAST e-value threshold
             min_identity: BLAST identity threshold (auto if None)
+            allow_overlaps: Allow sequences to appear in multiple clusters (default: True)
             show_progress: Show progress bars
             logger: Logger instance
         """
@@ -133,6 +277,7 @@ class DecomposeClustering:
         self.blast_threads = blast_threads
         self.blast_evalue = blast_evalue
         self.min_identity = min_identity
+        self.allow_overlaps = allow_overlaps
         self.show_progress = show_progress
         self.logger = logger or logging.getLogger(__name__)
         
@@ -168,12 +313,19 @@ class DecomposeClustering:
         if strategy == "supervised":
             if not targets_fasta:
                 raise ValueError("targets_fasta is required for supervised mode")
-        elif strategy not in ["supervised"]:  # Only supervised implemented in Phase 1
-            raise NotImplementedError(f"Strategy '{strategy}' not yet implemented")
+        elif strategy == "unsupervised":
+            # No validation needed - will run until input exhausted if no limits specified
+            pass
+        else:
+            raise ValueError(f"Unknown strategy '{strategy}'. Valid strategies: 'supervised', 'unsupervised'")
         
         # Load input sequences
-        sequences, headers = load_sequences_from_fasta(input_fasta)
+        sequences, headers, header_mapping = load_sequences_from_fasta(input_fasta)
         self.logger.info(f"Loaded {len(sequences)} sequences from {input_fasta}")
+        
+        # Log overlap policy
+        overlap_mode = "allowed" if self.allow_overlaps else "disabled"
+        self.logger.info(f"Sequence overlaps: {overlap_mode}")
         
         # Initialize BLAST neighborhood finder
         blast_finder = BlastNeighborhoodFinder(sequences, headers)
@@ -183,7 +335,7 @@ class DecomposeClustering:
         
         # Initialize target selector based on strategy
         if strategy == "supervised":
-            target_sequences, target_headers = load_sequences_from_fasta(targets_fasta)
+            target_sequences, target_headers, _ = load_sequences_from_fasta(targets_fasta)
             self.logger.info(f"Loaded {len(target_headers)} target sequences from targets file")
             
             # Find matching sequences in input based on sequence content, not headers
@@ -198,14 +350,50 @@ class DecomposeClustering:
             # Create target selector with input file headers (not target file headers)
             matched_input_headers = [info['input_header'] for info in matched_target_info]
             target_selector = SupervisedTargetSelector(matched_input_headers)
+        elif strategy == "unsupervised":
+            # Create spiral target selector with all sequence headers
+            target_selector = SpiralTargetSelector(
+                all_headers=headers,
+                max_clusters=max_clusters, 
+                max_sequences=max_sequences
+            )
+            self.logger.info(f"Initialized unsupervised mode with spiral target selection: "
+                           f"max_clusters={max_clusters}, max_sequences={max_sequences}")
         else:
-            raise NotImplementedError(f"Strategy '{strategy}' not yet implemented")
+            raise ValueError(f"Unknown strategy '{strategy}'")
         
-        # Initialize overall progress tracking
+        # Initialize progress tracking based on strategy and stopping criteria
         if strategy == "supervised":
-            total_targets = len(matched_input_headers)
+            # Supervised mode: track target completion
+            progress_mode = "targets"
+            progress_total = len(matched_input_headers)
+            progress_unit = " targets"
+            progress_desc = "Processing targets"
+        elif strategy == "unsupervised":
+            if max_clusters:
+                # Cluster count mode: track cluster creation
+                progress_mode = "clusters"
+                progress_total = max_clusters
+                progress_unit = " clusters"
+                progress_desc = "Creating clusters"
+            elif max_sequences:
+                # Sequence count mode: track sequence assignment
+                progress_mode = "sequences"
+                progress_total = max_sequences
+                progress_unit = " sequences"
+                progress_desc = "Assigning sequences"
+            else:
+                # Exhaustive mode: track sequences until all assigned
+                progress_mode = "sequences_exhaustive"
+                progress_total = len(headers)
+                progress_unit = " sequences"
+                progress_desc = "Assigning sequences"
         else:
-            total_targets = max_clusters or float('inf')
+            # Fallback
+            progress_mode = "targets"
+            progress_total = float('inf')
+            progress_unit = " targets"
+            progress_desc = "Processing"
         
         # Statistics tracking for progress bar
         cluster_sizes = []
@@ -213,7 +401,7 @@ class DecomposeClustering:
         
         # Create overall progress bar
         from tqdm import tqdm
-        pbar = tqdm(total=total_targets, desc="Processing targets", unit=" targets",
+        pbar = tqdm(total=progress_total, desc=progress_desc, unit=progress_unit,
                    bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}")
         
         # Main decomposition loop
@@ -243,37 +431,47 @@ class DecomposeClustering:
                 
                 self.logger.debug(f"Found neighborhood of {len(neighborhood_headers)} sequences")
                 
-                # Filter to unassigned sequences only
-                unassigned_in_neighborhood = [h for h in neighborhood_headers 
-                                            if not assignment_tracker.is_assigned(h)]
+                # Store BLAST neighborhood in memory for spiral target selection (before pruning)
+                if target_headers_for_iteration:
+                    target_selector.add_blast_neighborhood(target_headers_for_iteration[0], neighborhood_headers)
                 
-                if len(unassigned_in_neighborhood) < len(target_headers_for_iteration):
-                    self.logger.debug(f"Some targets already assigned - using {len(unassigned_in_neighborhood)} unassigned sequences")
-                
-                if not unassigned_in_neighborhood:
-                    self.logger.debug(f"No unassigned sequences in neighborhood - skipping iteration")
-                    continue
+                # Filter neighborhood based on overlap policy
+                if self.allow_overlaps:
+                    # Allow overlaps: use all sequences in neighborhood
+                    sequences_for_clustering = neighborhood_headers
+                    self.logger.debug(f"Using all {len(sequences_for_clustering)} sequences in neighborhood (overlaps allowed)")
+                else:
+                    # No overlaps: filter to unassigned sequences only  
+                    sequences_for_clustering = [h for h in neighborhood_headers 
+                                              if not assignment_tracker.is_assigned(h)]
+                    
+                    if len(sequences_for_clustering) < len(target_headers_for_iteration):
+                        self.logger.debug(f"Some targets already assigned - using {len(sequences_for_clustering)} unassigned sequences")
+                    
+                    if not sequences_for_clustering:
+                        self.logger.debug(f"No unassigned sequences in neighborhood - skipping iteration")
+                        continue
                 
                 # Get target indices in the neighborhood subset
-                neighborhood_to_full_idx = {h: headers.index(h) for h in unassigned_in_neighborhood}
+                neighborhood_to_full_idx = {h: headers.index(h) for h in sequences_for_clustering}
                 target_indices_in_neighborhood = []
                 
                 for target_header in target_headers_for_iteration:
-                    if target_header in unassigned_in_neighborhood:
-                        neighborhood_idx = unassigned_in_neighborhood.index(target_header)
+                    if target_header in sequences_for_clustering:
+                        neighborhood_idx = sequences_for_clustering.index(target_header)
                         target_indices_in_neighborhood.append(neighborhood_idx)
                 
                 if not target_indices_in_neighborhood:
-                    self.logger.debug("No targets found in unassigned neighborhood - skipping iteration")
+                    self.logger.debug("No targets found in neighborhood subset - skipping iteration")
                     continue
                 
                 # Extract sequences for neighborhood
-                neighborhood_sequences = [sequences[headers.index(h)] for h in unassigned_in_neighborhood]
+                neighborhood_sequences = [sequences[headers.index(h)] for h in sequences_for_clustering]
                 
                 # OPTIMIZATION: Prune neighborhood based on distance to targets
                 # This reduces computational cost of target clustering by focusing on closest candidates
                 pruned_sequences, pruned_headers, pruned_target_indices = self._prune_neighborhood_by_distance(
-                    neighborhood_sequences, unassigned_in_neighborhood, target_indices_in_neighborhood
+                    neighborhood_sequences, sequences_for_clustering, target_indices_in_neighborhood
                 )
                 
                 # Create lazy distance provider for pruned neighborhood
@@ -296,52 +494,87 @@ class DecomposeClustering:
                 # Log distance computation statistics
                 if hasattr(distance_provider, 'get_cache_stats'):
                     stats = distance_provider.get_cache_stats()
-                    self.logger.debug(f"Distance computation stats: {stats['cached_distances']} computed "
-                                   f"out of {stats['theoretical_max']} possible "
-                                   f"({100.0 * stats['cached_distances'] / stats['theoretical_max']:.1f}% coverage)")
+                    if stats['theoretical_max'] > 0:
+                        coverage_pct = 100.0 * stats['cached_distances'] / stats['theoretical_max']
+                        self.logger.debug(f"Distance computation stats: {stats['cached_distances']} computed "
+                                       f"out of {stats['theoretical_max']} possible "
+                                       f"({coverage_pct:.1f}% coverage)")
+                    else:
+                        self.logger.debug(f"Distance computation stats: {stats['cached_distances']} computed "
+                                       f"(no pairwise distances needed for single sequence)")
                 
                 # Convert indices back to sequence headers
                 target_cluster_headers = [pruned_headers[i] for i in target_cluster_indices]
                 remaining_headers = [pruned_headers[i] for i in remaining_indices]
                 
                 # Generate unique cluster ID
-                cluster_id = f"decompose_cluster_{iteration:03d}_001"
+                cluster_id = f"cluster_{iteration:03d}"
                 
                 # Assign sequences to cluster
                 assignment_tracker.assign_sequences(target_cluster_headers, cluster_id, iteration)
+                
+                # Update BLAST memory for spiral target selection
+                target_selector.mark_sequences_processed(target_cluster_headers, self.allow_overlaps)
                 
                 # Record iteration summary
                 iteration_summary = {
                     'iteration': iteration,
                     'target_headers': target_headers_for_iteration,
                     'neighborhood_size': len(neighborhood_headers),
-                    'unassigned_in_neighborhood': len(unassigned_in_neighborhood),
+                    'sequences_for_clustering': len(sequences_for_clustering),
                     'pruned_size': len(pruned_sequences),
                     'cluster_size': len(target_cluster_headers),
                     'remaining_size': len(remaining_headers),
                     'cluster_id': cluster_id,
-                    'gap_size': clustering_metrics['best_config']['gap_size']
+                    'gap_size': clustering_metrics['best_config'].get('gap_size', 0.0)
                 }
                 
                 results.iteration_summaries.append(iteration_summary)
                 
                 # Update statistics for progress bar
                 cluster_sizes.append(len(target_cluster_headers))
-                gap_sizes.append(clustering_metrics['best_config']['gap_size'])
+                gap_sizes.append(clustering_metrics['best_config'].get('gap_size', 0.0))
                 
-                # Calculate statistics for progress bar postfix
+                # Calculate statistics for progress bar
                 median_cluster_size = sorted(cluster_sizes)[len(cluster_sizes)//2] if cluster_sizes else 0
                 median_gap_size = sorted(gap_sizes)[len(gap_sizes)//2] if gap_sizes else 0
                 assigned_total = len(assignment_tracker.assigned_sequences)
+                clusters_created = iteration
+                
+                # Update progress based on mode
+                if progress_mode == "targets":
+                    # Supervised mode: increment by 1 target processed
+                    progress_increment = 1
+                    postfix = f"med_clust={median_cluster_size}, med_gap={median_gap_size:.3f}, assigned={assigned_total}"
+                elif progress_mode == "clusters":
+                    # Cluster count mode: increment by 1 cluster created
+                    progress_increment = 1
+                    postfix = f"med_clust={median_cluster_size}, med_gap={median_gap_size:.3f}, assigned={assigned_total}"
+                elif progress_mode in ["sequences", "sequences_exhaustive"]:
+                    # Sequence count mode: track unique sequences assigned
+                    if self.allow_overlaps:
+                        # In overlap mode, count unique sequences assigned (deduplicate)
+                        unique_assigned_count = len(assignment_tracker.assigned_sequences)
+                        progress_increment = unique_assigned_count - pbar.n  # Only increment by new unique assignments
+                    else:
+                        # In no-overlap mode, all assignments are unique
+                        progress_increment = len(target_cluster_headers)
+                    
+                    postfix = f"clusters={clusters_created}, med_clust={median_cluster_size}, med_gap={median_gap_size:.3f}"
+                else:
+                    # Fallback
+                    progress_increment = 1
+                    postfix = f"med_clust={median_cluster_size}, med_gap={median_gap_size:.3f}, assigned={assigned_total}"
                 
                 # Update progress bar
-                pbar.set_postfix_str(f"med_clust={median_cluster_size}, med_gap={median_gap_size:.3f}, assigned={assigned_total}")
-                pbar.update(1)
+                pbar.set_postfix_str(postfix)
+                pbar.update(progress_increment)
                 
                 # All iteration completion messages at debug level - progress bar shows the main info
+                gap_size = clustering_metrics['best_config'].get('gap_size', 0.0)
                 self.logger.debug(f"Iteration {iteration} complete: "
                                 f"clustered {len(target_cluster_headers)} sequences, "
-                                f"gap size: {clustering_metrics['best_config']['gap_size']:.4f}")
+                                f"gap size: {gap_size:.4f}")
                 
                 # Check stopping criteria for unsupervised modes
                 if max_clusters and iteration >= max_clusters:
@@ -365,20 +598,29 @@ class DecomposeClustering:
         results.total_sequences_processed = len(assignment_tracker.assigned_sequences)
         results.coverage_percentage = (len(assignment_tracker.assigned_sequences) / len(headers)) * 100.0
         
-        # Get single assignments (no conflicts for Phase 1)
+        # Get single assignments (no conflicts) for summary reporting
         single_assignments = assignment_tracker.get_single_assignments()
         
-        # Group sequences by cluster
+        # Group non-conflicted sequences by cluster
         results.clusters = {}
         for seq_id, cluster_id in single_assignments.items():
             if cluster_id not in results.clusters:
                 results.clusters[cluster_id] = []
             results.clusters[cluster_id].append(seq_id)
         
+        # Group ALL sequences by cluster (including conflicts) for FASTA generation
+        results.all_clusters = {}
+        all_assignments = assignment_tracker.get_all_assignments()
+        for seq_id, assignments in all_assignments.items():
+            for cluster_id, iteration in assignments:
+                if cluster_id not in results.all_clusters:
+                    results.all_clusters[cluster_id] = []
+                results.all_clusters[cluster_id].append(seq_id)
+        
         # Get unassigned sequences
         results.unassigned = assignment_tracker.get_unassigned(headers)
         
-        # Get conflicts (should be empty in Phase 1)
+        # Get conflicts
         results.conflicts = assignment_tracker.get_conflicts()
         
         # Enhanced final summary with aggregate statistics
