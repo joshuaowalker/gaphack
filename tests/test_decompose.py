@@ -288,8 +288,8 @@ class TestDecomposeClustering:
         
         # Mock input sequences
         mock_load_sequences.side_effect = [
-            (["ATCG", "GCTA"], ["seq1", "seq2"]),  # input sequences
-            ([], [])  # empty targets
+            (["ATCG", "GCTA"], ["seq1", "seq2"], {"seq1": "seq1", "seq2": "seq2"}),  # input sequences
+            ([], [], {})  # empty targets
         ]
         
         # Mock BLAST finder
