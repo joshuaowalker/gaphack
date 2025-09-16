@@ -160,7 +160,8 @@ class TargetModeClustering:
                 closest_seq, closest_distance = self._find_closest_to_target(
                     target_cluster, remaining, provider
                 )
-                
+                sequence = sequences[closest_seq]
+                self.logger.debug(f"Target sequence: {sequence[:20]}..{len(sequence)-40}..{sequence[-20:]}")
                 # Stop if closest sequence exceeds max threshold
                 if closest_distance > self.max_lump:
                     self.logger.debug(f"Stopping: closest distance {closest_distance:.4f} exceeds max_lump {self.max_lump}")
@@ -176,6 +177,7 @@ class TargetModeClustering:
                         target_cluster, remaining, provider, gap_calculator
                     )
                     current_gap = gap_metrics[f'p{self.target_percentile}']['gap_size']
+                    self.logger.debug(f"Gap: {current_gap:.4f}")
                 else:
                     # No remaining sequences - gap is undefined
                     gap_metrics = None
@@ -277,13 +279,13 @@ class TargetModeClustering:
                                      distance_provider: DistanceProvider, gap_calculator: GapCalculator) -> Dict:
         """
         Calculate gap metrics for target cluster vs remaining sequences.
-        
+
         Args:
             target_cluster: Set of indices in target cluster
             remaining: Set of indices of remaining sequences
             distance_provider: Provider for distance calculations
             gap_calculator: Gap calculation utility
-            
+
         Returns:
             Dict with gap metrics at different percentiles
         """
@@ -295,49 +297,48 @@ class TargetModeClustering:
                 'p95': {'gap_size': 0.0, 'gap_exists': False, 'intra_upper': 0.0, 'inter_lower': 0.0},
                 'p90': {'gap_size': 0.0, 'gap_exists': False, 'intra_upper': 0.0, 'inter_lower': 0.0}
             }
-        
-        # Note: we don't need to precompute all distances - get_distance will compute on-demand
-        
+
         # Get intra-cluster distances (within target cluster)
         intra_distances = []
         target_list = list(target_cluster)
-        for i, seq1 in enumerate(target_list):
-            for j, seq2 in enumerate(target_list):
-                if i < j:  # Avoid duplicates and self-distances
-                    distance = distance_provider.get_distance(seq1, seq2)
-                    intra_distances.append(distance)
-        
-        # Get inter-cluster distances (target cluster to remaining sequences)  
+        for i in range(len(target_list)):
+            for j in range(i + 1, len(target_list)):
+                distance = distance_provider.get_distance(target_list[i], target_list[j])
+                intra_distances.append(distance)
+
+        # Get inter-cluster distances (from target cluster to remaining sequences)
         inter_distances = []
-        for target_seq in target_cluster:
-            distances_to_remaining = distance_provider.get_distances_from_sequence(target_seq, remaining)
-            inter_distances.extend(distances_to_remaining.values())
-        
-        # Convert to sorted lists for gap calculation
+        remaining_list = list(remaining)
+        for target_idx in target_list:
+            for remaining_idx in remaining_list:
+                distance = distance_provider.get_distance(target_idx, remaining_idx)
+                inter_distances.append(distance)
+
+        # Sort distances for gap calculation
         sorted_intra = sorted(intra_distances) if intra_distances else []
         sorted_inter = sorted(inter_distances) if inter_distances else []
-        
-        # Calculate gap metrics at standard percentiles
+
+        # Handle edge cases where we don't have enough distances
         if not sorted_intra or not sorted_inter:
-            return {
-                f'p{self.target_percentile}': {'gap_size': 0.0, 'gap_exists': False, 'intra_upper': 0.0, 'inter_lower': 0.0},
-                'p100': {'gap_size': 0.0, 'gap_exists': False, 'intra_upper': 0.0, 'inter_lower': 0.0},
-                'p95': {'gap_size': 0.0, 'gap_exists': False, 'intra_upper': 0.0, 'inter_lower': 0.0},
-                'p90': {'gap_size': 0.0, 'gap_exists': False, 'intra_upper': 0.0, 'inter_lower': 0.0}
-            }
-        
-        result = {
-            'p100': gap_calculator._calculate_single_percentile_gap(sorted_intra, sorted_inter, 100),
-            'p95': gap_calculator._calculate_single_percentile_gap(sorted_intra, sorted_inter, 95),
-            'p90': gap_calculator._calculate_single_percentile_gap(sorted_intra, sorted_inter, 90)
-        }
-        
-        # Add specific target percentile if not standard
+            # For single sequence clusters or no remaining sequences, return zero gaps
+            default_metrics = {'gap_size': 0.0, 'gap_exists': False, 'intra_upper': 0.0, 'inter_lower': 0.0}
+            percentiles = [100, 95, 90, self.target_percentile]
+            result = {}
+            for p in percentiles:
+                result[f'p{p}'] = default_metrics.copy()
+        else:
+            # Calculate gap metrics at different percentiles
+            percentiles = [100, 95, 90, self.target_percentile]
+            result = {}
+
+            for p in percentiles:
+                gap_metrics = gap_calculator._calculate_single_percentile_gap(sorted_intra, sorted_inter, p)
+                result[f'p{p}'] = gap_metrics
+
+        # Ensure target percentile is included if different from standard ones
         if self.target_percentile not in [100, 95, 90]:
-            result[f'p{self.target_percentile}'] = gap_calculator._calculate_single_percentile_gap(
-                sorted_intra, sorted_inter, self.target_percentile
-            )
+            result[f'p{self.target_percentile}'] = result[f'p{self.target_percentile}']
         else:
             result[f'p{self.target_percentile}'] = result[f'p{self.target_percentile}']
-        
+
         return result

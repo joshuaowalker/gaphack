@@ -113,7 +113,12 @@ def calculate_distance_matrix(sequences: List[str],
     for i in range(n):
         for j in range(i + 1, n):
             try:
-                result = align_and_score(sequences[i], sequences[j], params)
+                # Pass shortest sequence first for consistent infix alignment
+                seq_i, seq_j = sequences[i], sequences[j]
+                if len(seq_i) <= len(seq_j):
+                    result = align_and_score(seq_i, seq_j, params)
+                else:
+                    result = align_and_score(seq_j, seq_i, params)
                 dist = 1.0 - result.identity
             except Exception as e:
                 logging.warning(f"Alignment failed for sequences {i} and {j}: {e}")

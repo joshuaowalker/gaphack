@@ -250,8 +250,8 @@ Examples:
                        help='Disable sequence overlaps - each sequence assigned to at most one cluster')
     
     # BLAST parameters
-    parser.add_argument('--blast-max-hits', type=int, default=500,
-                       help='Maximum BLAST hits per query (default: 500)')
+    parser.add_argument('--blast-max-hits', type=int, default=1000,
+                       help='Maximum BLAST hits per query (default: 1000)')
     parser.add_argument('--blast-threads', type=int,
                        help='Number of BLAST threads (default: auto)')
     parser.add_argument('--blast-evalue', type=float, default=1e-5,

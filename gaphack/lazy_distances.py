@@ -132,7 +132,12 @@ class LazyDistanceProvider(DistanceProvider):
         
         # Compute distance between the two sequences
         try:
-            result = align_and_score(self.sequences[seq_idx1], self.sequences[seq_idx2], params)
+            # Pass shortest sequence first for consistent infix alignment
+            seq1, seq2 = self.sequences[seq_idx1], self.sequences[seq_idx2]
+            if len(seq1) <= len(seq2):
+                result = align_and_score(seq1, seq2, params)
+            else:
+                result = align_and_score(seq2, seq1, params)
             distance = 1.0 - result.identity
         except Exception as e:
             logger.warning(f"Alignment failed for sequences {seq_idx1} and {seq_idx2}: {e}")
@@ -159,7 +164,7 @@ class LazyDistanceProvider(DistanceProvider):
         distance = self._compute_single_distance(seq_idx1, seq_idx2)
         self._distance_cache[cache_key] = distance
         self._unique_computations += 1
-        
+
         return distance
     
     def get_distances_from_sequence(self, seq_idx: int, target_indices: Set[int]) -> Dict[int, float]:

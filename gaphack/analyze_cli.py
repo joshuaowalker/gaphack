@@ -83,7 +83,7 @@ def analyze_single_cluster(fasta_path: Path,
     
     # Load sequences
     try:
-        sequences, headers = load_sequences_from_fasta(str(fasta_path))
+        sequences, headers, _ = load_sequences_from_fasta(str(fasta_path))
     except Exception as e:
         logging.error(f"Error loading {fasta_path}: {e}")
         return {

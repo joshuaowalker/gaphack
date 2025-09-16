@@ -155,12 +155,8 @@ class BlastNeighborhoodFinder:
         except FileNotFoundError:
             raise RuntimeError("makeblastdb command not found. Please ensure NCBI BLAST+ is installed.")
     
-    def find_neighborhood(self, target_headers: List[str], 
-                         max_hits: int = 500,
-                         e_value_threshold: float = 1e-5,
-                         min_identity: Optional[float] = None,
-                         min_query_coverage: float = 50.0,
-                         min_alignment_length: int = 200) -> List[str]:
+    def find_neighborhood(self, target_headers: List[str], max_hits: int = 1000, e_value_threshold: float = 1e-5,
+                          min_identity: Optional[float] = None) -> List[str]:
         """Find neighborhood sequences for given target headers.
         
         Args:
@@ -168,8 +164,6 @@ class BlastNeighborhoodFinder:
             max_hits: Maximum number of BLAST hits to return per target
             e_value_threshold: E-value threshold for BLAST search
             min_identity: Minimum percent identity (auto-calculated if None)
-            min_query_coverage: Minimum query coverage percentage
-            min_alignment_length: Minimum alignment length in base pairs
             
         Returns:
             List of sequence headers in the neighborhood (including targets)
@@ -195,14 +189,12 @@ class BlastNeighborhoodFinder:
         
         # Calculate threshold if not provided (simple heuristic for now)
         if min_identity is None:
-            min_identity = 80.0  # Conservative default for neighborhood discovery
+            min_identity = 90.0  # Conservative default for neighborhood discovery
             logger.debug(f"Using default BLAST identity threshold: {min_identity:.1f}%")
         
         # Run BLAST search for targets
-        candidates_by_target = self._get_candidates_for_sequences(
-            target_sequences, max_hits, e_value_threshold, min_identity,
-            min_query_coverage, min_alignment_length
-        )
+        candidates_by_target = self._get_candidates_for_sequences(target_sequences, max_hits, e_value_threshold,
+                                                                  min_identity)
         
         # Collect all unique sequence headers from neighborhoods
         neighborhood_headers = set()
@@ -223,12 +215,8 @@ class BlastNeighborhoodFinder:
         
         return neighborhood_list
     
-    def _get_candidates_for_sequences(self, query_sequences: List[Tuple[str, str]], 
-                                    max_targets: int = 500,
-                                    e_value_threshold: float = 1e-5,
-                                    min_identity: float = 80.0,
-                                    min_query_coverage: float = 50.0,
-                                    min_alignment_length: int = 200) -> Dict[str, List[SequenceCandidate]]:
+    def _get_candidates_for_sequences(self, query_sequences: List[Tuple[str, str]], max_targets: int = 1000,
+                                      e_value_threshold: float = 1e-5, min_identity: float = 90.0) -> Dict[str, List[SequenceCandidate]]:
         """Get BLAST candidates for query sequences."""
         # Create temporary batch query file
         batch_query_file = self.cache_dir / f"neighborhood_query_{hash(tuple(seq_id for seq_id, _ in query_sequences))}.fasta"
@@ -245,10 +233,8 @@ class BlastNeighborhoodFinder:
                     SeqIO.write(record, f, "fasta")
             
             # Run BLAST search
-            results_by_query = self._run_blast_search(
-                batch_query_file, max_targets, e_value_threshold, min_identity,
-                min_query_coverage, min_alignment_length, len(query_sequences)
-            )
+            results_by_query = self._run_blast_search(batch_query_file, max_targets, e_value_threshold, min_identity,
+                                                      len(query_sequences))
             
             # Ensure all queries have entries (even if no hits)
             for seq_id, _ in query_sequences:
@@ -262,10 +248,8 @@ class BlastNeighborhoodFinder:
             if batch_query_file.exists():
                 batch_query_file.unlink()
     
-    def _run_blast_search(self, batch_query_file: Path, max_targets: int, 
-                         e_value_threshold: float, min_identity: float,
-                         min_query_coverage: float, min_alignment_length: int,
-                         num_queries: int) -> Dict[str, List[SequenceCandidate]]:
+    def _run_blast_search(self, batch_query_file: Path, max_targets: int, e_value_threshold: float, min_identity: float,
+                          num_queries: int) -> Dict[str, List[SequenceCandidate]]:
         """Run BLAST search and parse results."""
         
         # Run BLAST search with batch queries and multi-threading
@@ -317,12 +301,7 @@ class BlastNeighborhoodFinder:
             alignment_length = int(parts[4])
             e_value = float(parts[5])
             bit_score = float(parts[6])
-            
-            # Apply additional filtering
-            if alignment_length < min_alignment_length:
-                filtered_hits += 1
-                continue
-            
+
             if query_id not in results_by_query:
                 results_by_query[query_id] = []
             

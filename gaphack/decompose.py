@@ -249,7 +249,7 @@ class DecomposeClustering:
                  min_split: float = 0.005,
                  max_lump: float = 0.02,
                  target_percentile: int = 95,
-                 blast_max_hits: int = 500,
+                 blast_max_hits: int = 1000,
                  blast_threads: Optional[int] = None,
                  blast_evalue: float = 1e-5,
                  min_identity: Optional[float] = None,
@@ -262,7 +262,7 @@ class DecomposeClustering:
             min_split: Minimum distance to split clusters in target clustering
             max_lump: Maximum distance to lump clusters in target clustering
             target_percentile: Percentile for gap optimization
-            blast_max_hits: Maximum BLAST hits per query
+            blast_max_hits: Maximum BLAST hits per query (default: 1000)
             blast_threads: BLAST thread count (auto if None)
             blast_evalue: BLAST e-value threshold
             min_identity: BLAST identity threshold (auto if None)
@@ -422,12 +422,11 @@ class DecomposeClustering:
                 self.logger.debug(f"Iteration {iteration}: targeting sequences {target_headers_for_iteration}")
                 
                 # Find BLAST neighborhood
-                neighborhood_headers = blast_finder.find_neighborhood(
-                    target_headers_for_iteration,
-                    max_hits=self.blast_max_hits,
-                    e_value_threshold=self.blast_evalue,
-                    min_identity=self.min_identity
-                )
+                neighborhood_headers = blast_finder.find_neighborhood(target_headers_for_iteration,
+                                                                      max_hits=self.blast_max_hits,
+                                                                      e_value_threshold=self.blast_evalue,
+                                                                      min_identity=self.min_identity)
+
                 
                 self.logger.debug(f"Found neighborhood of {len(neighborhood_headers)} sequences")
                 
@@ -467,7 +466,17 @@ class DecomposeClustering:
                 
                 # Extract sequences for neighborhood
                 neighborhood_sequences = [sequences[headers.index(h)] for h in sequences_for_clustering]
-                
+
+                short_count = 0
+                long_count = 0
+                for sequence in neighborhood_sequences:
+                    if len(sequence) < 400:
+                        short_count += 1
+                    else:
+                        long_count += 1
+
+                self.logger.debug(f"Found {short_count} short and {long_count} long sequences")
+
                 # OPTIMIZATION: Prune neighborhood based on distance to targets
                 # This reduces computational cost of target clustering by focusing on closest candidates
                 pruned_sequences, pruned_headers, pruned_target_indices = self._prune_neighborhood_by_distance(
