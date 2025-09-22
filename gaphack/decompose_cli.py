@@ -103,10 +103,37 @@ def save_decompose_results(results: DecomposeResults, output_base: str,
     sequences = None
     all_headers = None
     header_mapping = None
+    hash_to_headers = None
     if input_fasta:
-        from .utils import load_sequences_from_fasta
-        sequences, all_headers, header_mapping = load_sequences_from_fasta(input_fasta)
-    
+        from .utils import load_sequences_with_deduplication
+        sequences, hash_ids, hash_to_headers = load_sequences_with_deduplication(input_fasta)
+
+        # Create all_headers list containing all original headers for backward compatibility
+        all_headers = []
+        for headers_list in hash_to_headers.values():
+            all_headers.extend(headers_list)
+
+        # Create sequences and headers lists that match each other for FASTA output
+        # We need to expand the deduplicated sequences back to match all original headers
+        expanded_sequences = []
+        expanded_headers = []
+        for hash_id, headers_list in hash_to_headers.items():
+            # Find the sequence for this hash_id
+            hash_index = hash_ids.index(hash_id)
+            sequence = sequences[hash_index]
+
+            # Add this sequence for each original header
+            for header in headers_list:
+                expanded_sequences.append(sequence)
+                expanded_headers.append(header)
+
+        # Update sequences and all_headers to be the expanded versions
+        sequences = expanded_sequences
+        all_headers = expanded_headers
+
+        # Create header_mapping for backward compatibility (use header as both key and value)
+        header_mapping = {header: header for header in all_headers}
+
     # Create a mapping of headers to indices for the loaded sequences
     if all_headers:
         header_to_idx = {header: i for i, header in enumerate(all_headers)}

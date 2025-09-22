@@ -10,6 +10,7 @@ from Bio import SeqIO
 from Bio.Seq import Seq
 import logging
 from tqdm import tqdm
+import hashlib
 
 
 def load_sequences_from_fasta(fasta_path: str) -> Tuple[List[str], List[str], Dict[str, str]]:
@@ -43,6 +44,69 @@ def load_sequences_from_fasta(fasta_path: str) -> Tuple[List[str], List[str], Di
         raise
     
     return sequences, headers, header_mapping
+
+
+def load_sequences_with_deduplication(fasta_path: str) -> Tuple[List[str], List[str], Dict[str, List[str]]]:
+    """
+    Load sequences from a FASTA file with content-based deduplication.
+
+    Args:
+        fasta_path: Path to the FASTA file
+
+    Returns:
+        Tuple of (unique_sequences, hash_ids, hash_to_headers_map) where:
+        - unique_sequences is a list of deduplicated DNA strings
+        - hash_ids is a list of hash identifiers for each unique sequence
+        - hash_to_headers_map is a dict from hash_id to list of original headers
+    """
+    sequence_to_hash = {}  # normalized_seq -> hash_id
+    unique_sequences = []
+    hash_to_headers = {}   # hash_id -> [original_header1, original_header2, ...]
+
+    try:
+        for record in SeqIO.parse(fasta_path, "fasta"):
+            # Normalize sequence (uppercase, strip whitespace)
+            normalized_seq = str(record.seq).upper().strip()
+
+            # Create deterministic hash for sequence content
+            if normalized_seq not in sequence_to_hash:
+                # Use SHA-256 for a robust hash, truncated to 16 chars for readability
+                seq_hash = hashlib.sha256(normalized_seq.encode()).hexdigest()[:16]
+                hash_id = f"seq_{seq_hash}"
+
+                # Handle hash collisions (extremely unlikely but robust)
+                collision_counter = 1
+                base_hash_id = hash_id
+                while hash_id in hash_to_headers:
+                    hash_id = f"{base_hash_id}_{collision_counter}"
+                    collision_counter += 1
+
+                sequence_to_hash[normalized_seq] = hash_id
+                unique_sequences.append(normalized_seq)
+                hash_to_headers[hash_id] = []
+
+            # Add this header to the hash mapping
+            hash_id = sequence_to_hash[normalized_seq]
+
+            # Preserve full header: ID + description if present
+            full_header = record.description if record.description else record.id
+            hash_to_headers[hash_id].append(full_header)
+
+    except Exception as e:
+        logging.error(f"Error reading FASTA file: {e}")
+        raise
+
+    # Create list of hash_ids in same order as unique_sequences
+    hash_ids = [sequence_to_hash[seq] for seq in unique_sequences]
+
+    # Log deduplication statistics
+    total_sequences = sum(len(headers) for headers in hash_to_headers.values())
+    duplicates = total_sequences - len(unique_sequences)
+    if duplicates > 0:
+        logging.info(f"Deduplicated {total_sequences} sequences to {len(unique_sequences)} unique sequences "
+                    f"({duplicates} duplicates removed)")
+
+    return unique_sequences, hash_ids, hash_to_headers
 
 
 def calculate_distance_matrix(sequences: List[str], 

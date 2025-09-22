@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .blast_neighborhood import BlastNeighborhoodFinder
 from .target_clustering import TargetModeClustering
-from .utils import load_sequences_from_fasta, calculate_distance_matrix
+from .utils import load_sequences_from_fasta, load_sequences_with_deduplication, calculate_distance_matrix
 from .lazy_distances import DistanceProviderFactory
 from .core import GapCalculator
 
@@ -326,9 +326,12 @@ class DecomposeClustering:
         else:
             raise ValueError(f"Unknown strategy '{strategy}'. Valid strategies: 'supervised', 'unsupervised'")
         
-        # Load input sequences
-        sequences, headers, header_mapping = load_sequences_from_fasta(input_fasta)
-        self.logger.info(f"Loaded {len(sequences)} sequences from {input_fasta}")
+        # Load input sequences with deduplication
+        sequences, hash_ids, hash_to_headers = load_sequences_with_deduplication(input_fasta)
+        self.logger.info(f"Loaded {len(sequences)} unique sequences from {input_fasta}")
+
+        # For backward compatibility, create headers list using hash_ids
+        headers = hash_ids
         
         # Log overlap policy
         overlap_mode = "allowed" if self.allow_overlaps else "disabled"
@@ -344,31 +347,25 @@ class DecomposeClustering:
         if strategy == "supervised":
             target_sequences, target_headers, _ = load_sequences_from_fasta(targets_fasta)
             self.logger.info(f"Loaded {len(target_headers)} target sequences from targets file")
-            
-            # Find matching sequences in input based on sequence content, not headers
-            self.logger.info(f"Attempting to match {len(target_sequences)} target sequences against {len(sequences)} input sequences")
-            matched_target_info = self._find_matching_targets(target_sequences, target_headers, sequences, headers)
 
-            if not matched_target_info:
+            # Find matching sequences in input based on sequence content
+            self.logger.info(f"Attempting to match {len(target_sequences)} target sequences against {len(sequences)} input sequences")
+            matched_hash_ids = self._find_matching_targets_by_content(target_sequences, target_headers, sequences, hash_ids)
+
+            if not matched_hash_ids:
                 self.logger.error("No target sequences found matching sequences in input file")
                 self.logger.error("Target headers preview:")
                 for i, header in enumerate(target_headers[:3]):
                     self.logger.error(f"  Target {i+1}: {header}")
-                self.logger.error("Input headers preview:")
-                for i, header in enumerate(headers[:3]):
-                    self.logger.error(f"  Input {i+1}: {header}")
+                self.logger.error("Input hash_ids preview:")
+                for i, hash_id in enumerate(hash_ids[:3]):
+                    self.logger.error(f"  Input {i+1}: {hash_id}")
                 raise ValueError("No target sequences found matching sequences in input file")
 
-            self.logger.info(f"Found {len(matched_target_info)} target sequences matching input sequences")
-            
-            # Create target selector with input file headers (not target file headers)
-            matched_input_headers = [info['input_header'] for info in matched_target_info]
+            self.logger.info(f"Found {len(matched_hash_ids)} target sequences matching input sequences")
 
-            # Deduplicate headers to avoid infinite loops when identical sequences have different target headers
-            unique_input_headers = list(dict.fromkeys(matched_input_headers))  # Preserves order
-            self.logger.info(f"Deduplicated {len(matched_input_headers)} matched headers to {len(unique_input_headers)} unique targets")
-
-            target_selector = SupervisedTargetSelector(unique_input_headers)
+            # Target selector now works with hash_ids directly
+            target_selector = SupervisedTargetSelector(matched_hash_ids)
         elif strategy == "unsupervised":
             # Create spiral target selector with all sequence headers
             target_selector = SpiralTargetSelector(
@@ -385,7 +382,7 @@ class DecomposeClustering:
         if strategy == "supervised":
             # Supervised mode: track target completion
             progress_mode = "targets"
-            progress_total = len(matched_input_headers)
+            progress_total = len(matched_hash_ids)
             progress_unit = " targets"
             progress_desc = "Processing targets"
         elif strategy == "unsupervised":
@@ -668,6 +665,9 @@ class DecomposeClustering:
             self.logger.info("Starting cluster overlap detection and merging")
             results = self._merge_overlapping_clusters(results, sequences, headers)
 
+        # Expand hash IDs back to original headers
+        results = self._expand_hash_ids_to_headers(results, hash_to_headers)
+
         return results
     
     def _prune_neighborhood_by_distance(self, neighborhood_sequences: List[str], 
@@ -788,6 +788,98 @@ class DecomposeClustering:
                 self.logger.warning(f"NO MATCH {i+1}: Target '{target_header}' (length: {len(target_seq)}) not found in input sequences")
         
         return matched_targets
+
+    def _find_matching_targets_by_content(self, target_sequences: List[str], target_headers: List[str],
+                                        input_sequences: List[str], input_hash_ids: List[str]) -> List[str]:
+        """Find target sequences that match input sequences by content, return matching hash_ids.
+
+        Args:
+            target_sequences: List of target sequences
+            target_headers: List of target headers
+            input_sequences: List of unique input sequences
+            input_hash_ids: List of hash_ids corresponding to input_sequences
+
+        Returns:
+            List of matching hash_ids from input
+        """
+        matched_hash_ids = []
+
+        # Create a mapping of normalized input sequences to hash_ids for fast lookup
+        input_seq_to_hash_id = {}
+        for seq, hash_id in zip(input_sequences, input_hash_ids):
+            normalized_seq = seq.upper().strip()
+            input_seq_to_hash_id[normalized_seq] = hash_id
+
+        # Find matches
+        for i, (target_seq, target_header) in enumerate(zip(target_sequences, target_headers)):
+            normalized_target = target_seq.upper().strip()
+
+            if normalized_target in input_seq_to_hash_id:
+                hash_id = input_seq_to_hash_id[normalized_target]
+                if hash_id not in matched_hash_ids:  # Avoid duplicates
+                    matched_hash_ids.append(hash_id)
+                self.logger.info(f"MATCH {i+1}: Target '{target_header}' -> Hash '{hash_id}'")
+            else:
+                self.logger.warning(f"NO MATCH {i+1}: Target '{target_header}' (length: {len(target_seq)}) not found in input sequences")
+
+        return matched_hash_ids
+
+    def _expand_hash_ids_to_headers(self, results: DecomposeResults, hash_to_headers: Dict[str, List[str]]) -> DecomposeResults:
+        """Expand hash IDs back to original headers in the results.
+
+        Args:
+            results: Results with hash IDs
+            hash_to_headers: Mapping from hash_id to list of original headers
+
+        Returns:
+            Results with original headers expanded
+        """
+        expanded_results = DecomposeResults()
+        expanded_results.total_iterations = results.total_iterations
+        expanded_results.total_sequences_processed = results.total_sequences_processed
+        expanded_results.coverage_percentage = results.coverage_percentage
+        expanded_results.iteration_summaries = results.iteration_summaries
+
+        # Expand clusters
+        for cluster_id, hash_ids in results.clusters.items():
+            expanded_headers = []
+            for hash_id in hash_ids:
+                if hash_id in hash_to_headers:
+                    expanded_headers.extend(hash_to_headers[hash_id])
+                else:
+                    # Fallback - keep hash_id if no mapping found
+                    expanded_headers.append(hash_id)
+            expanded_results.clusters[cluster_id] = expanded_headers
+
+        # Expand all_clusters
+        for cluster_id, hash_ids in results.all_clusters.items():
+            expanded_headers = []
+            for hash_id in hash_ids:
+                if hash_id in hash_to_headers:
+                    expanded_headers.extend(hash_to_headers[hash_id])
+                else:
+                    expanded_headers.append(hash_id)
+            expanded_results.all_clusters[cluster_id] = expanded_headers
+
+        # Expand unassigned
+        expanded_unassigned = []
+        for hash_id in results.unassigned:
+            if hash_id in hash_to_headers:
+                expanded_unassigned.extend(hash_to_headers[hash_id])
+            else:
+                expanded_unassigned.append(hash_id)
+        expanded_results.unassigned = expanded_unassigned
+
+        # Expand conflicts
+        for hash_id, cluster_ids in results.conflicts.items():
+            if hash_id in hash_to_headers:
+                # Create conflict entries for each original header
+                for original_header in hash_to_headers[hash_id]:
+                    expanded_results.conflicts[original_header] = cluster_ids
+            else:
+                expanded_results.conflicts[hash_id] = cluster_ids
+
+        return expanded_results
 
     def _merge_overlapping_clusters(self, results: DecomposeResults, sequences: List[str], headers: List[str]) -> DecomposeResults:
         """Detect and merge overlapping clusters based on containment coefficient.
