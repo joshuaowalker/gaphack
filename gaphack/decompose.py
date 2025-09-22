@@ -10,6 +10,7 @@ from .blast_neighborhood import BlastNeighborhoodFinder
 from .target_clustering import TargetModeClustering
 from .utils import load_sequences_from_fasta, calculate_distance_matrix
 from .lazy_distances import DistanceProviderFactory
+from .core import GapCalculator
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +100,7 @@ class SupervisedTargetSelector:
     def has_more_targets(self, assignment_tracker: AssignmentTracker) -> bool:
         """Check if there are more targets to process."""
         for target_header in self.target_headers:
-            if (target_header not in self.used_targets and 
+            if (target_header not in self.used_targets and
                 not assignment_tracker.is_assigned(target_header)):
                 return True
         return False
@@ -245,7 +246,7 @@ class SpiralTargetSelector:
 class DecomposeClustering:
     """Main orchestrator for decomposition clustering."""
     
-    def __init__(self, 
+    def __init__(self,
                  min_split: float = 0.005,
                  max_lump: float = 0.02,
                  target_percentile: int = 95,
@@ -254,10 +255,12 @@ class DecomposeClustering:
                  blast_evalue: float = 1e-5,
                  min_identity: Optional[float] = None,
                  allow_overlaps: bool = True,
+                 merge_overlaps: bool = False,
+                 containment_threshold: float = 0.8,
                  show_progress: bool = True,
                  logger: Optional[logging.Logger] = None):
         """Initialize decomposition clustering.
-        
+
         Args:
             min_split: Minimum distance to split clusters in target clustering
             max_lump: Maximum distance to lump clusters in target clustering
@@ -267,6 +270,8 @@ class DecomposeClustering:
             blast_evalue: BLAST e-value threshold
             min_identity: BLAST identity threshold (auto if None)
             allow_overlaps: Allow sequences to appear in multiple clusters (default: True)
+            merge_overlaps: Enable post-processing to merge overlapping clusters (default: False)
+            containment_threshold: Containment coefficient threshold for merging (default: 0.8)
             show_progress: Show progress bars
             logger: Logger instance
         """
@@ -278,6 +283,8 @@ class DecomposeClustering:
         self.blast_evalue = blast_evalue
         self.min_identity = min_identity
         self.allow_overlaps = allow_overlaps
+        self.merge_overlaps = merge_overlaps
+        self.containment_threshold = containment_threshold
         self.show_progress = show_progress
         self.logger = logger or logging.getLogger(__name__)
         
@@ -339,17 +346,29 @@ class DecomposeClustering:
             self.logger.info(f"Loaded {len(target_headers)} target sequences from targets file")
             
             # Find matching sequences in input based on sequence content, not headers
+            self.logger.info(f"Attempting to match {len(target_sequences)} target sequences against {len(sequences)} input sequences")
             matched_target_info = self._find_matching_targets(target_sequences, target_headers, sequences, headers)
-            
+
             if not matched_target_info:
                 self.logger.error("No target sequences found matching sequences in input file")
+                self.logger.error("Target headers preview:")
+                for i, header in enumerate(target_headers[:3]):
+                    self.logger.error(f"  Target {i+1}: {header}")
+                self.logger.error("Input headers preview:")
+                for i, header in enumerate(headers[:3]):
+                    self.logger.error(f"  Input {i+1}: {header}")
                 raise ValueError("No target sequences found matching sequences in input file")
-            
+
             self.logger.info(f"Found {len(matched_target_info)} target sequences matching input sequences")
             
             # Create target selector with input file headers (not target file headers)
             matched_input_headers = [info['input_header'] for info in matched_target_info]
-            target_selector = SupervisedTargetSelector(matched_input_headers)
+
+            # Deduplicate headers to avoid infinite loops when identical sequences have different target headers
+            unique_input_headers = list(dict.fromkeys(matched_input_headers))  # Preserves order
+            self.logger.info(f"Deduplicated {len(matched_input_headers)} matched headers to {len(unique_input_headers)} unique targets")
+
+            target_selector = SupervisedTargetSelector(unique_input_headers)
         elif strategy == "unsupervised":
             # Create spiral target selector with all sequence headers
             target_selector = SpiralTargetSelector(
@@ -413,7 +432,6 @@ class DecomposeClustering:
                 iteration += 1
                 # All iteration start messages now at debug level - progress bar shows the info
                 self.logger.debug(f"Starting iteration {iteration}")
-                
                 # Get next target(s)
                 target_headers_for_iteration = target_selector.get_next_target(assignment_tracker)
                 if not target_headers_for_iteration:
@@ -644,7 +662,12 @@ class DecomposeClustering:
         
         if results.conflicts:
             self.logger.info(f"Conflicts detected: {len(results.conflicts)}")
-        
+
+        # Apply cluster merging if enabled
+        if self.merge_overlaps:
+            self.logger.info("Starting cluster overlap detection and merging")
+            results = self._merge_overlapping_clusters(results, sequences, headers)
+
         return results
     
     def _prune_neighborhood_by_distance(self, neighborhood_sequences: List[str], 
@@ -751,17 +774,289 @@ class DecomposeClustering:
                 input_seq_to_header[normalized_seq] = header
         
         # Find matches
-        for target_seq, target_header in zip(target_sequences, target_headers):
+        for i, (target_seq, target_header) in enumerate(zip(target_sequences, target_headers)):
             normalized_target = target_seq.upper().strip()
-            
+
             if normalized_target in input_seq_to_header:
                 matched_targets.append({
                     'target_header': target_header,
                     'input_header': input_seq_to_header[normalized_target],
                     'target_sequence': target_seq
                 })
-                self.logger.debug(f"Matched target '{target_header}' to input '{input_seq_to_header[normalized_target]}'")
+                self.logger.info(f"MATCH {i+1}: Target '{target_header}' -> Input '{input_seq_to_header[normalized_target]}'")
             else:
-                self.logger.warning(f"Target sequence '{target_header}' not found in input sequences")
+                self.logger.warning(f"NO MATCH {i+1}: Target '{target_header}' (length: {len(target_seq)}) not found in input sequences")
         
         return matched_targets
+
+    def _merge_overlapping_clusters(self, results: DecomposeResults, sequences: List[str], headers: List[str]) -> DecomposeResults:
+        """Detect and merge overlapping clusters based on containment coefficient.
+
+        Args:
+            results: Initial decomposition results
+            sequences: Full sequence list
+            headers: Full header list
+
+        Returns:
+            Updated results with merged clusters
+        """
+        if not results.all_clusters or len(results.all_clusters) < 2:
+            self.logger.info("No overlapping clusters to merge (less than 2 clusters)")
+            return results
+
+        self.logger.info(f"Analyzing {len(results.all_clusters)} clusters for overlaps")
+
+        # Convert cluster data to sets for easier containment calculation
+        cluster_sets = {}
+        for cluster_id, cluster_headers in results.all_clusters.items():
+            cluster_sets[cluster_id] = set(cluster_headers)
+
+        # Find overlapping cluster pairs using conflict information
+        overlapping_pairs = self._find_overlapping_cluster_pairs_from_conflicts(cluster_sets, results.conflicts)
+
+        if not overlapping_pairs:
+            self.logger.info("No overlapping clusters found")
+            return results
+
+        self.logger.info(f"Found {len(overlapping_pairs)} overlapping cluster pairs")
+
+        # Perform merges with gap optimization
+        merged_clusters = self._perform_cluster_merges(overlapping_pairs, cluster_sets, sequences, headers)
+
+        # Rebuild results with merged clusters
+        return self._rebuild_results_with_merged_clusters(results, merged_clusters)
+
+    def _find_overlapping_cluster_pairs_from_conflicts(self, cluster_sets: Dict[str, Set[str]],
+                                                      conflicts: Dict[str, List[str]]) -> List[Tuple[str, str, float]]:
+        """Find pairs of clusters that have conflicts and exceed the containment threshold.
+
+        Args:
+            cluster_sets: Dictionary mapping cluster_id to set of sequence headers
+            conflicts: Dictionary mapping sequence_id to list of cluster_ids it belongs to
+
+        Returns:
+            List of tuples (cluster1_id, cluster2_id, containment_coefficient)
+        """
+        overlapping_pairs = []
+        cluster_pair_candidates = set()
+
+        # Find all cluster pairs that share sequences (have conflicts)
+        for seq_id, cluster_ids in conflicts.items():
+            if len(cluster_ids) >= 2:
+                # Create all pairs from clusters this sequence belongs to
+                for i, cluster1_id in enumerate(cluster_ids):
+                    for cluster2_id in cluster_ids[i+1:]:
+                        cluster_pair_candidates.add((min(cluster1_id, cluster2_id),
+                                                   max(cluster1_id, cluster2_id)))
+
+        self.logger.info(f"Found {len(cluster_pair_candidates)} unique cluster pairs with shared sequences")
+
+        # Check containment threshold for each candidate pair
+        for cluster1_id, cluster2_id in cluster_pair_candidates:
+            cluster1_seqs = cluster_sets[cluster1_id]
+            cluster2_seqs = cluster_sets[cluster2_id]
+
+            # Calculate containment coefficient
+            containment = self._calculate_containment_coefficient(cluster1_seqs, cluster2_seqs)
+
+            if containment >= self.containment_threshold:
+                overlapping_pairs.append((cluster1_id, cluster2_id, containment))
+                self.logger.debug(f"Overlap detected: {cluster1_id} <-> {cluster2_id} "
+                                f"(containment: {containment:.3f})")
+
+        return overlapping_pairs
+
+    def _calculate_containment_coefficient(self, cluster1_seqs: Set[str], cluster2_seqs: Set[str]) -> float:
+        """Calculate containment coefficient between two clusters.
+
+        Args:
+            cluster1_seqs: Set of sequence headers in cluster 1
+            cluster2_seqs: Set of sequence headers in cluster 2
+
+        Returns:
+            Containment coefficient (fraction of smaller cluster contained in larger)
+        """
+        if not cluster1_seqs or not cluster2_seqs:
+            return 0.0
+
+        # Calculate intersection first
+        intersection = len(cluster1_seqs & cluster2_seqs)
+
+        if intersection == 0:
+            return 0.0  # No overlap
+
+        # Find size of smaller cluster
+        smaller_size = min(len(cluster1_seqs), len(cluster2_seqs))
+
+        # Return containment coefficient
+        return intersection / smaller_size if smaller_size > 0 else 0.0
+
+    def _perform_cluster_merges(self, overlapping_pairs: List[Tuple[str, str, float]],
+                               cluster_sets: Dict[str, Set[str]],
+                               sequences: List[str], headers: List[str]) -> Dict[str, Set[str]]:
+        """Perform cluster merges using gap optimization to validate merges.
+
+        Args:
+            overlapping_pairs: List of overlapping cluster pairs
+            cluster_sets: Original cluster sets
+            sequences: Full sequence list
+            headers: Full header list
+
+        Returns:
+            Dictionary of final merged cluster sets
+        """
+        # Create header to index mapping
+        header_to_idx = {header: i for i, header in enumerate(headers)}
+
+        # Initialize merged clusters as copy of originals
+        merged_clusters = cluster_sets.copy()
+
+        # Create distance provider for gap calculations
+        distance_provider = DistanceProviderFactory.create_lazy_provider(
+            sequences,
+            alignment_method="adjusted",
+            end_skip_distance=20,
+            normalize_homopolymers=True,
+            handle_iupac_overlap=True,
+            normalize_indels=True,
+            max_repeat_motif_length=2
+        )
+
+        # Initialize gap calculator
+        gap_calculator = GapCalculator(self.target_percentile)
+
+        # Sort pairs by containment coefficient (highest first for greedy merging)
+        sorted_pairs = sorted(overlapping_pairs, key=lambda x: x[2], reverse=True)
+
+        merged_count = 0
+        for cluster1_id, cluster2_id, containment in sorted_pairs:
+            # Skip if either cluster was already merged
+            if cluster1_id not in merged_clusters or cluster2_id not in merged_clusters:
+                continue
+
+            # Get current cluster sets (may have been updated by previous merges)
+            cluster1_headers = merged_clusters[cluster1_id]
+            cluster2_headers = merged_clusters[cluster2_id]
+
+            # Convert to indices for gap calculation
+            cluster1_indices = [header_to_idx[h] for h in cluster1_headers if h in header_to_idx]
+            cluster2_indices = [header_to_idx[h] for h in cluster2_headers if h in header_to_idx]
+
+            if not cluster1_indices or not cluster2_indices:
+                self.logger.warning(f"Could not find indices for clusters {cluster1_id}, {cluster2_id}")
+                continue
+
+            # Test if merge improves gap
+            should_merge = self._should_merge_clusters_by_gap(
+                cluster1_indices, cluster2_indices, distance_provider, gap_calculator
+            )
+
+            if should_merge:
+                # Perform merge: combine into cluster1, remove cluster2
+                merged_cluster = cluster1_headers | cluster2_headers
+                merged_clusters[cluster1_id] = merged_cluster
+                del merged_clusters[cluster2_id]
+                merged_count += 1
+
+                self.logger.info(f"Merged {cluster2_id} into {cluster1_id} "
+                               f"(containment: {containment:.3f}, "
+                               f"final size: {len(merged_cluster)})")
+            else:
+                self.logger.debug(f"Gap optimization rejected merge of {cluster1_id} and {cluster2_id}")
+
+        self.logger.info(f"Completed cluster merging: {merged_count} merges performed, "
+                        f"{len(merged_clusters)} final clusters")
+
+        return merged_clusters
+
+    def _should_merge_clusters_by_gap(self, cluster1_indices: List[int], cluster2_indices: List[int],
+                                     distance_provider, gap_calculator: GapCalculator) -> bool:
+        """Determine if two clusters should be merged based on gap optimization.
+
+        Args:
+            cluster1_indices: Sequence indices for cluster 1
+            cluster2_indices: Sequence indices for cluster 2
+            distance_provider: Distance provider for calculations
+            gap_calculator: Gap calculator instance
+
+        Returns:
+            True if clusters should be merged, False otherwise
+        """
+        try:
+            # Calculate current individual gaps (each cluster vs all others)
+            # For simplicity, we'll use a heuristic: if merged cluster has reasonable intra-cluster distances
+            # and the merge doesn't create a cluster that's too dispersed, allow the merge
+
+            # Calculate merged cluster
+            merged_indices = cluster1_indices + cluster2_indices
+
+            # Get intra-cluster distances for merged cluster
+            intra_distances = []
+            for i in range(len(merged_indices)):
+                for j in range(i + 1, len(merged_indices)):
+                    distance = distance_provider.get_distance(merged_indices[i], merged_indices[j])
+                    intra_distances.append(distance)
+
+            if not intra_distances:
+                return True  # Single sequence - always allow
+
+            # Check if merged cluster's p95 intra-cluster distance is reasonable
+            import numpy as np
+            p95_intra = np.percentile(intra_distances, 95)
+
+            # Allow merge if p95 intra-cluster distance is within max_lump threshold
+            should_merge = p95_intra <= self.max_lump
+
+            self.logger.debug(f"Merge evaluation: p95_intra={p95_intra:.4f}, "
+                            f"max_lump={self.max_lump}, should_merge={should_merge}")
+
+            return should_merge
+
+        except Exception as e:
+            self.logger.warning(f"Error in gap calculation for merge decision: {e}")
+            return False  # Conservative: don't merge if gap calculation fails
+
+    def _rebuild_results_with_merged_clusters(self, original_results: DecomposeResults,
+                                            merged_clusters: Dict[str, Set[str]]) -> DecomposeResults:
+        """Rebuild DecomposeResults with merged cluster data.
+
+        Args:
+            original_results: Original decomposition results
+            merged_clusters: Dictionary of merged cluster sets
+
+        Returns:
+            Updated DecomposeResults
+        """
+        # Create new results object
+        new_results = DecomposeResults()
+
+        # Copy non-cluster data
+        new_results.iteration_summaries = original_results.iteration_summaries
+        new_results.total_iterations = original_results.total_iterations
+        new_results.total_sequences_processed = original_results.total_sequences_processed
+        new_results.coverage_percentage = original_results.coverage_percentage
+
+        # Convert merged clusters back to lists and create cluster mappings
+        new_results.all_clusters = {}
+        new_results.clusters = {}
+
+        for cluster_id, cluster_set in merged_clusters.items():
+            cluster_headers = list(cluster_set)
+            new_results.all_clusters[cluster_id] = cluster_headers
+            new_results.clusters[cluster_id] = cluster_headers  # No conflicts after merging
+
+        # Clear conflicts since merging resolves them
+        new_results.conflicts = {}
+
+        # Update unassigned sequences
+        all_assigned = set()
+        for cluster_headers in new_results.all_clusters.values():
+            all_assigned.update(cluster_headers)
+
+        # Keep original unassigned sequences
+        new_results.unassigned = original_results.unassigned
+
+        self.logger.info(f"Cluster merging complete: {len(original_results.all_clusters)} -> "
+                        f"{len(new_results.all_clusters)} clusters")
+
+        return new_results

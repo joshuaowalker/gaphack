@@ -160,7 +160,7 @@ class LazyDistanceProvider(DistanceProvider):
             return self._distance_cache[cache_key]
         
         # Need to compute this distance
-        logger.debug(f"Computing distance between sequences {seq_idx1} and {seq_idx2}")
+        # logger.debug(f"Computing distance between sequences {seq_idx1} and {seq_idx2}")
         distance = self._compute_single_distance(seq_idx1, seq_idx2)
         self._distance_cache[cache_key] = distance
         self._unique_computations += 1
@@ -186,7 +186,7 @@ class LazyDistanceProvider(DistanceProvider):
         
         # Compute missing distances if any - only compute what we need
         if missing_indices:
-            logger.debug(f"Computing distances from sequence {seq_idx} to {len(missing_indices)} target sequences")
+            # logger.debug(f"Computing distances from sequence {seq_idx} to {len(missing_indices)} target sequences")
             
             # Compute only the distances we need, not a full matrix
             for target_idx in missing_indices:

@@ -267,7 +267,13 @@ Examples:
     parser.add_argument('--target-percentile', type=int, default=95,
                        help='Percentile for gap optimization (default: 95)')
     
-    # Control arguments  
+    # Cluster merging arguments
+    parser.add_argument('--merge-overlaps', action='store_true',
+                       help='Enable post-processing to merge overlapping clusters')
+    parser.add_argument('--containment-threshold', type=float, default=0.8,
+                       help='Containment coefficient threshold for merging clusters (default: 0.8)')
+
+    # Control arguments
     parser.add_argument('-v', '--verbose', action='store_true',
                        help='Enable verbose logging')
     parser.add_argument('--no-progress', action='store_true',
@@ -310,6 +316,8 @@ Examples:
         blast_evalue=args.blast_evalue,
         min_identity=args.min_identity,
         allow_overlaps=not args.no_overlaps,
+        merge_overlaps=args.merge_overlaps,
+        containment_threshold=args.containment_threshold,
         show_progress=not args.no_progress,
         logger=logger
     )
