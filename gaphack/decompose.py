@@ -9,7 +9,7 @@ from pathlib import Path
 from .blast_neighborhood import BlastNeighborhoodFinder
 from .target_clustering import TargetModeClustering
 from .utils import load_sequences_from_fasta, load_sequences_with_deduplication, calculate_distance_matrix
-from .lazy_distances import DistanceProviderFactory
+from .lazy_distances import DistanceProviderFactory, SubsetDistanceProvider, DistanceProvider
 from .core import GapCalculator
 
 logger = logging.getLogger(__name__)
@@ -287,7 +287,10 @@ class DecomposeClustering:
         self.containment_threshold = containment_threshold
         self.show_progress = show_progress
         self.logger = logger or logging.getLogger(__name__)
-        
+
+        # Initialize persistent distance provider (will be created on first use)
+        self._global_distance_provider = None
+
         # Initialize target clustering (disable individual progress bars)
         self.target_clustering = TargetModeClustering(
             min_split=min_split,
@@ -495,29 +498,27 @@ class DecomposeClustering:
                 # OPTIMIZATION: Prune neighborhood based on distance to targets
                 # This reduces computational cost of target clustering by focusing on closest candidates
                 pruned_sequences, pruned_headers, pruned_target_indices = self._prune_neighborhood_by_distance(
-                    neighborhood_sequences, sequences_for_clustering, target_indices_in_neighborhood
+                    neighborhood_sequences, sequences_for_clustering, target_indices_in_neighborhood, sequences, headers
                 )
                 
-                # Create lazy distance provider for pruned neighborhood
-                self.logger.debug(f"Creating distance provider for {len(pruned_sequences)} pruned neighborhood sequences")
-                distance_provider = DistanceProviderFactory.create_lazy_provider(
-                    pruned_sequences,
-                    alignment_method="adjusted",  # Use consistent parameters
-                    end_skip_distance=20,
-                    normalize_homopolymers=True,
-                    handle_iupac_overlap=True,
-                    normalize_indels=True,
-                    max_repeat_motif_length=2
-                )
-                
+                # Use global distance provider with subset mapping for pruned neighborhood
+                self.logger.debug(f"Using global distance provider for {len(pruned_sequences)} pruned neighborhood sequences")
+                global_distance_provider = self._get_or_create_distance_provider(sequences)
+
+                # Map pruned headers back to global indices
+                pruned_global_indices = [headers.index(h) for h in pruned_headers]
+
+                # Create subset provider that maps pruned indices to global indices
+                subset_distance_provider = SubsetDistanceProvider(global_distance_provider, pruned_global_indices)
+
                 # Perform target clustering on pruned neighborhood
                 target_cluster_indices, remaining_indices, clustering_metrics = self.target_clustering.cluster(
-                    distance_provider, pruned_target_indices, pruned_sequences
+                    subset_distance_provider, pruned_target_indices, pruned_sequences
                 )
                 
                 # Log distance computation statistics
-                if hasattr(distance_provider, 'get_cache_stats'):
-                    stats = distance_provider.get_cache_stats()
+                if hasattr(global_distance_provider, 'get_cache_stats'):
+                    stats = global_distance_provider.get_cache_stats()
                     if stats['theoretical_max'] > 0:
                         coverage_pct = 100.0 * stats['cached_distances'] / stats['theoretical_max']
                         self.logger.debug(f"Distance computation stats: {stats['cached_distances']} computed "
@@ -670,16 +671,20 @@ class DecomposeClustering:
 
         return results
     
-    def _prune_neighborhood_by_distance(self, neighborhood_sequences: List[str], 
-                                       neighborhood_headers: List[str], 
-                                       target_indices: List[int]) -> Tuple[List[str], List[str], List[int]]:
+    def _prune_neighborhood_by_distance(self, neighborhood_sequences: List[str],
+                                       neighborhood_headers: List[str],
+                                       target_indices: List[int],
+                                       global_sequences: List[str],
+                                       global_headers: List[str]) -> Tuple[List[str], List[str], List[int]]:
         """Prune neighborhood by distance to targets to reduce computational cost.
-        
+
         Args:
             neighborhood_sequences: All sequences in neighborhood
             neighborhood_headers: Headers for neighborhood sequences
             target_indices: Indices of target sequences within neighborhood
-            
+            global_sequences: Full global sequence list
+            global_headers: Full global header list
+
         Returns:
             Tuple of (pruned_sequences, pruned_headers, new_target_indices)
         """
@@ -691,16 +696,14 @@ class DecomposeClustering:
         # Calculate distances from all sequences to target sequences
         target_sequences = [neighborhood_sequences[i] for i in target_indices]
         
-        # Create a temporary distance provider for pruning calculation
-        temp_distance_provider = DistanceProviderFactory.create_lazy_provider(
-            neighborhood_sequences,
-            alignment_method="adjusted",
-            end_skip_distance=20,
-            normalize_homopolymers=True,
-            handle_iupac_overlap=True,
-            normalize_indels=True,
-            max_repeat_motif_length=2
-        )
+        # Use global distance provider with subset mapping for pruning calculation
+        global_distance_provider = self._get_or_create_distance_provider(global_sequences)
+
+        # Map neighborhood headers to global indices
+        neighborhood_global_indices = [global_headers.index(h) for h in neighborhood_headers]
+
+        # Create subset provider for neighborhood
+        neighborhood_distance_provider = SubsetDistanceProvider(global_distance_provider, neighborhood_global_indices)
         
         # Calculate minimum distance from each sequence to any target
         sequence_min_distances = []
@@ -710,7 +713,7 @@ class DecomposeClustering:
                 min_dist = 0.0
             else:
                 # Find minimum distance to any target
-                distances_to_targets = temp_distance_provider.get_distances_from_sequence(
+                distances_to_targets = neighborhood_distance_provider.get_distances_from_sequence(
                     seq_idx, set(target_indices)
                 )
                 min_dist = min(distances_to_targets.values())
@@ -903,14 +906,20 @@ class DecomposeClustering:
         for cluster_id, cluster_headers in results.all_clusters.items():
             cluster_sets[cluster_id] = set(cluster_headers)
 
-        # Find overlapping cluster pairs using conflict information
-        overlapping_pairs = self._find_overlapping_cluster_pairs_from_conflicts(cluster_sets, results.conflicts)
+        # Find overlapping cluster pairs using both conflict-based and medoid-based approaches
+        conflict_pairs = self._find_overlapping_cluster_pairs_from_conflicts(cluster_sets, results.conflicts)
+        medoid_pairs = self._find_overlapping_cluster_pairs_from_medoids(cluster_sets, sequences, headers)
+
+        # Combine and deduplicate candidate pairs
+        all_candidate_pairs = conflict_pairs + medoid_pairs
+        overlapping_pairs = self._deduplicate_candidate_pairs(all_candidate_pairs)
 
         if not overlapping_pairs:
             self.logger.info("No overlapping clusters found")
             return results
 
-        self.logger.info(f"Found {len(overlapping_pairs)} overlapping cluster pairs")
+        self.logger.info(f"Found {len(conflict_pairs)} conflict-based and {len(medoid_pairs)} medoid-based candidates")
+        self.logger.info(f"Total {len(overlapping_pairs)} unique overlapping cluster pairs after deduplication")
 
         # Perform merges with gap optimization
         merged_clusters = self._perform_cluster_merges(overlapping_pairs, cluster_sets, sequences, headers)
@@ -1003,16 +1012,8 @@ class DecomposeClustering:
         # Initialize merged clusters as copy of originals
         merged_clusters = cluster_sets.copy()
 
-        # Create distance provider for gap calculations
-        distance_provider = DistanceProviderFactory.create_lazy_provider(
-            sequences,
-            alignment_method="adjusted",
-            end_skip_distance=20,
-            normalize_homopolymers=True,
-            handle_iupac_overlap=True,
-            normalize_indels=True,
-            max_repeat_motif_length=2
-        )
+        # Use global distance provider for gap calculations
+        distance_provider = self._get_or_create_distance_provider(sequences)
 
         # Initialize gap calculator
         gap_calculator = GapCalculator(self.target_percentile)
@@ -1152,3 +1153,130 @@ class DecomposeClustering:
                         f"{len(new_results.all_clusters)} clusters")
 
         return new_results
+
+    def _get_or_create_distance_provider(self, sequences: List[str]) -> DistanceProvider:
+        """Get or create the global distance provider for program lifetime."""
+        if self._global_distance_provider is None:
+            self.logger.debug(f"Creating global distance provider for {len(sequences)} sequences")
+            self._global_distance_provider = DistanceProviderFactory.create_lazy_provider(
+                sequences,
+                alignment_method="adjusted",
+                end_skip_distance=20,
+                normalize_homopolymers=True,
+                handle_iupac_overlap=True,
+                normalize_indels=True,
+                max_repeat_motif_length=2
+            )
+        return self._global_distance_provider
+
+    def _find_cluster_medoid(self, cluster_headers: Set[str], sequences: List[str], headers: List[str]) -> int:
+        """Find medoid (sequence with minimum total distance to all others in cluster)."""
+
+        if len(cluster_headers) == 1:
+            return headers.index(list(cluster_headers)[0])
+
+        cluster_indices = [headers.index(h) for h in cluster_headers]
+
+        # Use the global distance provider for cached computation
+        distance_provider = self._get_or_create_distance_provider(sequences)
+
+        min_total_distance = float('inf')
+        medoid_idx = cluster_indices[0]
+
+        for candidate_idx in cluster_indices:
+            total_distance = 0.0
+            for other_idx in cluster_indices:
+                if candidate_idx != other_idx:
+                    distance = distance_provider.get_distance(candidate_idx, other_idx)
+                    total_distance += distance
+
+            if total_distance < min_total_distance:
+                min_total_distance = total_distance
+                medoid_idx = candidate_idx
+
+        return medoid_idx
+
+    def _find_overlapping_cluster_pairs_from_medoids(self, cluster_sets: Dict[str, Set[str]],
+                                                   sequences: List[str], headers: List[str]) -> List[Tuple[str, str, float]]:
+        """Find cluster pairs where medoids are within max_lump distance."""
+
+        if len(cluster_sets) < 2:
+            return []
+
+        self.logger.debug(f"Finding medoid-based overlap candidates among {len(cluster_sets)} clusters")
+
+        # Calculate medoid for each cluster with progress bar
+        from tqdm import tqdm
+        cluster_medoids = {}
+
+        if self.show_progress:
+            medoid_pbar = tqdm(cluster_sets.items(), desc="Computing cluster medoids", unit=" clusters")
+        else:
+            medoid_pbar = cluster_sets.items()
+
+        try:
+            for cluster_id, cluster_headers in medoid_pbar:
+                medoid_idx = self._find_cluster_medoid(cluster_headers, sequences, headers)
+                cluster_medoids[cluster_id] = medoid_idx
+                self.logger.debug(f"Cluster {cluster_id}: medoid is sequence {medoid_idx} ({headers[medoid_idx]})")
+        finally:
+            if self.show_progress and hasattr(medoid_pbar, 'close'):
+                medoid_pbar.close()
+
+        # Check all pairs of medoids with progress bar
+        candidate_pairs = []
+        cluster_ids = list(cluster_sets.keys())
+        total_pairs = len(cluster_ids) * (len(cluster_ids) - 1) // 2  # n choose 2
+
+        # Use the global distance provider for cached computation
+        distance_provider = self._get_or_create_distance_provider(sequences)
+
+        if self.show_progress and total_pairs > 0:
+            distance_pbar = tqdm(total=total_pairs, desc="Computing medoid distances", unit=" pairs")
+        else:
+            distance_pbar = None
+
+        try:
+            for i, cluster1_id in enumerate(cluster_ids):
+                for cluster2_id in cluster_ids[i+1:]:
+                    medoid1_idx = cluster_medoids[cluster1_id]
+                    medoid2_idx = cluster_medoids[cluster2_id]
+
+                    # Calculate distance between medoids using cached provider
+                    distance = distance_provider.get_distance(medoid1_idx, medoid2_idx)
+
+                    if distance <= self.max_lump:
+                        # Calculate containment for consistency with existing approach
+                        containment = self._calculate_containment_coefficient(
+                            cluster_sets[cluster1_id], cluster_sets[cluster2_id]
+                        )
+                        candidate_pairs.append((cluster1_id, cluster2_id, containment))
+                        self.logger.debug(f"Medoid-based overlap candidate: {cluster1_id} <-> {cluster2_id} "
+                                        f"(medoid distance: {distance:.4f}, containment: {containment:.3f})")
+
+                    if distance_pbar:
+                        distance_pbar.update(1)
+        finally:
+            if distance_pbar:
+                distance_pbar.close()
+
+        self.logger.info(f"Found {len(candidate_pairs)} medoid-based overlap candidate pairs")
+        return candidate_pairs
+
+    def _deduplicate_candidate_pairs(self, all_pairs: List[Tuple[str, str, float]]) -> List[Tuple[str, str, float]]:
+        """Deduplicate candidate pairs, keeping the highest containment coefficient for duplicates."""
+
+        # Track unique pairs by cluster ID tuple
+        unique_pairs = {}
+
+        for cluster1_id, cluster2_id, containment in all_pairs:
+            pair_key = (min(cluster1_id, cluster2_id), max(cluster1_id, cluster2_id))
+
+            if pair_key in unique_pairs:
+                # Keep the pair with higher containment coefficient
+                if containment > unique_pairs[pair_key][2]:
+                    unique_pairs[pair_key] = (cluster1_id, cluster2_id, containment)
+            else:
+                unique_pairs[pair_key] = (cluster1_id, cluster2_id, containment)
+
+        return list(unique_pairs.values())

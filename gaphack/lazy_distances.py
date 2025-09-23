@@ -224,6 +224,48 @@ class LazyDistanceProvider(DistanceProvider):
         }
 
 
+class SubsetDistanceProvider(DistanceProvider):
+    """Distance provider that maps subset indices to a global provider."""
+
+    def __init__(self, global_provider: DistanceProvider, subset_indices: List[int]):
+        """Initialize with global provider and mapping indices.
+
+        Args:
+            global_provider: Distance provider for full sequence set
+            subset_indices: List mapping subset index -> global index
+        """
+        self.global_provider = global_provider
+        self.subset_indices = subset_indices
+        self.n = len(subset_indices)
+
+    def get_distance(self, seq_idx1: int, seq_idx2: int) -> float:
+        """Get distance between two sequences by subset index."""
+        global_idx1 = self.subset_indices[seq_idx1]
+        global_idx2 = self.subset_indices[seq_idx2]
+        return self.global_provider.get_distance(global_idx1, global_idx2)
+
+    def get_distances_from_sequence(self, seq_idx: int, target_indices: Set[int]) -> Dict[int, float]:
+        """Get distances from one sequence to a set of target sequences."""
+        global_seq_idx = self.subset_indices[seq_idx]
+        global_target_indices = {self.subset_indices[idx] for idx in target_indices}
+
+        # Get distances using global indices
+        global_results = self.global_provider.get_distances_from_sequence(global_seq_idx, global_target_indices)
+
+        # Map back to subset indices
+        subset_results = {}
+        for subset_idx in target_indices:
+            global_idx = self.subset_indices[subset_idx]
+            subset_results[subset_idx] = global_results[global_idx]
+
+        return subset_results
+
+    def ensure_distances_computed(self, seq_indices: Set[int]) -> None:
+        """Ensure all pairwise distances within a set are computed."""
+        global_indices = {self.subset_indices[idx] for idx in seq_indices}
+        self.global_provider.ensure_distances_computed(global_indices)
+
+
 class DistanceProviderFactory:
     """Factory for creating distance providers."""
     

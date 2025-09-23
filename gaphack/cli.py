@@ -206,7 +206,7 @@ Examples:
         else:
             # Load sequences from FASTA
             logging.info(f"Loading sequences from {args.input}")
-            sequences, headers = load_sequences_from_fasta(str(input_path))
+            sequences, headers, _ = load_sequences_from_fasta(str(input_path))
             logging.info(f"Loaded {len(sequences)} sequences")
             
             # Validate sequences
