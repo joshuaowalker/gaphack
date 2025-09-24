@@ -720,18 +720,25 @@ class DecomposeClustering:
             
             sequence_min_distances.append((seq_idx, min_dist))
         
-        # Count sequences within max_lump distance
+        # Count sequences within max_lump distance for reporting
         within_max_lump = sum(1 for _, dist in sequence_min_distances if dist <= self.max_lump)
-        
-        # Calculate target size for pruning (2x sequences within max_lump, minimum 50)
-        target_pruned_size = max(50, min(len(neighborhood_sequences), 2 * within_max_lump))
-        
-        self.logger.debug(f"Found {within_max_lump} sequences within max_lump distance {self.max_lump:.4f}")
-        self.logger.debug(f"Pruning to {target_pruned_size} closest sequences (2x estimate)")
-        
-        # Sort by distance and take the closest sequences
-        sequence_min_distances.sort(key=lambda x: x[1])
-        selected_indices = [idx for idx, _ in sequence_min_distances[:target_pruned_size]]
+
+        # Use distance threshold: include all sequences within 2 * max_lump
+        pruning_threshold = 2 * self.max_lump
+        within_threshold = [(idx, dist) for idx, dist in sequence_min_distances if dist <= pruning_threshold]
+
+        # Ensure minimum viable set size (at least 50 sequences, or all if fewer available)
+        if len(within_threshold) < 50 and len(sequence_min_distances) >= 50:
+            # Not enough sequences within threshold - fall back to taking closest 50
+            sequence_min_distances.sort(key=lambda x: x[1])
+            selected_indices = [idx for idx, _ in sequence_min_distances[:50]]
+            self.logger.debug(f"Only {len(within_threshold)} sequences within 2*max_lump threshold {pruning_threshold:.4f}")
+            self.logger.debug(f"Falling back to closest 50 sequences for minimum viable clustering set")
+        else:
+            # Use all sequences within threshold
+            selected_indices = [idx for idx, _ in within_threshold]
+            self.logger.debug(f"Found {within_max_lump} sequences within max_lump distance {self.max_lump:.4f}")
+            self.logger.debug(f"Including {len(selected_indices)} sequences within 2*max_lump threshold {pruning_threshold:.4f}")
         
         # Build pruned data structures
         pruned_sequences = [neighborhood_sequences[i] for i in selected_indices]
