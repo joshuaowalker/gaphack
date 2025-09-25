@@ -300,7 +300,7 @@ class TargetModeClustering:
             import numpy as np
 
             # Filter outliers using triangle inequality violation detection
-            filtered_distances_dict = self._filter_distance_outliers_triangle_inequality(seq_idx, distances_to_cluster, distance_provider)
+            filtered_distances_dict = self._filter_triangle_inequality_violations(distances_to_cluster, distance_provider, context=f"Seq {seq_idx}")
 
             # Use p95 of filtered distances (consistent with gap calculation)
             if filtered_distances_dict:
@@ -404,76 +404,72 @@ class TargetModeClustering:
 
         return result
 
-    def _filter_distance_outliers_triangle_inequality(self, candidate_seq: int,
-                                                     cluster_distances: Dict[int, float],
-                                                     distance_provider: DistanceProvider,
-                                                     violation_tolerance: float = 0.05) -> Dict[int, float]:
+    def _filter_triangle_inequality_violations(self, distances: Dict[int, float],
+                                             distance_provider: DistanceProvider,
+                                             violation_tolerance: float = 0.05,
+                                             context: str = "") -> Dict[int, float]:
         """
-        Filter alignment failures using triangle inequality violation detection.
+        Filter alignment failures using triangle inequality with maximum distance heuristic.
 
-        This addresses infix alignment issues where sequences may have spurious
-        distances due to poor overlap patterns. Uses triangle inequality to detect
-        inconsistent distance measurements rather than statistical outlier detection.
+        Uses single-violation detection: any triangle inequality violation triggers filtering
+        of the largest distance in that triangle. This replaces the previous 50% threshold
+        approach and is more principled.
 
         Args:
-            candidate_seq: Index of sequence being evaluated for cluster membership
-            cluster_distances: Dict mapping cluster member indices to distances from candidate
-            distance_provider: Provider for calculating additional distances as needed
-            violation_tolerance: Expected error margin for adjusted identity distances (default 5%)
+            distances: Dict mapping sequence indices to distances (candidate->cluster or intra-cluster)
+            distance_provider: Provider for calculating additional distances
+            violation_tolerance: Expected error margin for adjusted identity distances
+            context: Logging context string
 
         Returns:
-            Filtered dict of cluster member indices to distances with violations removed
+            Filtered dict with violating distances removed
         """
-        if len(cluster_distances) < 3:
-            # Need at least 3 distances for triangle inequality validation
-            return cluster_distances
+        if len(distances) < 3:
+            return distances
 
-        cluster_members = list(cluster_distances.keys())
-        violations = []
+        sequence_indices = list(distances.keys())
+        violations = set()
+        validated_good = set()  # Distances that have passed enough triangle checks
+        min_validations = min(3, len(sequence_indices) - 1)  # Need at least 3 validations, or all available
 
-        # Check each distance against triangle inequality constraints
-        for i, member_i in enumerate(cluster_members):
-            suspect_distance = cluster_distances[member_i]
-            violation_count = 0
-            total_checks = 0
+        # Test each distance for triangle inequality violations
+        for seq_i in sequence_indices:
+            if seq_i in violations or seq_i in validated_good:
+                continue  # Already determined status
 
-            # Validate against other cluster members using triangle inequality
-            for j, member_j in enumerate(cluster_members):
-                if i == j:
+            d_i = distances[seq_i]
+            violation_found = False
+            validation_count = 0
+
+            # Test against other sequences until we find a violation or enough validations
+            for seq_j in sequence_indices:
+                if seq_i == seq_j:
                     continue
 
-                # Get required distances for triangle inequality check
-                intra_distance = distance_provider.get_distance(member_i, member_j)
-                candidate_to_j = cluster_distances[member_j]
+                d_j = distances[seq_j]
+                d_ij = distance_provider.get_distance(seq_i, seq_j)
 
-                # Triangle inequality: d(candidate, member_i) ≤ d(candidate, member_j) + d(member_j, member_i)
-                expected_upper_bound = candidate_to_j + intra_distance
-
-                # Check for violation with tolerance for adjusted identity errors
-                if suspect_distance > expected_upper_bound + violation_tolerance:
-                    violation_count += 1
-
-                total_checks += 1
-
-            # If majority of triangle inequality checks fail, mark as violation
-            if total_checks > 0 and violation_count / total_checks > 0.5:
-                violations.append(member_i)
+                # Check triangle inequality: d_i <= d_j + d_ij
+                if d_i > d_j + d_ij + violation_tolerance:
+                    # Violation found - mark as bad and stop testing
+                    violations.add(seq_i)
+                    violation_found = True
+                    break
+                else:
+                    # No violation - count as validation
+                    validation_count += 1
+                    if validation_count >= min_validations:
+                        # Enough validations - mark as good and stop testing
+                        validated_good.add(seq_i)
+                        break
 
         # Remove violating distances
-        filtered_distances = {k: v for k, v in cluster_distances.items()
-                             if k not in violations}
+        filtered_distances = {k: v for k, v in distances.items() if k not in violations}
 
-        # Log violations for debugging
         if violations:
-            violating_distances = [cluster_distances[idx] for idx in violations]
-            self.logger.debug(f"Seq {candidate_seq}: removed {len(violations)} triangle inequality violations: "
-                            f"{[f'{d:.4f}' for d in violating_distances]} "
-                            f"(tolerance={violation_tolerance:.3f})")
-
-        # Safety: keep at least half of distances (if too many violations, likely systematic issue)
-        if len(filtered_distances) < len(cluster_distances) * 0.5:
-            self.logger.debug(f"Seq {candidate_seq}: triangle inequality filtering too aggressive, keeping original distances")
-            return cluster_distances
+            violating_distances = [distances[idx] for idx in violations]
+            self.logger.debug(f"{context}: removed {len(violations)} triangle inequality violations: "
+                            f"{[f'{d:.4f}' for d in violating_distances]} using max-distance heuristic")
 
         return filtered_distances
 
@@ -481,7 +477,7 @@ class TargetModeClustering:
                                       distance_provider: DistanceProvider,
                                       violation_tolerance: float = 0.05) -> List[Tuple[int, int]]:
         """
-        Filter intra-cluster distance outliers using triangle inequality.
+        Filter intra-cluster distance outliers using unified triangle inequality filtering.
 
         Args:
             cluster_indices: List of sequence indices in the cluster
@@ -492,42 +488,46 @@ class TargetModeClustering:
             List of (seq1, seq2) pairs to exclude from intra-cluster distance calculations
         """
         if len(cluster_indices) < 4:
-            # Need at least 4 sequences for meaningful triangle inequality validation
             return []
 
-        violations = []
+        violations = set()
+        validated_good = set()  # Pairs that have passed enough triangle checks
+        min_validations = min(3, len(cluster_indices) - 2)  # Need validations, but limited by cluster size
 
-        # Check all pairwise distances for triangle inequality violations
-        for i in range(len(cluster_indices)):
-            for j in range(i + 1, len(cluster_indices)):
-                seq_i, seq_j = cluster_indices[i], cluster_indices[j]
-                suspect_distance = distance_provider.get_distance(seq_i, seq_j)
+        # Test each pairwise distance for triangle inequality violations
+        for i, seq_i in enumerate(cluster_indices):
+            for j, seq_j in enumerate(cluster_indices[i+1:], i+1):
+                pair = (seq_i, seq_j)
+                if pair in violations or pair in validated_good:
+                    continue  # Already determined status
 
-                violation_count = 0
-                total_checks = 0
+                d_ij = distance_provider.get_distance(seq_i, seq_j)
+                validation_count = 0
 
-                # Validate against other sequences in cluster
-                for k in range(len(cluster_indices)):
+                # Test this pair against other sequences in the cluster
+                for k, seq_k in enumerate(cluster_indices):
                     if k == i or k == j:
-                        continue
+                        continue  # Skip the sequences in the pair we're testing
 
-                    seq_k = cluster_indices[k]
-                    dist_i_k = distance_provider.get_distance(seq_i, seq_k)
-                    dist_j_k = distance_provider.get_distance(seq_j, seq_k)
+                    d_ik = distance_provider.get_distance(seq_i, seq_k)
+                    d_jk = distance_provider.get_distance(seq_j, seq_k)
 
-                    # Triangle inequality: d(i,j) ≤ d(i,k) + d(k,j)
-                    expected_upper_bound = dist_i_k + dist_j_k
+                    # Check triangle inequality: d_ij <= d_ik + d_jk
+                    if d_ij > d_ik + d_jk + violation_tolerance:
+                        # Violation found - mark as bad and stop testing this pair
+                        violations.add(pair)
+                        break
+                    else:
+                        # No violation - count as validation
+                        validation_count += 1
+                        if validation_count >= min_validations:
+                            # Enough validations - mark as good and stop testing
+                            validated_good.add(pair)
+                            break
 
-                    if suspect_distance > expected_upper_bound + violation_tolerance:
-                        violation_count += 1
+        violation_list = list(violations)
+        if violation_list:
+            self.logger.debug(f"Intra-cluster: removed {len(violation_list)} triangle inequality violations "
+                            f"using max-distance heuristic")
 
-                    total_checks += 1
-
-                # If majority of checks fail, mark pair as violation
-                if total_checks > 0 and violation_count / total_checks > 0.5:
-                    violations.append((seq_i, seq_j))
-
-        if violations:
-            self.logger.debug(f"Intra-cluster: removed {len(violations)} triangle inequality violations")
-
-        return violations
+        return violation_list
