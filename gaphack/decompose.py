@@ -1440,9 +1440,12 @@ class DecomposeClustering:
         new_results.total_sequences_processed = results.total_sequences_processed
         new_results.coverage_percentage = results.coverage_percentage
 
+        # Renumber clusters sequentially for consistent naming
+        renumbered_clusters = self._renumber_clusters_sequentially(resolved_clusters)
+
         # Set resolved clusters (should be MECE now)
-        new_results.all_clusters = resolved_clusters
-        new_results.clusters = resolved_clusters  # No conflicts after resolution
+        new_results.all_clusters = renumbered_clusters
+        new_results.clusters = renumbered_clusters  # No conflicts after resolution
 
         # Clear conflicts since they've been resolved
         new_results.conflicts = {}
@@ -1454,3 +1457,29 @@ class DecomposeClustering:
                         f"{len(results.all_clusters)} -> {len(new_results.all_clusters)} clusters")
 
         return new_results
+
+    def _renumber_clusters_sequentially(self, clusters: Dict[str, List[str]]) -> Dict[str, List[str]]:
+        """Renumber clusters with sequential cluster_XXX naming for consistency.
+
+        Args:
+            clusters: Dictionary mapping cluster_id -> list of sequence headers
+
+        Returns:
+            Dictionary with clusters renumbered as cluster_001, cluster_002, etc.
+        """
+        if not clusters:
+            return {}
+
+        # Sort clusters by size (largest first) for consistent ordering
+        sorted_clusters = sorted(clusters.items(), key=lambda x: len(x[1]), reverse=True)
+
+        # Create new sequential mapping
+        renumbered = {}
+        for i, (old_cluster_id, cluster_headers) in enumerate(sorted_clusters, 1):
+            new_cluster_id = f"cluster_{i:03d}"
+            renumbered[new_cluster_id] = cluster_headers
+
+        self.logger.debug(f"Renumbered {len(clusters)} clusters with sequential IDs: "
+                         f"{list(clusters.keys())[:3]}... → {list(renumbered.keys())[:3]}...")
+
+        return renumbered
