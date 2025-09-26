@@ -257,6 +257,7 @@ class DecomposeClustering:
                  allow_overlaps: bool = True,
                  merge_overlaps: bool = False,
                  containment_threshold: float = 0.8,
+                 resolve_conflicts: bool = False,
                  show_progress: bool = True,
                  logger: Optional[logging.Logger] = None):
         """Initialize decomposition clustering.
@@ -272,6 +273,7 @@ class DecomposeClustering:
             allow_overlaps: Allow sequences to appear in multiple clusters (default: True)
             merge_overlaps: Enable post-processing to merge overlapping clusters (default: False)
             containment_threshold: Containment coefficient threshold for merging (default: 0.8)
+            resolve_conflicts: Enable principled reclustering for conflict resolution (default: False)
             show_progress: Show progress bars
             logger: Logger instance
         """
@@ -285,6 +287,7 @@ class DecomposeClustering:
         self.allow_overlaps = allow_overlaps
         self.merge_overlaps = merge_overlaps
         self.containment_threshold = containment_threshold
+        self.resolve_conflicts = resolve_conflicts
         self.show_progress = show_progress
         self.logger = logger or logging.getLogger(__name__)
 
@@ -665,6 +668,11 @@ class DecomposeClustering:
         if self.merge_overlaps:
             self.logger.info("Starting cluster overlap detection and merging")
             results = self._merge_overlapping_clusters(results, sequences, headers)
+
+        # Apply principled reclustering for conflict resolution if enabled
+        if getattr(self, 'resolve_conflicts', False) and results.conflicts:
+            self.logger.info(f"Starting principled reclustering for {len(results.conflicts)} conflicts")
+            results = self._resolve_conflicts_via_reclustering(results, sequences, headers)
 
         # Expand hash IDs back to original headers
         results = self._expand_hash_ids_to_headers(results, hash_to_headers)
@@ -1379,3 +1387,70 @@ class DecomposeClustering:
                 unique_pairs[pair_key] = (cluster1_id, cluster2_id, containment)
 
         return list(unique_pairs.values())
+
+    def _resolve_conflicts_via_reclustering(self, results: DecomposeResults,
+                                          sequences: List[str], headers: List[str]) -> DecomposeResults:
+        """Resolve conflicts using principled reclustering with classic gapHACk.
+
+        Args:
+            results: Current decomposition results with conflicts
+            sequences: Full sequence list
+            headers: Full header list
+
+        Returns:
+            Updated DecomposeResults with conflicts resolved
+        """
+        from .principled_reclustering import resolve_conflicts_via_reclustering, ReclusteringConfig
+        from .cluster_proximity import BruteForceProximityGraph
+
+        # Get global distance provider for the full dataset
+        distance_provider = self._get_or_create_distance_provider(sequences)
+
+        # Create proximity graph for cluster proximity queries
+        proximity_graph = BruteForceProximityGraph(
+            results.all_clusters, sequences, headers, distance_provider
+        )
+
+        # Create reclustering configuration with appropriate thresholds
+        config = ReclusteringConfig(
+            max_classic_gaphack_size=300,  # Conservative limit for performance
+            conflict_expansion_threshold=1.5 * self.max_lump,  # Expand scope near conflicted clusters
+            jaccard_overlap_threshold=0.1,  # Include clusters with 10%+ overlap
+            significant_difference_threshold=0.2  # 20% sequences must change for significant difference
+        )
+
+        # Apply conflict resolution
+        resolved_clusters = resolve_conflicts_via_reclustering(
+            conflicts=results.conflicts,
+            all_clusters=results.all_clusters,
+            sequences=sequences,
+            headers=headers,
+            distance_provider=distance_provider,
+            proximity_graph=proximity_graph,
+            config=config,
+            min_split=self.min_split,
+            max_lump=self.max_lump,
+            target_percentile=self.target_percentile
+        )
+
+        # Rebuild results with resolved clusters
+        new_results = DecomposeResults()
+        new_results.iteration_summaries = results.iteration_summaries
+        new_results.total_iterations = results.total_iterations
+        new_results.total_sequences_processed = results.total_sequences_processed
+        new_results.coverage_percentage = results.coverage_percentage
+
+        # Set resolved clusters (should be MECE now)
+        new_results.all_clusters = resolved_clusters
+        new_results.clusters = resolved_clusters  # No conflicts after resolution
+
+        # Clear conflicts since they've been resolved
+        new_results.conflicts = {}
+
+        # Keep original unassigned sequences
+        new_results.unassigned = results.unassigned
+
+        self.logger.info(f"Conflict resolution complete: {len(results.conflicts)} conflicts resolved, "
+                        f"{len(results.all_clusters)} -> {len(new_results.all_clusters)} clusters")
+
+        return new_results

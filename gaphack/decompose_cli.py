@@ -300,6 +300,10 @@ Examples:
     parser.add_argument('--containment-threshold', type=float, default=0.8,
                        help='Containment coefficient threshold for merging clusters (default: 0.8)')
 
+    # Conflict resolution arguments
+    parser.add_argument('--resolve-conflicts', action='store_true',
+                       help='Enable principled reclustering for conflict resolution using classic gapHACk')
+
     # Control arguments
     parser.add_argument('-v', '--verbose', action='store_true',
                        help='Enable verbose logging')
@@ -345,6 +349,7 @@ Examples:
         allow_overlaps=not args.no_overlaps,
         merge_overlaps=args.merge_overlaps,
         containment_threshold=args.containment_threshold,
+        resolve_conflicts=args.resolve_conflicts,
         show_progress=not args.no_progress,
         logger=logger
     )

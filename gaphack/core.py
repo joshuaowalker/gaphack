@@ -637,6 +637,8 @@ class GapOptimizedClustering:
         else:
             # Multi-process mode: create ProcessPoolExecutor with persistent worker initialization
             num_threads = self.num_threads or min(os.cpu_count() or 4, max_pairs, 4)
+            # Ensure at least 1 worker for ProcessPoolExecutor
+            num_threads = max(1, num_threads)
             executor = ProcessPoolExecutor(
                 max_workers=num_threads,
                 initializer=_init_worker,

@@ -173,6 +173,7 @@ def filter_distance_matrix_triangles(distance_matrix: np.ndarray,
     n = distance_matrix.shape[0]
     filtered_matrix = distance_matrix.copy()
     violation_count = 0
+    removed_pairs = set()  # Track unique distance pairs that were removed
 
     # Progress tracking for large matrices
     total_triangles = n * (n - 1) * (n - 2) // 6
@@ -214,9 +215,14 @@ def filter_distance_matrix_triangles(distance_matrix: np.ndarray,
                 if violations:
                     max_violation = max(violations, key=lambda x: x[2])
                     r, c = max_violation[0], max_violation[1]
-                    filtered_matrix[r, c] = np.nan
-                    filtered_matrix[c, r] = np.nan  # Symmetric matrix
-                    violation_count += 1
+
+                    # Only count as removed if this distance pair hasn't been removed yet
+                    pair_key = (min(r, c), max(r, c))  # Canonical pair representation
+                    if pair_key not in removed_pairs:
+                        filtered_matrix[r, c] = np.nan
+                        filtered_matrix[c, r] = np.nan  # Symmetric matrix
+                        removed_pairs.add(pair_key)
+                        violation_count += 1
 
                 # Update progress
                 if pbar and triangle_count % progress_interval == 0:

@@ -205,17 +205,24 @@ def apply_classic_gaphack_to_scope(scope_sequences: List[str],
     )
 
     # Get clustering result
-    clustering_result = clusterer.cluster(distance_matrix, scope_sequences)
+    final_clusters, singletons, metadata = clusterer.cluster(distance_matrix)
 
     # Convert result to cluster dictionary format
     clusters = {}
-    for cluster_idx, cluster_sequences in enumerate(clustering_result.clusters):
-        cluster_id = f"classic_{hash(tuple(sorted(cluster_sequences)))}"
-        # Map back to headers
+
+    # Process multi-member clusters (list of lists of indices)
+    for cluster_idx, cluster_indices_list in enumerate(final_clusters):
         cluster_headers = []
-        for seq in cluster_sequences:
-            seq_idx = scope_sequences.index(seq)
+        for seq_idx in cluster_indices_list:
             cluster_headers.append(scope_headers[seq_idx])
+
+        cluster_id = f"classic_{hash(tuple(sorted(cluster_headers)))}"
+        clusters[cluster_id] = cluster_headers
+
+    # Process singletons (list of indices)
+    for singleton_idx in singletons:
+        cluster_headers = [scope_headers[singleton_idx]]
+        cluster_id = f"classic_{hash(tuple(cluster_headers))}"
         clusters[cluster_id] = cluster_headers
 
     logger.debug(f"Classic gapHACk on scope: {len(scope_sequences)} sequences → {len(clusters)} clusters")
@@ -228,7 +235,10 @@ def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
                                      headers: List[str],
                                      distance_provider: DistanceProvider,
                                      proximity_graph: ClusterProximityGraph,
-                                     config: Optional[ReclusteringConfig] = None) -> Dict[str, List[str]]:
+                                     config: Optional[ReclusteringConfig] = None,
+                                     min_split: float = 0.005,
+                                     max_lump: float = 0.02,
+                                     target_percentile: int = 95) -> Dict[str, List[str]]:
     """Resolve assignment conflicts using classic gapHACk reclustering.
 
     Args:
@@ -239,6 +249,9 @@ def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
         distance_provider: Provider for distance calculations
         proximity_graph: Graph for finding nearby clusters
         config: Configuration for reclustering parameters
+        min_split: Minimum distance to split clusters
+        max_lump: Maximum distance to lump clusters
+        target_percentile: Percentile for gap optimization
 
     Returns:
         Updated cluster dictionary with conflicts resolved
@@ -284,7 +297,8 @@ def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
 
             classic_result = apply_classic_gaphack_to_scope(
                 expanded_scope.sequences, expanded_scope.headers,
-                sequences, headers, distance_provider
+                sequences, headers, distance_provider,
+                min_split, max_lump, target_percentile
             )
 
             # Step 5: Replace original clusters with classic result
