@@ -676,7 +676,13 @@ class DecomposeClustering:
                                        target_indices: List[int],
                                        global_sequences: List[str],
                                        global_headers: List[str]) -> Tuple[List[str], List[str], List[int]]:
-        """Prune neighborhood by distance to targets to reduce computational cost.
+        """Prune neighborhood using principled N+N approach for balanced cluster/context representation.
+
+        Strategy:
+        - Take all N sequences within max_lump distance (potential cluster members)
+        - Take N additional closest sequences beyond max_lump (context for gap estimation)
+        - This ensures complete cluster coverage while providing balanced intra/inter-cluster
+          context for robust barcode gap evaluation at target percentiles
 
         Args:
             neighborhood_sequences: All sequences in neighborhood
@@ -688,14 +694,11 @@ class DecomposeClustering:
         Returns:
             Tuple of (pruned_sequences, pruned_headers, new_target_indices)
         """
-        if len(neighborhood_sequences) <= 100:  # Skip pruning for small neighborhoods
-            return neighborhood_sequences, neighborhood_headers, target_indices
-        
         self.logger.debug(f"Pruning neighborhood from {len(neighborhood_sequences)} sequences")
-        
+
         # Calculate distances from all sequences to target sequences
         target_sequences = [neighborhood_sequences[i] for i in target_indices]
-        
+
         # Use global distance provider with subset mapping for pruning calculation
         global_distance_provider = self._get_or_create_distance_provider(global_sequences)
 
@@ -704,7 +707,7 @@ class DecomposeClustering:
 
         # Create subset provider for neighborhood
         neighborhood_distance_provider = SubsetDistanceProvider(global_distance_provider, neighborhood_global_indices)
-        
+
         # Calculate minimum distance from each sequence to any target
         sequence_min_distances = []
         for seq_idx in range(len(neighborhood_sequences)):
@@ -717,45 +720,47 @@ class DecomposeClustering:
                     seq_idx, set(target_indices)
                 )
                 min_dist = min(distances_to_targets.values())
-            
+
             sequence_min_distances.append((seq_idx, min_dist))
-        
-        # Count sequences within max_lump distance for reporting
-        within_max_lump = sum(1 for _, dist in sequence_min_distances if dist <= self.max_lump)
 
-        # Use distance threshold: include all sequences within 2 * max_lump
-        pruning_threshold = 2 * self.max_lump
-        within_threshold = [(idx, dist) for idx, dist in sequence_min_distances if dist <= pruning_threshold]
+        # Sort by distance for principled selection
+        sequence_min_distances.sort(key=lambda x: x[1])
 
-        # Ensure minimum viable set size (at least 50 sequences, or all if fewer available)
-        if len(within_threshold) < 50 and len(sequence_min_distances) >= 50:
-            # Not enough sequences within threshold - fall back to taking closest 50
-            sequence_min_distances.sort(key=lambda x: x[1])
-            selected_indices = [idx for idx, _ in sequence_min_distances[:50]]
-            self.logger.debug(f"Only {len(within_threshold)} sequences within 2*max_lump threshold {pruning_threshold:.4f}")
-            self.logger.debug(f"Falling back to closest 50 sequences for minimum viable clustering set")
-        else:
-            # Use all sequences within threshold
-            selected_indices = [idx for idx, _ in within_threshold]
-            self.logger.debug(f"Found {within_max_lump} sequences within max_lump distance {self.max_lump:.4f}")
-            self.logger.debug(f"Including {len(selected_indices)} sequences within 2*max_lump threshold {pruning_threshold:.4f}")
-        
+        # N+N selection: N sequences within max_lump + N closest sequences beyond max_lump
+        within_max_lump = [(idx, dist) for idx, dist in sequence_min_distances if dist <= self.max_lump]
+        beyond_max_lump = [(idx, dist) for idx, dist in sequence_min_distances if dist > self.max_lump]
+
+        N = len(within_max_lump)  # Number of potential cluster members
+
+        # Take all sequences within max_lump (complete cluster coverage)
+        selected_indices = [idx for idx, _ in within_max_lump]
+
+        # Take N additional closest sequences beyond max_lump for gap estimation context
+        # (or all available if fewer than N sequences beyond max_lump)
+        context_count = min(N, len(beyond_max_lump))
+        context_sequences = beyond_max_lump[:context_count]
+        selected_indices.extend([idx for idx, _ in context_sequences])
+
+        self.logger.debug(f"N+N pruning: {N} sequences within max_lump distance {self.max_lump:.4f}")
+        self.logger.debug(f"Added {context_count} context sequences beyond max_lump for gap estimation")
+        self.logger.debug(f"Total selected: {len(selected_indices)} sequences (N+N = {N}+{context_count})")
+
         # Build pruned data structures
         pruned_sequences = [neighborhood_sequences[i] for i in selected_indices]
         pruned_headers = [neighborhood_headers[i] for i in selected_indices]
-        
+
         # Map old target indices to new indices in pruned set
         old_to_new_idx = {old_idx: new_idx for new_idx, old_idx in enumerate(selected_indices)}
-        pruned_target_indices = [old_to_new_idx[old_idx] for old_idx in target_indices 
+        pruned_target_indices = [old_to_new_idx[old_idx] for old_idx in target_indices
                                if old_idx in old_to_new_idx]
-        
+
         if not pruned_target_indices:
             self.logger.error("All target sequences were pruned - this should not happen!")
             # Fallback to original data
             return neighborhood_sequences, neighborhood_headers, target_indices
-        
+
         self.logger.debug(f"Pruned neighborhood: {len(pruned_sequences)} sequences retained")
-        
+
         return pruned_sequences, pruned_headers, pruned_target_indices
     
     def _find_matching_targets(self, target_sequences: List[str], target_headers: List[str], 
