@@ -897,7 +897,11 @@ class DecomposeClustering:
         return expanded_results
 
     def _merge_overlapping_clusters(self, results: DecomposeResults, sequences: List[str], headers: List[str]) -> DecomposeResults:
-        """Detect and merge overlapping clusters based on containment coefficient.
+        """Iteratively detect and merge overlapping clusters with medoid caching.
+
+        Uses iterative merging to allow newly merged clusters to participate in
+        subsequent merges. Caches expensive medoid calculations to avoid recomputation
+        for unchanged clusters across iterations.
 
         Args:
             results: Initial decomposition results
@@ -911,33 +915,96 @@ class DecomposeClustering:
             self.logger.info("No overlapping clusters to merge (less than 2 clusters)")
             return results
 
-        self.logger.info(f"Analyzing {len(results.all_clusters)} clusters for overlaps")
+        self.logger.info(f"Starting iterative cluster merging with {len(results.all_clusters)} clusters")
 
         # Convert cluster data to sets for easier containment calculation
         cluster_sets = {}
         for cluster_id, cluster_headers in results.all_clusters.items():
             cluster_sets[cluster_id] = set(cluster_headers)
 
-        # Find overlapping cluster pairs using both conflict-based and medoid-based approaches
-        conflict_pairs = self._find_overlapping_cluster_pairs_from_conflicts(cluster_sets, results.conflicts)
-        medoid_pairs = self._find_overlapping_cluster_pairs_from_medoids(cluster_sets, sequences, headers)
+        # Initialize medoid cache - expensive to compute, so cache across iterations
+        medoid_cache = {}
 
-        # Combine and deduplicate candidate pairs
-        all_candidate_pairs = conflict_pairs + medoid_pairs
-        overlapping_pairs = self._deduplicate_candidate_pairs(all_candidate_pairs)
+        # Iterative merging until no more valid merges
+        iteration = 1
+        total_merges = 0
+        max_iterations = 10  # Safety limit to prevent runaway
 
-        if not overlapping_pairs:
-            self.logger.info("No overlapping clusters found")
-            return results
+        # Track conflicts across iterations - needs to be updated when clusters merge
+        current_conflicts = results.conflicts.copy()
 
-        self.logger.info(f"Found {len(conflict_pairs)} conflict-based and {len(medoid_pairs)} medoid-based candidates")
-        self.logger.info(f"Total {len(overlapping_pairs)} unique overlapping cluster pairs after deduplication")
+        while iteration <= max_iterations:
+            self.logger.info(f"Merge iteration {iteration}: analyzing {len(cluster_sets)} clusters")
 
-        # Perform merges with gap optimization
-        merged_clusters = self._perform_cluster_merges(overlapping_pairs, cluster_sets, sequences, headers)
+            # Find overlapping cluster pairs (conflict-based is cheap, always recompute)
+            conflict_pairs = self._find_overlapping_cluster_pairs_from_conflicts(cluster_sets, current_conflicts)
 
-        # Rebuild results with merged clusters
-        return self._rebuild_results_with_merged_clusters(results, merged_clusters)
+            # Find medoid-based pairs with caching (expensive, cache across iterations)
+            medoid_pairs = self._find_overlapping_cluster_pairs_from_medoids_cached(
+                cluster_sets, sequences, headers, medoid_cache
+            )
+
+            # Combine and deduplicate candidate pairs
+            all_candidate_pairs = conflict_pairs + medoid_pairs
+            overlapping_pairs = self._deduplicate_candidate_pairs(all_candidate_pairs)
+
+            if not overlapping_pairs:
+                self.logger.info(f"Iteration {iteration}: No overlapping pairs found - converged")
+                break
+
+            self.logger.info(f"Iteration {iteration}: Found {len(conflict_pairs)} conflict-based, "
+                           f"{len(medoid_pairs)} medoid-based candidates")
+            self.logger.info(f"Iteration {iteration}: {len(overlapping_pairs)} unique pairs to evaluate")
+
+            # Attempt one merge per iteration (allows fresh overlap detection)
+            merged_info = self._perform_single_best_merge(overlapping_pairs, cluster_sets, sequences, headers, medoid_cache)
+
+            if not merged_info:
+                self.logger.info(f"Iteration {iteration}: No valid merges found - converged")
+                break
+
+            # Update conflicts structure to reflect the merge
+            cluster1_id, cluster2_id = merged_info
+            self._update_conflicts_after_merge(current_conflicts, cluster1_id, cluster2_id)
+
+            total_merges += 1
+            iteration += 1
+
+        if iteration > max_iterations:
+            self.logger.warning(f"Reached maximum iterations ({max_iterations}) - stopping merge process")
+
+        self.logger.info(f"Completed iterative merging: {total_merges} total merges across {iteration-1} iterations")
+        self.logger.info(f"Final result: {len(cluster_sets)} clusters after merging")
+
+        # Rebuild results with final merged clusters
+        return self._rebuild_results_with_merged_clusters(results, cluster_sets)
+
+    def _update_conflicts_after_merge(self, conflicts: Dict[str, List[str]],
+                                    surviving_cluster: str, deleted_cluster: str) -> None:
+        """Update conflicts dictionary after merging clusters.
+
+        Args:
+            conflicts: Conflicts dictionary to update in-place
+            surviving_cluster: ID of cluster that absorbed the other
+            deleted_cluster: ID of cluster that was deleted
+        """
+        # Update any conflicts that referenced the deleted cluster
+        for seq_id, cluster_ids in conflicts.items():
+            if deleted_cluster in cluster_ids:
+                # Replace deleted cluster with surviving cluster
+                updated_ids = [surviving_cluster if cid == deleted_cluster else cid for cid in cluster_ids]
+                # Remove duplicates while preserving order
+                seen = set()
+                conflicts[seq_id] = [x for x in updated_ids if not (x in seen or seen.add(x))]
+
+        # Remove any conflicts that now only reference one cluster (no longer conflicts)
+        conflicts_to_remove = []
+        for seq_id, cluster_ids in conflicts.items():
+            if len(cluster_ids) <= 1:
+                conflicts_to_remove.append(seq_id)
+
+        for seq_id in conflicts_to_remove:
+            del conflicts[seq_id]
 
     def _find_overlapping_cluster_pairs_from_conflicts(self, cluster_sets: Dict[str, Set[str]],
                                                       conflicts: Dict[str, List[str]]) -> List[Tuple[str, str, float]]:
@@ -1004,25 +1071,23 @@ class DecomposeClustering:
         # Return containment coefficient
         return intersection / smaller_size if smaller_size > 0 else 0.0
 
-    def _perform_cluster_merges(self, overlapping_pairs: List[Tuple[str, str, float]],
-                               cluster_sets: Dict[str, Set[str]],
-                               sequences: List[str], headers: List[str]) -> Dict[str, Set[str]]:
-        """Perform cluster merges using gap optimization to validate merges.
+    def _perform_single_best_merge(self, overlapping_pairs: List[Tuple[str, str, float]],
+                                  cluster_sets: Dict[str, Set[str]], sequences: List[str], headers: List[str],
+                                  medoid_cache: Dict[str, int]) -> Optional[Tuple[str, str]]:
+        """Perform single best merge from overlapping pairs and update cache.
 
         Args:
-            overlapping_pairs: List of overlapping cluster pairs
-            cluster_sets: Original cluster sets
+            overlapping_pairs: List of overlapping cluster pairs sorted by containment
+            cluster_sets: Current cluster sets (modified in-place)
             sequences: Full sequence list
             headers: Full header list
+            medoid_cache: Medoid cache (modified in-place to remove invalidated entries)
 
         Returns:
-            Dictionary of final merged cluster sets
+            Tuple of (cluster1_id, cluster2_id) if merge performed, None if no valid merges found
         """
         # Create header to index mapping
         header_to_idx = {header: i for i, header in enumerate(headers)}
-
-        # Initialize merged clusters as copy of originals
-        merged_clusters = cluster_sets.copy()
 
         # Use global distance provider for gap calculations
         distance_provider = self._get_or_create_distance_provider(sequences)
@@ -1030,18 +1095,17 @@ class DecomposeClustering:
         # Initialize gap calculator
         gap_calculator = GapCalculator(self.target_percentile)
 
-        # Sort pairs by containment coefficient (highest first for greedy merging)
+        # Try merging pairs in order of containment coefficient (highest first)
         sorted_pairs = sorted(overlapping_pairs, key=lambda x: x[2], reverse=True)
 
-        merged_count = 0
         for cluster1_id, cluster2_id, containment in sorted_pairs:
-            # Skip if either cluster was already merged
-            if cluster1_id not in merged_clusters or cluster2_id not in merged_clusters:
+            # Skip if either cluster was already merged in previous iteration
+            if cluster1_id not in cluster_sets or cluster2_id not in cluster_sets:
                 continue
 
-            # Get current cluster sets (may have been updated by previous merges)
-            cluster1_headers = merged_clusters[cluster1_id]
-            cluster2_headers = merged_clusters[cluster2_id]
+            # Get current cluster sets
+            cluster1_headers = cluster_sets[cluster1_id]
+            cluster2_headers = cluster_sets[cluster2_id]
 
             # Convert to indices for gap calculation
             cluster1_indices = [header_to_idx[h] for h in cluster1_headers if h in header_to_idx]
@@ -1059,20 +1123,20 @@ class DecomposeClustering:
             if should_merge:
                 # Perform merge: combine into cluster1, remove cluster2
                 merged_cluster = cluster1_headers | cluster2_headers
-                merged_clusters[cluster1_id] = merged_cluster
-                del merged_clusters[cluster2_id]
-                merged_count += 1
+                cluster_sets[cluster1_id] = merged_cluster
+                del cluster_sets[cluster2_id]
+
+                # Invalidate medoid cache entries for merged clusters
+                # cluster1 changed composition, cluster2 was deleted
+                medoid_cache.pop(cluster1_id, None)  # Will be recomputed with new composition
+                medoid_cache.pop(cluster2_id, None)  # No longer exists
 
                 self.logger.info(f"Merged {cluster2_id} into {cluster1_id} "
-                               f"(containment: {containment:.3f}, "
-                               f"final size: {len(merged_cluster)})")
-            else:
-                self.logger.debug(f"Gap optimization rejected merge of {cluster1_id} and {cluster2_id}")
+                               f"(containment: {containment:.3f}, final size: {len(merged_cluster)})")
+                return (cluster1_id, cluster2_id)  # Success - return merged cluster IDs
 
-        self.logger.info(f"Completed cluster merging: {merged_count} merges performed, "
-                        f"{len(merged_clusters)} final clusters")
-
-        return merged_clusters
+        # No valid merges found
+        return None
 
     def _should_merge_clusters_by_gap(self, cluster1_indices: List[int], cluster2_indices: List[int],
                                      distance_provider, gap_calculator: GapCalculator) -> bool:
@@ -1208,34 +1272,57 @@ class DecomposeClustering:
 
         return medoid_idx
 
-    def _find_overlapping_cluster_pairs_from_medoids(self, cluster_sets: Dict[str, Set[str]],
-                                                   sequences: List[str], headers: List[str]) -> List[Tuple[str, str, float]]:
-        """Find cluster pairs where medoids are within max_lump distance."""
+    def _find_overlapping_cluster_pairs_from_medoids_cached(self, cluster_sets: Dict[str, Set[str]],
+                                                          sequences: List[str], headers: List[str],
+                                                          medoid_cache: Dict[str, int]) -> List[Tuple[str, str, float]]:
+        """Find cluster pairs where medoids are within max_lump distance with caching.
+
+        Args:
+            cluster_sets: Cluster ID -> Set of sequence headers
+            sequences: Full sequence list
+            headers: Full header list
+            medoid_cache: Cache mapping cluster_id -> medoid_index (modified in-place)
+
+        Returns:
+            List of (cluster1_id, cluster2_id, containment_coefficient) tuples
+        """
 
         if len(cluster_sets) < 2:
             return []
 
         self.logger.debug(f"Finding medoid-based overlap candidates among {len(cluster_sets)} clusters")
 
-        # Calculate medoid for each cluster with progress bar
-        from tqdm import tqdm
-        cluster_medoids = {}
+        # Calculate medoids with caching - only compute for clusters not in cache
+        new_clusters = []
+        cached_count = 0
 
-        if self.show_progress:
-            medoid_pbar = tqdm(cluster_sets.items(), desc="Computing cluster medoids", unit=" clusters")
-        else:
-            medoid_pbar = cluster_sets.items()
+        for cluster_id, cluster_headers in cluster_sets.items():
+            if cluster_id not in medoid_cache:
+                new_clusters.append((cluster_id, cluster_headers))
+            else:
+                cached_count += 1
 
-        try:
-            for cluster_id, cluster_headers in medoid_pbar:
-                medoid_idx = self._find_cluster_medoid(cluster_headers, sequences, headers)
-                cluster_medoids[cluster_id] = medoid_idx
-                self.logger.debug(f"Cluster {cluster_id}: medoid is sequence {medoid_idx} ({headers[medoid_idx]})")
-        finally:
-            if self.show_progress and hasattr(medoid_pbar, 'close'):
-                medoid_pbar.close()
+        self.logger.debug(f"Medoid cache: {cached_count} cached, {len(new_clusters)} new clusters to compute")
 
-        # Check all pairs of medoids with progress bar
+        # Compute medoids for new clusters with progress bar
+        if new_clusters:
+            from tqdm import tqdm
+
+            if self.show_progress and len(new_clusters) > 1:
+                medoid_pbar = tqdm(new_clusters, desc="Computing new cluster medoids", unit=" clusters")
+            else:
+                medoid_pbar = new_clusters
+
+            try:
+                for cluster_id, cluster_headers in medoid_pbar:
+                    medoid_idx = self._find_cluster_medoid(cluster_headers, sequences, headers)
+                    medoid_cache[cluster_id] = medoid_idx
+                    self.logger.debug(f"Cluster {cluster_id}: computed medoid is sequence {medoid_idx} ({headers[medoid_idx]})")
+            finally:
+                if self.show_progress and hasattr(medoid_pbar, 'close'):
+                    medoid_pbar.close()
+
+        # Check all pairs of medoids for proximity
         candidate_pairs = []
         cluster_ids = list(cluster_sets.keys())
         total_pairs = len(cluster_ids) * (len(cluster_ids) - 1) // 2  # n choose 2
@@ -1243,7 +1330,7 @@ class DecomposeClustering:
         # Use the global distance provider for cached computation
         distance_provider = self._get_or_create_distance_provider(sequences)
 
-        if self.show_progress and total_pairs > 0:
+        if self.show_progress and total_pairs > 10:
             distance_pbar = tqdm(total=total_pairs, desc="Computing medoid distances", unit=" pairs")
         else:
             distance_pbar = None
@@ -1251,8 +1338,8 @@ class DecomposeClustering:
         try:
             for i, cluster1_id in enumerate(cluster_ids):
                 for cluster2_id in cluster_ids[i+1:]:
-                    medoid1_idx = cluster_medoids[cluster1_id]
-                    medoid2_idx = cluster_medoids[cluster2_id]
+                    medoid1_idx = medoid_cache[cluster1_id]
+                    medoid2_idx = medoid_cache[cluster2_id]
 
                     # Calculate distance between medoids using cached provider
                     distance = distance_provider.get_distance(medoid1_idx, medoid2_idx)
@@ -1272,7 +1359,7 @@ class DecomposeClustering:
             if distance_pbar:
                 distance_pbar.close()
 
-        self.logger.info(f"Found {len(candidate_pairs)} medoid-based overlap candidate pairs")
+        self.logger.debug(f"Found {len(candidate_pairs)} medoid-based overlap candidate pairs")
         return candidate_pairs
 
     def _deduplicate_candidate_pairs(self, all_pairs: List[Tuple[str, str, float]]) -> List[Tuple[str, str, float]]:
