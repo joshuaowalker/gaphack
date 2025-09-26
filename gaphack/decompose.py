@@ -258,6 +258,7 @@ class DecomposeClustering:
                  merge_overlaps: bool = False,
                  containment_threshold: float = 0.8,
                  resolve_conflicts: bool = False,
+                 refine_close_clusters: bool = False,
                  show_progress: bool = True,
                  logger: Optional[logging.Logger] = None):
         """Initialize decomposition clustering.
@@ -274,6 +275,7 @@ class DecomposeClustering:
             merge_overlaps: Enable post-processing to merge overlapping clusters (default: False)
             containment_threshold: Containment coefficient threshold for merging (default: 0.8)
             resolve_conflicts: Enable principled reclustering for conflict resolution (default: False)
+            refine_close_clusters: Enable principled reclustering for close cluster refinement (default: False)
             show_progress: Show progress bars
             logger: Logger instance
         """
@@ -288,6 +290,7 @@ class DecomposeClustering:
         self.merge_overlaps = merge_overlaps
         self.containment_threshold = containment_threshold
         self.resolve_conflicts = resolve_conflicts
+        self.refine_close_clusters = refine_close_clusters
         self.show_progress = show_progress
         self.logger = logger or logging.getLogger(__name__)
 
@@ -673,6 +676,11 @@ class DecomposeClustering:
         if getattr(self, 'resolve_conflicts', False) and results.conflicts:
             self.logger.info(f"Starting principled reclustering for {len(results.conflicts)} conflicts")
             results = self._resolve_conflicts_via_reclustering(results, sequences, headers)
+
+        # Apply principled reclustering for close cluster refinement if enabled
+        if getattr(self, 'refine_close_clusters', False):
+            self.logger.info("Starting principled reclustering for close cluster refinement")
+            results = self._refine_close_clusters_via_reclustering(results, sequences, headers)
 
         # Expand hash IDs back to original headers
         results = self._expand_hash_ids_to_headers(results, hash_to_headers)
@@ -1454,6 +1462,72 @@ class DecomposeClustering:
         new_results.unassigned = results.unassigned
 
         self.logger.info(f"Conflict resolution complete: {len(results.conflicts)} conflicts resolved, "
+                        f"{len(results.all_clusters)} -> {len(new_results.all_clusters)} clusters")
+
+        return new_results
+
+    def _refine_close_clusters_via_reclustering(self, results: DecomposeResults,
+                                              sequences: List[str], headers: List[str]) -> DecomposeResults:
+        """Refine close clusters using principled reclustering with classic gapHACk.
+
+        Args:
+            results: Current decomposition results
+            sequences: Full sequence list
+            headers: Full header list
+
+        Returns:
+            Updated DecomposeResults with close clusters refined
+        """
+        from .principled_reclustering import refine_close_clusters, ReclusteringConfig
+        from .cluster_proximity import BruteForceProximityGraph
+
+        # Get global distance provider for the full dataset
+        distance_provider = self._get_or_create_distance_provider(sequences)
+
+        # Create proximity graph for cluster proximity queries
+        proximity_graph = BruteForceProximityGraph(
+            results.all_clusters, sequences, headers, distance_provider
+        )
+
+        # Create reclustering configuration with appropriate thresholds
+        config = ReclusteringConfig(
+            max_classic_gaphack_size=300,  # Conservative limit for performance
+            close_cluster_expansion_threshold=1.2 * self.max_lump,  # Expand scope near close clusters
+            jaccard_overlap_threshold=0.1,  # Include clusters with 10%+ overlap
+            significant_difference_threshold=0.2  # 20% sequences must change for significant difference
+        )
+
+        # Apply close cluster refinement
+        refined_clusters = refine_close_clusters(
+            all_clusters=results.all_clusters,
+            sequences=sequences,
+            headers=headers,
+            distance_provider=distance_provider,
+            proximity_graph=proximity_graph,
+            config=config,
+            min_split=self.min_split,
+            max_lump=self.max_lump,
+            target_percentile=self.target_percentile,
+            close_threshold=self.max_lump  # Use max_lump as close threshold
+        )
+
+        # Rebuild results with refined clusters
+        new_results = DecomposeResults()
+        new_results.iteration_summaries = results.iteration_summaries
+        new_results.total_iterations = results.total_iterations
+        new_results.total_sequences_processed = results.total_sequences_processed
+        new_results.coverage_percentage = results.coverage_percentage
+
+        # Apply sequential renumbering for consistency
+        refined_clusters = self._renumber_clusters_sequentially(refined_clusters)
+
+        # Update cluster assignments
+        new_results.all_clusters = refined_clusters
+        new_results.clusters = refined_clusters  # No conflicts expected after refinement
+        new_results.conflicts = {}  # Close cluster refinement doesn't create conflicts
+        new_results.unassigned = results.unassigned
+
+        self.logger.info(f"Close cluster refinement complete: "
                         f"{len(results.all_clusters)} -> {len(new_results.all_clusters)} clusters")
 
         return new_results

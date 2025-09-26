@@ -561,6 +561,95 @@ def expand_scope_with_proximity_graph(core_cluster_ids: List[str],
 
 This phased approach ensures immediate progress on conflict resolution while establishing the architecture needed for scalable close cluster refinement and incremental updates.
 
+## Revised Implementation Strategy: Close Clusters First
+
+### Strategic Rationale
+
+The implementation order has been revised to prioritize **close cluster refinement** before K-NN graph optimization. This approach provides several key advantages:
+
+**1. Quality Improvement at Current Scale**
+- Address close cluster proliferation immediately with existing infrastructure
+- Improve clustering quality for current 1.6K cluster workloads
+- Validate proximity graph interface with different access patterns
+
+**2. Direct Performance Comparison Framework**
+- Implement close cluster refinement with brute force proximity graph first
+- Then implement BLAST K-NN graph as drop-in replacement
+- Measure identical workloads on both implementations for accurate comparison
+- Validate that both approaches produce identical clustering results
+
+**3. Concrete K-NN Graph Validation**
+- Close cluster detection stresses proximity graph differently than conflict resolution
+- More intensive proximity queries (finding all close pairs vs. conflict neighborhoods)
+- Better validation of K-NN graph correctness before production deployment
+
+**4. Implementation Risk Reduction**
+- Validate proximity graph interface thoroughly before major K-NN graph investment
+- Identify interface gaps or performance bottlenecks early
+- Ensure architectural decisions support both current and future scale requirements
+
+### Technical Implementation Benefits
+
+**Close Cluster Workload Characteristics:**
+- **Query Pattern**: `find_close_pairs()` across entire cluster set (O(C²) brute force vs O(C×K) K-NN)
+- **Scope Size**: Typically larger than conflict resolution (multiple close clusters + neighbors)
+- **Iteration Potential**: May require multiple refinement passes until convergence
+
+**Performance Comparison Methodology:**
+```python
+# Phase 2A: Benchmark with brute force
+brute_force_graph = BruteForceProximityGraph(clusters, sequences, headers, distance_provider)
+start_time = time.time()
+result_brute = refine_close_clusters(clusters, sequences, headers, brute_force_graph, config)
+brute_force_time = time.time() - start_time
+
+# Phase 2B: Benchmark with K-NN graph (identical input)
+knn_graph = BlastKNNProximityGraph(clusters, sequences, headers, k_neighbors=20)
+start_time = time.time()
+result_knn = refine_close_clusters(clusters, sequences, headers, knn_graph, config)
+knn_time = time.time() - start_time
+
+# Validation: Results must be identical
+assert result_brute == result_knn, "K-NN graph produces different clustering results"
+speedup = brute_force_time / knn_time
+```
+
+**Interface Stress Testing:**
+- `find_close_pairs(max_distance)` - Tests comprehensive proximity detection
+- `get_neighbors_within_distance()` - Tests scope expansion for refinement
+- Graph updates during cluster merging - Tests dynamic graph maintenance
+
+This revised approach ensures robust validation of the K-NN graph optimization while delivering immediate quality improvements for close cluster handling.
+
+### Expected Performance Characteristics
+
+**Brute Force Proximity Graph (Phase 2A baseline):**
+- **Time Complexity**: O(C²) for close pair detection across C clusters
+- **Memory**: O(C²) medoid distance cache
+- **Scaling**: Viable up to ~2000 clusters (4M medoid distance calculations)
+- **Accuracy**: 100% accurate proximity queries (reference implementation)
+
+**BLAST K-NN Graph (Phase 2B target):**
+- **Time Complexity**: O(C×K) for K-NN proximity queries, where K << C
+- **Memory**: O(C×K) for K-NN graph storage (~40x smaller than brute force at 2K clusters)
+- **Scaling**: Target 10K+ clusters with K=20 neighbors
+- **Accuracy**: Must be proven identical to brute force on identical inputs
+
+**Performance Validation Benchmarks:**
+```
+Cluster Count | Brute Force Time | K-NN Time | Expected Speedup | Memory Reduction
+500           | 1s              | 0.5s      | 2x               | 25x
+1000          | 4s              | 1s        | 4x               | 50x
+2000          | 16s             | 2s        | 8x               | 100x
+5000          | 100s            | 5s        | 20x              | 250x
+10000         | 400s            | 10s       | 40x              | 500x
+```
+
+**Quality Validation Requirements:**
+- Identical clustering results on all test datasets
+- Same convergence behavior (number of refinement iterations)
+- Equivalent gap improvement trajectories
+
 ## Scope Selection and Expansion Strategies
 
 ### Conflict Component Detection
@@ -722,45 +811,41 @@ class ScopedDistanceProvider:
 - [ ] Performance benchmarking of brute force approach
 - [ ] Comparison with direct classic gapHACk results for validation
 
-### Phase 2: K-NN Graph Optimization (4 weeks)
+### Phase 2: Close Cluster Refinement with Performance Comparison (6 weeks)
 
-**Priority 5: BLAST K-NN Infrastructure (Week 5-6)**
-- [ ] Implement `BlastKNNProximityGraph` with BLAST-based construction
+**Priority 5: Close Cluster Refinement with Brute Force (Week 5-6)**
+- [ ] Implement `refine_close_clusters()` using existing BruteForceProximityGraph
+- [ ] Add close cluster pair detection via medoid analysis
+- [ ] Implement connected component grouping for close clusters
+- [ ] Add infinite loop prevention with processed component tracking
+- [ ] Add `--refine-close-clusters` CLI option and integration
+- [ ] Test on datasets with known close cluster issues
+
+**Priority 6: BLAST K-NN Graph Implementation (Week 7-8)**
+- [ ] Implement `BlastKNNProximityGraph` as drop-in replacement for BruteForceProximityGraph
 - [ ] Add medoid sequence BLAST database creation and querying
 - [ ] Implement efficient K-NN graph storage and update mechanisms
 - [ ] Add identity-to-distance conversion utilities
-
-**Priority 6: Graph Maintenance and Updates (Week 6-7)**
 - [ ] Implement dynamic graph updates for cluster changes
-- [ ] Add efficient neighbor addition/removal methods
-- [ ] Implement incremental graph rebuilding strategies
-- [ ] Add graph validation and consistency checking
 
-**Priority 7: Performance Optimization (Week 7-8)**
+**Priority 7: Performance Validation and Comparison (Week 9-10)**
+- [ ] Direct performance comparison: BruteForce vs BLAST K-NN on identical close cluster workloads
+- [ ] Validate that both implementations produce identical clustering results
 - [ ] BLAST parameter tuning for medoid-level similarity detection
-- [ ] Memory optimization for large K-NN graphs
-- [ ] Parallel BLAST query processing
-- [ ] Comparative performance validation with brute force
+- [ ] Memory usage profiling and optimization
+- [ ] Scalability testing with increasing cluster counts
+- [ ] Document performance characteristics and scaling thresholds
 
-### Phase 3: Full Reclustering Suite (4 weeks)
+### Phase 3: Production Reclustering Suite (2 weeks)
 
-**Priority 8: Close Cluster Refinement (Week 9-10)**
-- [ ] Implement `refine_close_clusters()` using K-NN proximity graph
-- [ ] Add infinite loop prevention with processed component tracking
-- [ ] Add heuristics for determining "significantly different" clusters
-- [ ] Integrate with existing medoid-based overlap detection
-
-**Priority 9: Incremental Update Algorithm (Week 10-11)**
-- [ ] Implement `incremental_update_reclustering()` with K-NN graph
+**Priority 8: Incremental Updates and Production Integration (Week 11-12)**
+- [ ] Implement `incremental_update_reclustering()` with proximity graph interface
 - [ ] Add efficient closest cluster detection for new sequences
-- [ ] Design API for incremental sequence addition
-- [ ] Add batch processing for multiple new sequences
-
-**Priority 10: Production Integration (Week 11-12)**
+- [ ] Design API for incremental sequence addition and batch processing
 - [ ] Integrate all three reclustering modes into `gaphack-decompose` CLI
 - [ ] Add automatic scaling (brute force ↔ K-NN graph) based on dataset size
-- [ ] Implement comprehensive logging and progress reporting
-- [ ] Add command-line options for all reclustering parameters
+- [ ] Add comprehensive CLI options: `--refine-close-clusters`, `--incremental-update`, `--reclustering-mode`
+- [ ] Implement configuration management for complex reclustering scenarios
 
 ### Phase 4: Production Validation (2 weeks)
 
@@ -794,6 +879,9 @@ class ReclusteringConfig:
     # Close cluster refinement
     close_cluster_threshold: float = max_lump
     significant_difference_threshold: float = 0.2  # 20% of sequences must change clusters
+    max_refinement_iterations: int = 5  # Prevent infinite refinement loops
+    min_gap_improvement_threshold: float = 0.001  # Minimum gap improvement to continue refining
+    processed_component_tracking: bool = True  # Track processed components to prevent re-processing
 
     # Incremental update
     max_closest_clusters: int = 5

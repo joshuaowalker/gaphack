@@ -333,6 +333,231 @@ def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
     return updated_clusters
 
 
+def find_connected_close_components(close_pairs: List[Tuple[str, str, float]]) -> List[List[str]]:
+    """Group close cluster pairs into connected components.
+
+    Two clusters are connected if they form a close pair.
+
+    Args:
+        close_pairs: List of (cluster1_id, cluster2_id, distance) tuples
+
+    Returns:
+        List of connected components, each being a list of cluster IDs
+    """
+    # Build cluster adjacency graph
+    cluster_graph = defaultdict(set)
+    all_clusters = set()
+
+    for cluster1_id, cluster2_id, distance in close_pairs:
+        cluster_graph[cluster1_id].add(cluster2_id)
+        cluster_graph[cluster2_id].add(cluster1_id)
+        all_clusters.add(cluster1_id)
+        all_clusters.add(cluster2_id)
+
+    # Find connected components using DFS
+    visited = set()
+    components = []
+
+    def dfs_traverse(cluster_id: str, component: List[str]) -> None:
+        visited.add(cluster_id)
+        component.append(cluster_id)
+        for neighbor in cluster_graph[cluster_id]:
+            if neighbor not in visited:
+                dfs_traverse(neighbor, component)
+
+    for cluster_id in all_clusters:
+        if cluster_id not in visited:
+            component = []
+            dfs_traverse(cluster_id, component)
+            components.append(component)
+
+    return components
+
+
+def expand_scope_for_close_clusters(initial_sequences: Set[str],
+                                   core_cluster_ids: List[str],
+                                   all_clusters: Dict[str, List[str]],
+                                   proximity_graph: ClusterProximityGraph,
+                                   expansion_threshold: float,
+                                   max_scope_size: int = MAX_CLASSIC_GAPHACK_SIZE) -> ExpandedScope:
+    """Expand close cluster refinement scope to include nearby clusters.
+
+    Args:
+        initial_sequences: Initial set of sequence headers in scope
+        core_cluster_ids: Core cluster IDs that must be included
+        all_clusters: All cluster data
+        proximity_graph: Graph for finding nearby clusters
+        expansion_threshold: Distance threshold for expansion
+        max_scope_size: Maximum number of sequences in expanded scope
+
+    Returns:
+        ExpandedScope containing expanded sequence and cluster sets
+    """
+    expanded_sequences = initial_sequences.copy()
+    expanded_cluster_ids = set(core_cluster_ids)
+
+    # Find candidate clusters for expansion
+    candidates = []
+    for cluster_id in core_cluster_ids:
+        neighbors = proximity_graph.get_neighbors_within_distance(cluster_id, expansion_threshold)
+        for neighbor_id, distance in neighbors:
+            if neighbor_id not in expanded_cluster_ids and neighbor_id in all_clusters:
+                candidates.append((neighbor_id, distance))
+
+    # Sort candidates by distance and add until size limit
+    candidates.sort(key=lambda x: x[1])
+
+    for neighbor_id, distance in candidates:
+        neighbor_sequences = set(all_clusters[neighbor_id])
+        potential_size = len(expanded_sequences | neighbor_sequences)
+
+        if potential_size <= max_scope_size:
+            expanded_sequences.update(neighbor_sequences)
+            expanded_cluster_ids.add(neighbor_id)
+        else:
+            break  # Would exceed size limit
+
+    return ExpandedScope(
+        sequences=list(expanded_sequences),
+        headers=list(expanded_sequences),  # Headers same as sequences for decompose
+        cluster_ids=list(expanded_cluster_ids)
+    )
+
+
+def refine_close_clusters(all_clusters: Dict[str, List[str]],
+                         sequences: List[str],
+                         headers: List[str],
+                         distance_provider: DistanceProvider,
+                         proximity_graph: ClusterProximityGraph,
+                         config: Optional[ReclusteringConfig] = None,
+                         min_split: float = 0.005,
+                         max_lump: float = 0.02,
+                         target_percentile: int = 95,
+                         close_threshold: Optional[float] = None) -> Dict[str, List[str]]:
+    """Refine clusters that are closer than expected barcode gaps.
+
+    Args:
+        all_clusters: Current cluster dictionary
+        sequences: Full sequence list
+        headers: Full header list (indices must match sequences)
+        distance_provider: Provider for distance calculations
+        proximity_graph: Graph for finding close cluster pairs
+        config: Configuration for reclustering parameters
+        min_split: Minimum distance to split clusters
+        max_lump: Maximum distance to lump clusters
+        target_percentile: Percentile for gap optimization
+        close_threshold: Distance threshold for "close" clusters (default: max_lump)
+
+    Returns:
+        Updated cluster dictionary with close clusters refined
+    """
+    if config is None:
+        config = ReclusteringConfig()
+
+    if close_threshold is None:
+        close_threshold = max_lump
+
+    if len(all_clusters) < 2:
+        logger.info("Insufficient clusters for close cluster refinement")
+        return all_clusters.copy()
+
+    logger.info(f"Refining close clusters with threshold {close_threshold:.4f}")
+
+    # Step 1: Identify close cluster pairs via medoid analysis
+    close_pairs = proximity_graph.find_close_pairs(close_threshold)
+
+    if not close_pairs:
+        logger.info("No close cluster pairs found")
+        return all_clusters.copy()
+
+    logger.debug(f"Found {len(close_pairs)} close cluster pairs")
+
+    # Step 2: Group close pairs into connected components
+    close_components = find_connected_close_components(close_pairs)
+    logger.debug(f"Found {len(close_components)} close cluster components")
+
+    # Step 3: Track processed components to avoid infinite loops
+    processed_components = set()
+    updated_clusters = all_clusters.copy()
+
+    for component_idx, component_clusters in enumerate(close_components):
+        component_signature = frozenset(component_clusters)
+
+        if component_signature in processed_components:
+            logger.debug(f"Skipping already processed component {component_idx+1}")
+            continue  # Skip already processed components
+
+        logger.debug(f"Processing close cluster component {component_idx+1}/{len(close_components)} "
+                    f"with {len(component_clusters)} clusters")
+
+        # Step 4: Extract and expand scope
+        scope_sequences = set()
+        for cluster_id in component_clusters:
+            if cluster_id in updated_clusters:
+                scope_sequences.update(updated_clusters[cluster_id])
+
+        if not scope_sequences:
+            logger.warning(f"No sequences found for component {component_idx+1}")
+            processed_components.add(component_signature)
+            continue
+
+        # Step 5: Apply scope expansion if beneficial and within size limits
+        expansion_threshold = config.close_cluster_expansion_threshold
+        if expansion_threshold is None:
+            expansion_threshold = close_threshold * 1.2  # Slightly broader than close threshold
+
+        expanded_scope = expand_scope_for_close_clusters(
+            scope_sequences, component_clusters, updated_clusters,
+            proximity_graph, expansion_threshold, config.max_classic_gaphack_size
+        )
+
+        # Step 6: Apply classic gapHACk if scope is manageable
+        if len(expanded_scope.sequences) <= config.max_classic_gaphack_size:
+            logger.debug(f"Applying classic gapHACk to close cluster scope of {len(expanded_scope.sequences)} sequences")
+
+            classic_result = apply_classic_gaphack_to_scope(
+                expanded_scope.sequences, expanded_scope.headers,
+                sequences, headers, distance_provider,
+                min_split, max_lump, target_percentile
+            )
+
+            # Step 7: Check if classic result differs significantly from input
+            original_scope_clusters = {cid: updated_clusters[cid] for cid in expanded_scope.cluster_ids
+                                     if cid in updated_clusters}
+
+            if clusters_significantly_different(original_scope_clusters, classic_result,
+                                              config.significant_difference_threshold):
+                # Step 8: Replace original clusters with classic result
+                for cluster_id in expanded_scope.cluster_ids:
+                    if cluster_id in updated_clusters:
+                        del updated_clusters[cluster_id]
+
+                # Add new clusters from classic result
+                for cluster_id, cluster_headers in classic_result.items():
+                    updated_clusters[cluster_id] = cluster_headers
+
+                logger.info(f"Refined close cluster component: {len(expanded_scope.cluster_ids)} clusters → "
+                           f"{len(classic_result)} clusters")
+            else:
+                logger.debug(f"Classic gapHACk result not significantly different, keeping original clusters")
+
+        else:
+            # Fallback: skip oversized components with warning
+            logger.warning(f"Skipping close cluster component with {len(expanded_scope.sequences)} sequences "
+                          f"(exceeds limit of {config.max_classic_gaphack_size})")
+
+        # Mark as processed regardless of outcome
+        processed_components.add(component_signature)
+
+    # Summary statistics
+    original_count = len(all_clusters)
+    final_count = len(updated_clusters)
+    logger.info(f"Close cluster refinement: {original_count} clusters → {final_count} clusters "
+               f"({final_count - original_count:+d})")
+
+    return updated_clusters
+
+
 def clusters_significantly_different(original_clusters: Dict[str, List[str]],
                                    new_clusters: Dict[str, List[str]],
                                    threshold: float = 0.2) -> bool:

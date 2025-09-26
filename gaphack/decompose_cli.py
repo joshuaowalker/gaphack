@@ -303,6 +303,8 @@ Examples:
     # Conflict resolution arguments
     parser.add_argument('--resolve-conflicts', action='store_true',
                        help='Enable principled reclustering for conflict resolution using classic gapHACk')
+    parser.add_argument('--refine-close-clusters', action='store_true',
+                       help='Enable principled reclustering for close cluster refinement using classic gapHACk')
 
     # Control arguments
     parser.add_argument('-v', '--verbose', action='store_true',
@@ -350,6 +352,7 @@ Examples:
         merge_overlaps=args.merge_overlaps,
         containment_threshold=args.containment_threshold,
         resolve_conflicts=args.resolve_conflicts,
+        refine_close_clusters=args.refine_close_clusters,
         show_progress=not args.no_progress,
         logger=logger
     )
