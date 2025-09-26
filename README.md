@@ -17,6 +17,7 @@ The algorithm focuses on maximizing the "barcode gap" - the separation between i
 
 - **Gap Optimization**: Uses gap-based heuristic to directly maximize the barcode gap
 - **Target Mode**: Single-cluster focused clustering from seed sequences with `--target` parameter
+- **Triangle Inequality Filtering**: Automatically detects and filters alignment failures in mixed-length sequences
 - **Percentile-based Linkage**: Uses percentile-based complete linkage (default 95th percentile) for robust merge decisions
 - **Two-phase Algorithm**: Fast initial clustering followed by gap-aware optimization to completion
 - **Progress Tracking**: Unified progress bar with real-time gap and cluster information
@@ -460,6 +461,23 @@ The adjusted identity algorithm (Russell, 2025) that gapHACk implements addresse
 These adjustments can substantially improve identity scores (e.g., from 97.4% to 99.8%), resulting in clearer barcode gaps and more reliable species delimitation. This is particularly important for fungal ITS sequences where sequencing artifacts are common.
 
 For implementation details of the adjusted identity algorithm, see: https://github.com/joshuaowalker/adjusted-identity
+
+### Triangle Inequality Outlier Detection
+
+When working with mixed-length sequences using infix alignments, some pairs of shorter sequences may align poorly due to insufficient overlap, producing artificially inflated distances. These alignment failures can distort barcode gap evaluation by introducing spurious outliers into the distance distributions.
+
+gapHACk addresses this issue using triangle inequality violation detection. Since sequence distances should satisfy basic geometric constraints, alignment failures that violate the triangle inequality (d(A,B) ≤ d(A,C) + d(C,B)) can be identified and filtered. The algorithm uses a maximum distance heuristic: when a triangle inequality is violated, the largest distance in that triangle is marked as an alignment failure.
+
+To account for the fact that adjusted identity distances may not strictly satisfy distance metric properties, the algorithm applies a tolerance of 5% (0.05) when checking violations. This allows for minor deviations while still catching clear alignment failures.
+
+This filtering is applied consistently across all three clustering modes:
+- **Traditional mode**: Pre-filters the entire distance matrix at startup, setting violating distances to NaN
+- **Target mode**: Filters candidate-to-cluster distances during cluster growth
+- **Decompose mode**: Inherits filtering through target mode clustering
+
+The approach is straightforward but effective: by leveraging the geometric properties that legitimate distances must satisfy, gapHACk can process mixed-length sequences based on their reliable alignments to longer sequences while excluding problematic pairwise distances that would otherwise compromise gap-based clustering decisions.
+
+Triangle inequality filtering is enabled by default but can be disabled with `enable_triangle_filtering=False` if needed.
 
 ### Theoretical Foundations
 
