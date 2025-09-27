@@ -25,6 +25,7 @@ class DecomposeResults:
     total_iterations: int = 0
     total_sequences_processed: int = 0
     coverage_percentage: float = 0.0
+    verification_results: Dict[str, Dict] = field(default_factory=dict)  # comprehensive MECE verification results
 
 
 class AssignmentTracker:
@@ -666,10 +667,22 @@ class DecomposeClustering:
         if results.conflicts:
             self.logger.info(f"Conflicts detected: {len(results.conflicts)}")
 
+        # Perform initial MECE verification after decomposition
+        initial_verification = self._verify_mece_property(results.all_clusters, results.conflicts, "after_decomposition")
+
+        # Store original conflicts for tracking resolution progress
+        original_conflicts = results.conflicts.copy() if results.conflicts else {}
+
         # Apply principled reclustering for conflict resolution if enabled
         if getattr(self, 'resolve_conflicts', False) and results.conflicts:
             self.logger.info(f"Starting principled reclustering for {len(results.conflicts)} conflicts")
             results = self._resolve_conflicts_via_reclustering(results, sequences, headers)
+
+            # Verify conflict resolution effectiveness
+            if original_conflicts:
+                post_resolution_verification = self._verify_mece_property(
+                    results.all_clusters, original_conflicts, "after_conflict_resolution"
+                )
 
         # Apply principled reclustering for close cluster refinement if enabled
         if getattr(self, 'refine_close_clusters', False):
@@ -678,6 +691,39 @@ class DecomposeClustering:
 
         # Expand hash IDs back to original headers
         results = self._expand_hash_ids_to_headers(results, hash_to_headers)
+
+        # CRITICAL: Always perform final comprehensive MECE verification
+        # This runs regardless of whether initial conflicts were detected or resolved
+        # to catch any conflicts that may have been missed or introduced during processing
+        self.logger.info("Performing final comprehensive MECE verification (always runs regardless of initial conflict status)")
+        final_verification = self._verify_mece_property(results.all_clusters, original_conflicts, "final_comprehensive")
+
+        # Store verification results in the results object for external access
+        results.verification_results = {
+            'initial': initial_verification,
+            'final': final_verification
+        }
+
+        # Add post-resolution verification if conflict resolution was performed
+        if getattr(self, 'resolve_conflicts', False) and original_conflicts and 'post_resolution_verification' in locals():
+            results.verification_results['post_resolution'] = post_resolution_verification
+
+        # Update final results based on comprehensive verification findings
+        # The final verification is the authoritative source of truth for conflicts
+        if final_verification.get('critical_failure', False):
+            # Override the conflicts field with what final verification actually found
+            results.conflicts = final_verification['conflicts']
+            self.logger.warning(f"Final verification detected {len(final_verification['conflicts'])} conflicts that were missed by initial detection!")
+
+        # Always update the conflicts field with the final verification results for accuracy
+        # This ensures the output reflects the true state regardless of intermediate processing
+        results.conflicts = final_verification['conflicts']
+
+        # Log final status
+        if final_verification['mece_property']:
+            self.logger.info("🎉 Final verification confirms MECE clustering achieved")
+        else:
+            self.logger.error(f"❌ Final verification reveals {len(final_verification['conflicts'])} conflicts in output")
 
         return results
     
@@ -1113,3 +1159,24 @@ class DecomposeClustering:
                          f"{list(clusters.keys())[:3]}... → {list(renumbered.keys())[:3]}...")
 
         return renumbered
+
+    def _verify_mece_property(self, clusters: Dict[str, List[str]],
+                             original_conflicts: Optional[Dict[str, List[str]]] = None,
+                             context: str = "verification") -> Dict[str, any]:
+        """Verify MECE property of cluster assignments using comprehensive verification.
+
+        Args:
+            clusters: Dictionary mapping cluster_id -> list of sequence headers
+            original_conflicts: Optional original conflicts for comparison
+            context: Context string for logging
+
+        Returns:
+            Dictionary with verification results from comprehensive scan
+        """
+        from .principled_reclustering import verify_cluster_assignments_mece
+
+        return verify_cluster_assignments_mece(
+            clusters=clusters,
+            original_conflicts=original_conflicts,
+            context=context
+        )

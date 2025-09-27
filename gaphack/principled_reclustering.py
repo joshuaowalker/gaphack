@@ -594,3 +594,157 @@ def clusters_significantly_different(original_clusters: Dict[str, List[str]],
 
     change_fraction = changed_sequences / len(all_sequences) if all_sequences else 0
     return change_fraction >= threshold
+
+
+def verify_cluster_assignments_mece(clusters: Dict[str, List[str]],
+                                   original_conflicts: Optional[Dict[str, List[str]]] = None,
+                                   context: str = "final") -> Dict[str, any]:
+    """Perform comprehensive verification of cluster assignments for MECE property.
+
+    Scans all cluster assignments to detect:
+    1. Remaining conflicts (sequences in multiple clusters)
+    2. Assignment coverage and consistency
+    3. Comparison with original conflict set if provided
+
+    Args:
+        clusters: Dictionary mapping cluster_id -> list of sequence headers
+        original_conflicts: Optional original conflicts for comparison
+        context: Context string for logging (e.g., "final", "after_resolution")
+
+    Returns:
+        Dictionary with verification results:
+        - 'conflicts': Dict[str, List[str]] - remaining conflicts
+        - 'conflict_count': int - number of conflicted sequences
+        - 'total_sequences': int - total unique sequences across all clusters
+        - 'total_assignments': int - total sequence assignments (with duplicates)
+        - 'mece_property': bool - True if MECE (no conflicts)
+        - 'new_conflicts': Dict[str, List[str]] - conflicts not in original set
+        - 'unresolved_conflicts': Dict[str, List[str]] - original conflicts still present
+        - 'resolved_conflicts': Dict[str, List[str]] - original conflicts that were resolved
+    """
+    logger.info(f"Performing comprehensive MECE verification ({context})")
+
+    # Build sequence -> cluster mapping to detect conflicts
+    sequence_assignments = defaultdict(list)
+    total_assignments = 0
+
+    for cluster_id, sequence_headers in clusters.items():
+        for seq_header in sequence_headers:
+            sequence_assignments[seq_header].append(cluster_id)
+            total_assignments += 1
+
+    # Identify current conflicts
+    current_conflicts = {}
+    for seq_header, cluster_list in sequence_assignments.items():
+        if len(cluster_list) > 1:
+            current_conflicts[seq_header] = sorted(cluster_list)  # Sort for consistency
+
+    # Calculate basic metrics
+    total_sequences = len(sequence_assignments)
+    conflict_count = len(current_conflicts)
+    mece_property = conflict_count == 0
+
+    # Compare with original conflicts if provided
+    new_conflicts = {}
+    unresolved_conflicts = {}
+    resolved_conflicts = {}
+
+    if original_conflicts:
+        # Find conflicts that are new (not in original set)
+        for seq_id, cluster_ids in current_conflicts.items():
+            if seq_id not in original_conflicts:
+                new_conflicts[seq_id] = cluster_ids
+
+        # Check resolution status of original conflicts
+        for seq_id, original_cluster_ids in original_conflicts.items():
+            if seq_id in current_conflicts:
+                # Conflict still exists - check if it's the same or different
+                current_cluster_ids = current_conflicts[seq_id]
+                unresolved_conflicts[seq_id] = {
+                    'original': sorted(original_cluster_ids),
+                    'current': sorted(current_cluster_ids)
+                }
+            else:
+                # Conflict was resolved
+                resolved_conflicts[seq_id] = original_cluster_ids
+
+    # Log verification results
+    logger.info(f"MECE Verification Results ({context}):")
+    logger.info(f"  Total sequences: {total_sequences}")
+    logger.info(f"  Total assignments: {total_assignments}")
+    logger.info(f"  Conflicted sequences: {conflict_count}")
+    logger.info(f"  MECE property satisfied: {mece_property}")
+
+    if original_conflicts:
+        original_count = len(original_conflicts)
+        resolved_count = len(resolved_conflicts)
+        unresolved_count = len(unresolved_conflicts)
+        new_count = len(new_conflicts)
+
+        logger.info(f"  Original conflicts: {original_count}")
+        logger.info(f"  Resolved conflicts: {resolved_count}")
+        logger.info(f"  Unresolved conflicts: {unresolved_count}")
+        logger.info(f"  New conflicts: {new_count}")
+
+        if resolved_count > 0:
+            resolution_rate = (resolved_count / original_count) * 100
+            logger.info(f"  Resolution rate: {resolution_rate:.1f}%")
+
+    # Log detailed conflict information for debugging
+    if current_conflicts:
+        logger.warning(f"MECE property violated: {conflict_count} sequences in multiple clusters")
+        if conflict_count <= 10:  # Log details for small conflict sets
+            for seq_id, cluster_ids in current_conflicts.items():
+                logger.warning(f"  Conflict: {seq_id} → clusters {cluster_ids}")
+        else:
+            # Sample of conflicts for large sets
+            sample_conflicts = list(current_conflicts.items())[:5]
+            for seq_id, cluster_ids in sample_conflicts:
+                logger.warning(f"  Conflict: {seq_id} → clusters {cluster_ids}")
+            logger.warning(f"  ... and {conflict_count - 5} more conflicts")
+
+    if new_conflicts:
+        logger.error(f"NEW conflicts detected: {len(new_conflicts)} sequences have conflicts not in original set")
+        for seq_id, cluster_ids in new_conflicts.items():
+            logger.error(f"  New conflict: {seq_id} → clusters {cluster_ids}")
+
+    if unresolved_conflicts:
+        logger.warning(f"UNRESOLVED conflicts: {len(unresolved_conflicts)} original conflicts remain")
+        for seq_id, conflict_info in list(unresolved_conflicts.items())[:5]:  # Log first 5
+            orig_clusters = conflict_info['original']
+            curr_clusters = conflict_info['current']
+            logger.warning(f"  Unresolved: {seq_id} → was {orig_clusters}, now {curr_clusters}")
+
+    # Final status determination - critical for catching missed conflicts
+    if context.startswith("final"):
+        if mece_property:
+            logger.info(f"✓ FINAL VERIFICATION PASSED: MECE property satisfied - no conflicts detected in final cluster assignments")
+        else:
+            logger.error(f"✗ FINAL VERIFICATION FAILED: MECE property violated - {conflict_count} conflicts remain in final output")
+            logger.error("This indicates conflicts were missed or introduced during processing!")
+
+        # Log summary of what was processed
+        logger.info(f"Final verification summary: {total_sequences} sequences across {len(clusters)} clusters")
+
+        # If this is truly the final verification, any conflicts are critical
+        if conflict_count > 0:
+            logger.error("CRITICAL: Final output contains conflicts - clustering is not MECE!")
+            logger.error("This may indicate:")
+            logger.error("  1. Conflicts exceeded MAX_CLASSIC_GAPHACK_SIZE and were skipped")
+            logger.error("  2. New conflicts were introduced during classic gapHACk reclustering")
+            logger.error("  3. Scope expansion was insufficient to capture all related conflicts")
+            logger.error("  4. Multi-cluster conflicts were not properly handled")
+
+    # Return comprehensive results
+    return {
+        'conflicts': current_conflicts,
+        'conflict_count': conflict_count,
+        'total_sequences': total_sequences,
+        'total_assignments': total_assignments,
+        'mece_property': mece_property,
+        'new_conflicts': new_conflicts,
+        'unresolved_conflicts': unresolved_conflicts,
+        'resolved_conflicts': resolved_conflicts,
+        'verification_context': context,
+        'critical_failure': context.startswith("final") and not mece_property
+    }
