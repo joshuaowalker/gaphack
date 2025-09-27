@@ -234,12 +234,14 @@ def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
                                      sequences: List[str],
                                      headers: List[str],
                                      distance_provider: DistanceProvider,
-                                     proximity_graph: ClusterProximityGraph,
                                      config: Optional[ReclusteringConfig] = None,
                                      min_split: float = 0.005,
                                      max_lump: float = 0.02,
                                      target_percentile: int = 95) -> Dict[str, List[str]]:
-    """Resolve assignment conflicts using classic gapHACk reclustering.
+    """Resolve assignment conflicts using classic gapHACk reclustering with minimal scope.
+
+    Uses only conflicted clusters (no expansion) for fastest, most predictable MECE fixes.
+    This is pure correctness operation - quality improvement belongs to close cluster refinement.
 
     Args:
         conflicts: Dict mapping sequence_id -> list of cluster_ids containing sequence
@@ -247,14 +249,13 @@ def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
         sequences: Full sequence list
         headers: Full header list (indices must match sequences)
         distance_provider: Provider for distance calculations
-        proximity_graph: Graph for finding nearby clusters
         config: Configuration for reclustering parameters
         min_split: Minimum distance to split clusters
         max_lump: Maximum distance to lump clusters
         target_percentile: Percentile for gap optimization
 
     Returns:
-        Updated cluster dictionary with conflicts resolved
+        Updated cluster dictionary with conflicts resolved using minimal scope
     """
     if config is None:
         config = ReclusteringConfig()

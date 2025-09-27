@@ -983,13 +983,9 @@ class DecomposeClustering:
             Updated DecomposeResults with conflicts resolved
         """
         from .principled_reclustering import resolve_conflicts_via_reclustering, ReclusteringConfig
-        from .cluster_proximity import BruteForceProximityGraph, BlastKNNProximityGraph
 
         # Get global distance provider for the full dataset
         distance_provider = self._get_or_create_distance_provider(sequences)
-
-        # Create proximity graph for cluster proximity queries
-        proximity_graph = self._create_proximity_graph(results.all_clusters, sequences, headers, distance_provider)
 
         # Create reclustering configuration for minimal conflict resolution
         config = ReclusteringConfig(
@@ -998,14 +994,13 @@ class DecomposeClustering:
             significant_difference_threshold=0.2  # 20% sequences must change for significant difference
         )
 
-        # Apply conflict resolution
+        # Apply conflict resolution (no proximity graph needed - uses minimal scope only)
         resolved_clusters = resolve_conflicts_via_reclustering(
             conflicts=results.conflicts,
             all_clusters=results.all_clusters,
             sequences=sequences,
             headers=headers,
             distance_provider=distance_provider,
-            proximity_graph=proximity_graph,
             config=config,
             min_split=self.min_split,
             max_lump=self.max_lump,
