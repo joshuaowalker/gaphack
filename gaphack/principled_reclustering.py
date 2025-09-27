@@ -164,6 +164,74 @@ def expand_scope_for_conflicts(initial_sequences: Set[str],
     )
 
 
+def apply_classic_gaphack_to_scope_with_metadata(scope_sequences: List[str],
+                                               scope_headers: List[str],
+                                               global_sequences: List[str],
+                                               global_headers: List[str],
+                                               global_distance_provider: DistanceProvider,
+                                               min_split: float = 0.005,
+                                               max_lump: float = 0.02,
+                                               target_percentile: int = 95) -> Tuple[Dict[str, List[str]], Dict]:
+    """Apply classic gapHACk clustering to a scope of sequences, returning clusters and metadata.
+
+    Args:
+        scope_sequences: Sequences to cluster (in scope order)
+        scope_headers: Headers for scope sequences
+        global_sequences: Full sequence list
+        global_headers: Full header list
+        global_distance_provider: Distance provider for full dataset
+        min_split: Minimum distance to split clusters
+        max_lump: Maximum distance to lump clusters
+        target_percentile: Percentile for gap optimization
+
+    Returns:
+        Tuple of (cluster_dict, metadata_dict) where metadata includes gap_size
+    """
+    # Create scoped distance provider
+    scoped_provider = create_scoped_distance_provider(
+        global_distance_provider, scope_headers, global_headers
+    )
+
+    # Build distance matrix for classic gapHACk
+    distance_matrix = scoped_provider.build_distance_matrix()
+
+    # Apply classic gapHACk clustering
+    clusterer = GapOptimizedClustering(
+        min_split=min_split,
+        max_lump=max_lump,
+        target_percentile=target_percentile,
+        show_progress=False,  # Disable progress for scope-limited clustering
+        logger=logger
+    )
+
+    # Get clustering result with metadata
+    final_clusters, singletons, metadata = clusterer.cluster(distance_matrix)
+
+    # Convert result to cluster dictionary format
+    clusters = {}
+
+    # Process multi-member clusters (list of lists of indices)
+    for cluster_idx, cluster_indices_list in enumerate(final_clusters):
+        cluster_headers = []
+        for seq_idx in cluster_indices_list:
+            cluster_headers.append(scope_headers[seq_idx])
+
+        cluster_id = f"classic_{hash(tuple(sorted(cluster_headers)))}"
+        clusters[cluster_id] = cluster_headers
+
+    # Process singletons (list of indices)
+    for singleton_idx in singletons:
+        cluster_headers = [scope_headers[singleton_idx]]
+        cluster_id = f"classic_{hash(tuple(cluster_headers))}"
+        clusters[cluster_id] = cluster_headers
+
+    # Extract gap size from metadata
+    gap_size = metadata.get('best_config', {}).get('gap_size', float('-inf'))
+
+    logger.debug(f"Classic gapHACk on scope: {len(scope_sequences)} sequences → {len(clusters)} clusters, gap={gap_size:.4f}")
+    return clusters, {'gap_size': gap_size, 'metadata': metadata}
+
+
 def apply_classic_gaphack_to_scope(scope_sequences: List[str],
                                  scope_headers: List[str],
                                  global_sequences: List[str],
@@ -187,45 +255,11 @@ def apply_classic_gaphack_to_scope(scope_sequences: List[str],
     Returns:
         Dict mapping cluster_id -> list of sequence headers
     """
-    # Create scoped distance provider
-    scoped_provider = create_scoped_distance_provider(
-        global_distance_provider, scope_headers, global_headers
+    # Use the metadata version and just return the clusters
+    clusters, _ = apply_classic_gaphack_to_scope_with_metadata(
+        scope_sequences, scope_headers, global_sequences, global_headers,
+        global_distance_provider, min_split, max_lump, target_percentile
     )
-
-    # Build distance matrix for classic gapHACk
-    distance_matrix = scoped_provider.build_distance_matrix()
-
-    # Apply classic gapHACk clustering
-    clusterer = GapOptimizedClustering(
-        min_split=min_split,
-        max_lump=max_lump,
-        target_percentile=target_percentile,
-        show_progress=False,  # Disable progress for scope-limited clustering
-        logger=logger
-    )
-
-    # Get clustering result
-    final_clusters, singletons, metadata = clusterer.cluster(distance_matrix)
-
-    # Convert result to cluster dictionary format
-    clusters = {}
-
-    # Process multi-member clusters (list of lists of indices)
-    for cluster_idx, cluster_indices_list in enumerate(final_clusters):
-        cluster_headers = []
-        for seq_idx in cluster_indices_list:
-            cluster_headers.append(scope_headers[seq_idx])
-
-        cluster_id = f"classic_{hash(tuple(sorted(cluster_headers)))}"
-        clusters[cluster_id] = cluster_headers
-
-    # Process singletons (list of indices)
-    for singleton_idx in singletons:
-        cluster_headers = [scope_headers[singleton_idx]]
-        cluster_id = f"classic_{hash(tuple(cluster_headers))}"
-        clusters[cluster_id] = cluster_headers
-
-    logger.debug(f"Classic gapHACk on scope: {len(scope_sequences)} sequences → {len(clusters)} clusters")
     return clusters
 
 
@@ -367,12 +401,228 @@ def find_connected_close_components(close_pairs: List[Tuple[str, str, float]]) -
     return components
 
 
+def needs_minimal_context_for_gap_calculation(core_cluster_ids: List[str],
+                                             all_clusters: Dict[str, List[str]],
+                                             proximity_graph: ClusterProximityGraph,
+                                             max_lump: float) -> bool:
+    """Check if we need to add context to prevent gap calculation issues.
+
+    Returns True if all pairwise cluster distances are within max_lump,
+    meaning classic gapHACk would merge everything and have no inter-cluster distances.
+
+    Args:
+        core_cluster_ids: Core cluster IDs being refined
+        all_clusters: All cluster data
+        proximity_graph: Graph for distance queries
+        max_lump: Maximum distance for classic gapHACk merging
+
+    Returns:
+        True if minimal context is needed for proper gap calculation
+    """
+    if len(core_cluster_ids) <= 1:
+        return True  # Single cluster needs context by definition
+
+    # Check if all pairwise cluster distances are within max_lump
+    for i, cluster1_id in enumerate(core_cluster_ids):
+        for cluster2_id in core_cluster_ids[i+1:]:
+            # Find distance between these clusters using proximity graph
+            neighbors = proximity_graph.get_neighbors_within_distance(cluster1_id, max_lump * 2)
+            cluster_distance = None
+
+            for neighbor_id, distance in neighbors:
+                if neighbor_id == cluster2_id:
+                    cluster_distance = distance
+                    break
+
+            if cluster_distance is None:
+                # Distance not found in neighbors, likely > max_lump
+                return False
+            elif cluster_distance > max_lump:
+                return False  # Found a pair beyond max_lump
+
+    return True  # All distances ≤ max_lump → everything would merge → need context
+
+
+def add_context_at_distance_threshold(current_cluster_ids: Set[str],
+                                     all_clusters: Dict[str, List[str]],
+                                     proximity_graph: ClusterProximityGraph,
+                                     distance_threshold: float,
+                                     max_scope_size: int) -> Tuple[bool, str, float]:
+    """Add one context cluster beyond the given distance threshold.
+
+    Args:
+        current_cluster_ids: Current clusters in scope
+        all_clusters: All available clusters
+        proximity_graph: Graph for finding neighbors
+        distance_threshold: Minimum distance for context clusters
+        max_scope_size: Maximum total sequences allowed
+
+    Returns:
+        Tuple of (success, cluster_id_added, distance_added)
+    """
+    current_sequences = sum(len(all_clusters[cid]) for cid in current_cluster_ids if cid in all_clusters)
+
+    for cluster_id in current_cluster_ids:
+        # Find clusters beyond distance threshold
+        all_neighbors = proximity_graph.get_k_nearest_neighbors(cluster_id, k=30)
+        context_candidates = [
+            (neighbor_id, distance) for neighbor_id, distance in all_neighbors
+            if (distance > distance_threshold and
+                neighbor_id not in current_cluster_ids and
+                neighbor_id in all_clusters)
+        ]
+
+        if context_candidates:
+            # Try to add the closest context cluster
+            context_id, context_distance = context_candidates[0]
+            context_size = len(all_clusters[context_id])
+
+            if current_sequences + context_size <= max_scope_size:
+                return True, context_id, context_distance
+
+    return False, "", 0.0
+
+
+def expand_scope_with_iterative_context(core_cluster_ids: List[str],
+                                       all_clusters: Dict[str, List[str]],
+                                       sequences: List[str],
+                                       headers: List[str],
+                                       distance_provider: DistanceProvider,
+                                       proximity_graph: ClusterProximityGraph,
+                                       expansion_threshold: float,
+                                       max_scope_size: int,
+                                       max_lump: float,
+                                       min_split: float,
+                                       target_percentile: int,
+                                       target_gap: float = 0.001,
+                                       max_iterations: int = 5) -> Tuple[ExpandedScope, Dict]:
+    """Iteratively expand context until positive gap is achieved.
+
+    Args:
+        core_cluster_ids: Core clusters to refine
+        all_clusters: All available clusters
+        sequences: Full sequence list
+        headers: Full header list
+        distance_provider: Distance calculation provider
+        proximity_graph: Graph for finding neighbors
+        expansion_threshold: Regular expansion threshold
+        max_scope_size: Maximum sequences in scope
+        max_lump: Classic gapHACk max lump threshold
+        min_split: Classic gapHACk min split threshold
+        target_percentile: Gap calculation percentile
+        target_gap: Minimum gap to achieve
+        max_iterations: Maximum context expansion iterations
+
+    Returns:
+        Tuple of (final_scope, classic_gaphack_result)
+    """
+    # Start with core clusters
+    current_cluster_ids = set(core_cluster_ids)
+    iteration = 0
+    best_result = None
+    best_gap = float('-inf')
+
+    logger.debug(f"Starting iterative context expansion for {len(core_cluster_ids)} core clusters")
+
+    while iteration < max_iterations:
+        # Build current scope
+        scope_sequences = set()
+        for cluster_id in current_cluster_ids:
+            if cluster_id in all_clusters:
+                scope_sequences.update(all_clusters[cluster_id])
+
+        current_scope = ExpandedScope(
+            sequences=list(scope_sequences),
+            headers=list(scope_sequences),
+            cluster_ids=list(current_cluster_ids)
+        )
+
+        # Apply classic gapHACk to current scope
+        if len(scope_sequences) <= max_scope_size:
+            logger.debug(f"Iteration {iteration}: testing scope with {len(current_cluster_ids)} clusters, "
+                        f"{len(scope_sequences)} sequences")
+
+            classic_clusters, classic_metadata = apply_classic_gaphack_to_scope_with_metadata(
+                current_scope.sequences, current_scope.headers,
+                sequences, headers, distance_provider,
+                min_split, max_lump, target_percentile
+            )
+
+            # Extract gap from the metadata
+            current_gap = classic_metadata.get('gap_size', float('-inf'))
+
+            logger.debug(f"Iteration {iteration}: achieved gap = {current_gap:.4f}")
+
+            # Track best result
+            if current_gap > best_gap:
+                best_gap = current_gap
+                best_result = classic_clusters
+
+            # Check if we've achieved target gap
+            if current_gap >= target_gap:
+                logger.info(f"Achieved positive gap {current_gap:.4f} after {iteration} context expansions")
+                return current_scope, classic_clusters
+
+        # Gap still insufficient - add more distant context
+        context_distance = max_lump * (1.5 + iteration * 0.5)  # 1.5x, 2.0x, 2.5x, etc.
+        logger.debug(f"Iteration {iteration}: gap {best_gap:.4f} < target {target_gap:.4f}, "
+                    f"adding context at distance {context_distance:.3f}")
+
+        # Try to add context cluster
+        success, context_id, actual_distance = add_context_at_distance_threshold(
+            current_cluster_ids, all_clusters, proximity_graph,
+            context_distance, max_scope_size
+        )
+
+        if success:
+            current_cluster_ids.add(context_id)
+            logger.debug(f"Added context cluster {context_id} at distance {actual_distance:.3f}")
+        else:
+            logger.debug(f"No context available at distance {context_distance:.3f} or would exceed size limit")
+            break
+
+        iteration += 1
+
+    # Return best result found
+    if best_result is None:
+        logger.warning("No valid classic gapHACk results obtained during iterative expansion")
+        # Fallback to minimal scope
+        scope_sequences = set()
+        for cluster_id in core_cluster_ids:
+            if cluster_id in all_clusters:
+                scope_sequences.update(all_clusters[cluster_id])
+
+        final_scope = ExpandedScope(
+            sequences=list(scope_sequences),
+            headers=list(scope_sequences),
+            cluster_ids=core_cluster_ids
+        )
+        return final_scope, {}
+
+    logger.info(f"Iterative expansion complete: best gap {best_gap:.4f} after {iteration} iterations")
+
+    # Build final scope corresponding to best result
+    final_scope_sequences = set()
+    for cluster_id in current_cluster_ids:
+        if cluster_id in all_clusters:
+            final_scope_sequences.update(all_clusters[cluster_id])
+
+    final_scope = ExpandedScope(
+        sequences=list(final_scope_sequences),
+        headers=list(final_scope_sequences),
+        cluster_ids=list(current_cluster_ids)
+    )
+
+    return final_scope, best_result
+
+
 def expand_scope_for_close_clusters(initial_sequences: Set[str],
                                    core_cluster_ids: List[str],
                                    all_clusters: Dict[str, List[str]],
                                    proximity_graph: ClusterProximityGraph,
                                    expansion_threshold: float,
-                                   max_scope_size: int = MAX_CLASSIC_GAPHACK_SIZE) -> ExpandedScope:
+                                   max_scope_size: int = MAX_CLASSIC_GAPHACK_SIZE,
+                                   max_lump: float = 0.02) -> ExpandedScope:
     """Expand close cluster refinement scope to include nearby clusters.
 
     Args:
@@ -382,6 +632,7 @@ def expand_scope_for_close_clusters(initial_sequences: Set[str],
         proximity_graph: Graph for finding nearby clusters
         expansion_threshold: Distance threshold for expansion
         max_scope_size: Maximum number of sequences in expanded scope
+        max_lump: Maximum distance for classic gapHACk merging
 
     Returns:
         ExpandedScope containing expanded sequence and cluster sets
@@ -389,7 +640,45 @@ def expand_scope_for_close_clusters(initial_sequences: Set[str],
     expanded_sequences = initial_sequences.copy()
     expanded_cluster_ids = set(core_cluster_ids)
 
-    # Find candidate clusters for expansion
+    # Step 1: Check if we need minimal context for proper gap calculation
+    needs_context = needs_minimal_context_for_gap_calculation(
+        core_cluster_ids, all_clusters, proximity_graph, max_lump
+    )
+
+    if needs_context:
+        logger.debug(f"Adding minimal context: all core clusters within max_lump ({max_lump:.3f})")
+
+        # Add the closest cluster that's beyond max_lump distance
+        context_threshold = max_lump * 1.01  # Just beyond max_lump
+        context_added = False
+
+        for cluster_id in core_cluster_ids:
+            # Find clusters beyond max_lump distance
+            all_neighbors = proximity_graph.get_k_nearest_neighbors(cluster_id, k=20)
+            context_candidates = [
+                (neighbor_id, distance) for neighbor_id, distance in all_neighbors
+                if (distance > context_threshold and
+                    neighbor_id not in expanded_cluster_ids and
+                    neighbor_id in all_clusters)
+            ]
+
+            if context_candidates:
+                # Add the closest context cluster
+                context_id, context_distance = context_candidates[0]
+                context_sequences = set(all_clusters[context_id])
+                potential_size = len(expanded_sequences | context_sequences)
+
+                if potential_size <= max_scope_size:
+                    expanded_sequences.update(context_sequences)
+                    expanded_cluster_ids.add(context_id)
+                    logger.debug(f"Added minimal context cluster {context_id} at distance {context_distance:.3f}")
+                    context_added = True
+                    break
+
+        if not context_added:
+            logger.debug("Could not add minimal context within size constraints")
+
+    # Step 2: Regular expansion within threshold (if there's still room)
     candidates = []
     for cluster_id in core_cluster_ids:
         neighbors = proximity_graph.get_neighbors_within_distance(cluster_id, expansion_threshold)
@@ -494,26 +783,32 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
             processed_components.add(component_signature)
             continue
 
-        # Step 5: Apply scope expansion if beneficial and within size limits
+        # Step 5: Apply iterative context expansion for positive gap
         expansion_threshold = config.close_cluster_expansion_threshold
         if expansion_threshold is None:
             expansion_threshold = close_threshold * 1.2  # Slightly broader than close threshold
 
-        expanded_scope = expand_scope_for_close_clusters(
-            scope_sequences, component_clusters, updated_clusters,
-            proximity_graph, expansion_threshold, config.max_classic_gaphack_size
+        # Use iterative expansion to achieve positive gap
+        logger.debug(f"Applying iterative context expansion to component with {len(component_clusters)} clusters")
+
+        expanded_scope, classic_result = expand_scope_with_iterative_context(
+            component_clusters,
+            updated_clusters,
+            sequences,
+            headers,
+            distance_provider,
+            proximity_graph,
+            expansion_threshold,
+            config.max_classic_gaphack_size,
+            max_lump,
+            min_split,
+            target_percentile,
+            target_gap=0.001,  # Target positive gap
+            max_iterations=5
         )
 
-        # Step 6: Apply classic gapHACk if scope is manageable
-        if len(expanded_scope.sequences) <= config.max_classic_gaphack_size:
-            logger.debug(f"Applying classic gapHACk to close cluster scope of {len(expanded_scope.sequences)} sequences")
-
-            classic_result = apply_classic_gaphack_to_scope(
-                expanded_scope.sequences, expanded_scope.headers,
-                sequences, headers, distance_provider,
-                min_split, max_lump, target_percentile
-            )
-
+        # Step 6: Check if we got a valid result
+        if classic_result and len(classic_result) > 0:
             # Step 7: Check if classic result differs significantly from input
             original_scope_clusters = {cid: updated_clusters[cid] for cid in expanded_scope.cluster_ids
                                      if cid in updated_clusters}
@@ -535,9 +830,8 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
                 logger.debug(f"Classic gapHACk result not significantly different, keeping original clusters")
 
         else:
-            # Fallback: skip oversized components with warning
-            logger.warning(f"Skipping close cluster component with {len(expanded_scope.sequences)} sequences "
-                          f"(exceeds limit of {config.max_classic_gaphack_size})")
+            # Fallback: iterative expansion failed
+            logger.warning(f"Iterative context expansion failed for component with {len(component_clusters)} clusters")
 
         # Mark as processed regardless of outcome
         processed_components.add(component_signature)
