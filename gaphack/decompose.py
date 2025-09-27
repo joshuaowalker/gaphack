@@ -257,6 +257,7 @@ class DecomposeClustering:
                  allow_overlaps: bool = True,
                  resolve_conflicts: bool = False,
                  refine_close_clusters: bool = False,
+                 close_cluster_threshold: float = 0.0,
                  proximity_graph: str = 'brute-force',
                  knn_neighbors: int = 20,
                  show_progress: bool = True,
@@ -272,8 +273,9 @@ class DecomposeClustering:
             blast_evalue: BLAST e-value threshold
             min_identity: BLAST identity threshold (auto if None)
             allow_overlaps: Allow sequences to appear in multiple clusters (default: True)
-            resolve_conflicts: Enable principled reclustering for conflict resolution (default: False)
+            resolve_conflicts: Enable principled reclustering for conflict resolution with minimal scope (default: False)
             refine_close_clusters: Enable principled reclustering for close cluster refinement (default: False)
+            close_cluster_threshold: Distance threshold for close cluster refinement and scope expansion (default: 0.0)
             proximity_graph: Proximity graph implementation ('brute-force' or 'blast-knn', default: 'brute-force')
             knn_neighbors: Number of K-nearest neighbors for BLAST K-NN graph (default: 20)
             show_progress: Show progress bars
@@ -289,6 +291,7 @@ class DecomposeClustering:
         self.allow_overlaps = allow_overlaps
         self.resolve_conflicts = resolve_conflicts
         self.refine_close_clusters = refine_close_clusters
+        self.close_cluster_threshold = close_cluster_threshold
         self.proximity_graph = proximity_graph
         self.knn_neighbors = knn_neighbors
         self.show_progress = show_progress
@@ -988,10 +991,9 @@ class DecomposeClustering:
         # Create proximity graph for cluster proximity queries
         proximity_graph = self._create_proximity_graph(results.all_clusters, sequences, headers, distance_provider)
 
-        # Create reclustering configuration with appropriate thresholds
+        # Create reclustering configuration for minimal conflict resolution
         config = ReclusteringConfig(
             max_classic_gaphack_size=300,  # Conservative limit for performance
-            conflict_expansion_threshold=1.5 * self.max_lump,  # Expand scope near conflicted clusters
             jaccard_overlap_threshold=0.1,  # Include clusters with 10%+ overlap
             significant_difference_threshold=0.2  # 20% sequences must change for significant difference
         )
@@ -1056,10 +1058,10 @@ class DecomposeClustering:
         # Create proximity graph for cluster proximity queries
         proximity_graph = self._create_proximity_graph(results.all_clusters, sequences, headers, distance_provider)
 
-        # Create reclustering configuration with appropriate thresholds
+        # Create reclustering configuration with user-provided threshold
         config = ReclusteringConfig(
             max_classic_gaphack_size=300,  # Conservative limit for performance
-            close_cluster_expansion_threshold=1.2 * self.max_lump,  # Expand scope near close clusters
+            close_cluster_expansion_threshold=self.close_cluster_threshold,  # User-controlled expansion threshold
             jaccard_overlap_threshold=0.1,  # Include clusters with 10%+ overlap
             significant_difference_threshold=0.2  # 20% sequences must change for significant difference
         )

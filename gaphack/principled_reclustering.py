@@ -276,33 +276,25 @@ def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
         logger.debug(f"Processing conflict component {component_idx+1}/{len(conflict_components)} "
                     f"with {len(component_clusters)} clusters")
 
-        # Step 2: Extract scope sequences
+        # Step 2: Extract scope sequences (minimal scope - only conflicted clusters)
         scope_sequences = set()
         for cluster_id in component_clusters:
             scope_sequences.update(all_clusters[cluster_id])
 
-        # Step 3: Apply scope expansion if beneficial and within size limits
-        expansion_threshold = config.conflict_expansion_threshold
-        if expansion_threshold is None:
-            expansion_threshold = 1.5 * 0.02  # 1.5 * default max_lump
+        scope_headers = list(scope_sequences)  # Headers same as sequences for decompose
 
-        expanded_scope = expand_scope_for_conflicts(
-            scope_sequences, component_clusters, all_clusters,
-            proximity_graph, expansion_threshold, config.max_classic_gaphack_size
-        )
-
-        # Step 4: Apply classic gapHACk to scope if size is manageable
-        if len(expanded_scope.sequences) <= config.max_classic_gaphack_size:
-            logger.debug(f"Applying classic gapHACk to scope of {len(expanded_scope.sequences)} sequences")
+        # Step 3: Apply classic gapHACk to minimal conflict scope (no expansion)
+        if len(scope_sequences) <= config.max_classic_gaphack_size:
+            logger.debug(f"Applying classic gapHACk to minimal conflict scope of {len(scope_sequences)} sequences")
 
             classic_result = apply_classic_gaphack_to_scope(
-                expanded_scope.sequences, expanded_scope.headers,
+                scope_headers, scope_headers,  # Use minimal scope directly
                 sequences, headers, distance_provider,
                 min_split, max_lump, target_percentile
             )
 
-            # Step 5: Replace original clusters with classic result
-            for cluster_id in expanded_scope.cluster_ids:
+            # Step 4: Replace original conflicted clusters with classic result
+            for cluster_id in component_clusters:
                 if cluster_id in updated_clusters:
                     del updated_clusters[cluster_id]
 
@@ -310,12 +302,12 @@ def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
             for cluster_id, cluster_headers in classic_result.items():
                 updated_clusters[cluster_id] = cluster_headers
 
-            logger.info(f"Resolved conflict component: {len(expanded_scope.cluster_ids)} clusters → "
+            logger.info(f"Resolved conflict component: {len(component_clusters)} clusters → "
                        f"{len(classic_result)} clusters")
 
         else:
             # Fallback: skip oversized components with warning
-            logger.warning(f"Skipping conflict component with {len(expanded_scope.sequences)} sequences "
+            logger.warning(f"Skipping conflict component with {len(scope_sequences)} sequences "
                           f"(exceeds limit of {config.max_classic_gaphack_size})")
 
     # Verify conflicts are resolved

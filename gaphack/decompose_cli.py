@@ -296,9 +296,9 @@ Examples:
     
     # Conflict resolution arguments
     parser.add_argument('--resolve-conflicts', action='store_true',
-                       help='Enable principled reclustering for conflict resolution using classic gapHACk')
-    parser.add_argument('--refine-close-clusters', action='store_true',
-                       help='Enable principled reclustering for close cluster refinement using classic gapHACk')
+                       help='Enable principled reclustering for conflict resolution using classic gapHACk (minimal scope)')
+    parser.add_argument('--refine-close-clusters', type=float, default=0.0, metavar='DISTANCE',
+                       help='Enable close cluster refinement with distance threshold (0.0 = disabled, e.g. 0.02 for 2%% distance)')
     parser.add_argument('--proximity-graph', choices=['brute-force', 'blast-knn'], default='brute-force',
                        help='Proximity graph implementation for reclustering (default: brute-force)')
     parser.add_argument('--knn-neighbors', type=int, default=20,
@@ -348,7 +348,8 @@ Examples:
         min_identity=args.min_identity,
         allow_overlaps=not args.no_overlaps,
         resolve_conflicts=args.resolve_conflicts,
-        refine_close_clusters=args.refine_close_clusters,
+        refine_close_clusters=args.refine_close_clusters > 0.0,
+        close_cluster_threshold=args.refine_close_clusters,
         proximity_graph=args.proximity_graph,
         knn_neighbors=args.knn_neighbors,
         show_progress=not args.no_progress,

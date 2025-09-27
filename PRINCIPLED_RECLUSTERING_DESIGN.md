@@ -49,37 +49,46 @@ Apply **classic gapHACk** to carefully selected sequence subsets to achieve:
 - **Global optimization**: Within scope, finds optimal clustering configuration
 - **Bounded complexity**: Limit scope size to maintain performance (≤300 sequences)
 
-### Three Reclustering Use Cases
+### Three Reclustering Use Cases with Clean Separation
 
-#### 1. Conflict Resolution Reclustering
+#### 1. Conflict Resolution Reclustering (Pure Correctness)
 **Trigger**: Sequence assigned to multiple clusters
-**Scope**: Union of all clusters containing conflicted sequence(s)
-**Outcome**: MECE partition resolving all conflicts in scope
+**Scope**: Minimal - only conflicted clusters (no expansion)
+**Purpose**: Fix MECE violations with fastest, most predictable approach
+**Outcome**: MECE partition resolving conflicts in minimal scope
 
-#### 2. Close Cluster Refinement Reclustering
-**Trigger**: Clusters with medoids closer than expected gap
-**Scope**: Neighborhood of close clusters (expandable)
-**Outcome**: Optimal clustering within barcode gap constraints
+#### 2. Close Cluster Refinement Reclustering (User-Controlled Quality)
+**Trigger**: User requests quality improvement with distance threshold
+**Scope**: Close clusters + user-controlled expansion based on distance threshold
+**Purpose**: Optimize cluster boundaries and merge overly-granular clusters
+**Outcome**: Higher quality clustering with user-controlled computational cost
 
 #### 3. Incremental Update Reclustering
 **Trigger**: New sequence addition or cluster evolution
 **Scope**: Existing clusters closest to new sequence
 **Outcome**: Updated clustering incorporating new information
 
-### Scope Selection Strategy
+### Clean Separation of Responsibilities
 
-**Dynamic Neighborhood Expansion:**
-```
-1. Start with minimal scope (conflicted clusters, close pairs, etc.)
-2. Expand scope to include "nearby" clusters based on:
-   - Medoid distances ≤ scope_expansion_threshold
-   - Sequence overlap patterns
-   - Gap analysis suggesting potential merges
-3. Stop expansion when:
-   - Scope size approaches performance limit (~300 sequences)
-   - No additional clusters meet inclusion criteria
-   - Expansion would create disconnected components
-```
+**Design Principle**: Separate correctness from quality improvement to give users explicit control.
+
+**Conflict Resolution (--resolve-conflicts)**:
+- **Pure correctness focus**: Fix MECE violations only
+- **Minimal scope**: Uses only sequences from conflicted clusters
+- **Fast and predictable**: No hidden expansion or quality optimization
+- **Clear purpose**: Ensures mutually exclusive clustering
+
+**Close Cluster Refinement (--refine-close-clusters DISTANCE)**:
+- **Pure quality focus**: Optimize cluster boundaries and merge close clusters
+- **User-controlled expansion**: Distance threshold provided directly by user
+- **Explicit trade-offs**: User chooses performance vs. quality balance
+- **Clear purpose**: Improve clustering quality within computational budget
+
+**Benefits of Separation**:
+- Users understand exactly what each flag does
+- No hidden quality work in correctness operations
+- Predictable performance characteristics
+- Flexible control over speed vs. quality trade-offs
 
 ## Detailed Algorithm Specifications
 
@@ -113,18 +122,13 @@ def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
         for cluster_id in component_clusters:
             scope_sequences.update(all_clusters[cluster_id])
 
-        # Step 3: Apply scope expansion if beneficial
-        expanded_scope = expand_scope_for_conflicts(
-            scope_sequences, component_clusters, all_clusters,
-            expansion_threshold=1.5 * max_lump
-        )
+        # Step 3: Apply classic gapHACk to minimal conflict scope (no expansion)
+        # NOTE: Scope expansion has been moved to close cluster refinement for clean separation
+        if len(scope_sequences) <= MAX_CLASSIC_GAPHACK_SIZE:
+            classic_result = apply_classic_gaphack(scope_sequences)
 
-        # Step 4: Apply classic gapHACk to scope
-        if len(expanded_scope.sequences) <= MAX_CLASSIC_GAPHACK_SIZE:
-            classic_result = apply_classic_gaphack(expanded_scope.sequences)
-
-            # Step 5: Replace original clusters with classic result
-            for cluster_id in expanded_scope.cluster_ids:
+            # Step 4: Replace original conflicted clusters with classic result
+            for cluster_id in component_clusters:
                 del updated_clusters[cluster_id]
 
             for i, new_cluster in enumerate(classic_result.clusters):
@@ -132,10 +136,10 @@ def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
                 updated_clusters[new_cluster_id] = new_cluster
 
         else:
-            # Fallback: use conservative pairwise merging for oversized scopes
-            updated_clusters = apply_conservative_conflict_resolution(
-                component_clusters, updated_clusters
-            )
+            # Fallback: skip oversized components with warning
+            # No expansion means smaller scopes, reducing this fallback scenario
+            logger.warning(f"Skipping conflict component with {len(scope_sequences)} sequences "
+                          f"(exceeds limit of {MAX_CLASSIC_GAPHACK_SIZE})")
 
     return updated_clusters
 ```
@@ -178,14 +182,15 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
         if component_signature in processed_components:
             continue  # Skip already processed components
 
-        # Step 4: Extract and expand scope
+        # Step 4: Extract and expand scope with user-controlled threshold
+        # NOTE: Scope expansion now belongs to close cluster refinement (quality improvement)
         scope_sequences = set()
         for cluster_id in component_clusters:
             scope_sequences.update(updated_clusters[cluster_id])
 
         expanded_scope = expand_scope_for_close_clusters(
             scope_sequences, component_clusters, updated_clusters,
-            expansion_threshold=close_threshold * 1.2
+            expansion_threshold=close_threshold  # User-provided expansion distance
         )
 
         # Step 5: Apply classic gapHACk if scope is manageable
@@ -1013,4 +1018,69 @@ def select_proximity_graph_implementation(cluster_count: int) -> ClusterProximit
 - Automated MECE property validation
 - Gap quality metrics comparison with baseline algorithms
 
+## CLI Interface and Usage Examples
+
+### Command Line Interface
+
+The principled reclustering system provides clean, separated CLI options:
+
+```bash
+gaphack-decompose input.fasta [options]
+  --resolve-conflicts              # Enable minimal-scope conflict resolution (correctness)
+  --refine-close-clusters DISTANCE # Enable quality improvement with expansion threshold
+  --proximity-graph {brute-force,blast-knn}  # Proximity graph implementation
+```
+
+### Usage Patterns
+
+**Pure Correctness (Fast MECE Fix):**
+```bash
+# Resolve conflicts with minimal computational overhead
+gaphack-decompose input.fasta --targets targets.fasta --resolve-conflicts -o results
+```
+
+**Quality Improvement (User-Controlled):**
+```bash
+# Refine clustering with 2% distance expansion threshold
+gaphack-decompose input.fasta --targets targets.fasta --refine-close-clusters 0.02 -o results
+
+# Conservative quality improvement (1% expansion)
+gaphack-decompose input.fasta --targets targets.fasta --refine-close-clusters 0.01 -o results
+
+# Aggressive quality optimization (5% expansion)
+gaphack-decompose input.fasta --targets targets.fasta --refine-close-clusters 0.05 -o results
+```
+
+**Combined Correctness + Quality:**
+```bash
+# First resolve conflicts (fast), then optimize quality (controlled)
+gaphack-decompose input.fasta --targets targets.fasta \
+  --resolve-conflicts --refine-close-clusters 0.025 -o results
+```
+
+**Performance vs. Quality Trade-offs:**
+```bash
+# Maximum speed: conflicts only, no quality optimization
+gaphack-decompose input.fasta --resolve-conflicts -o results
+
+# Balanced: conflicts + moderate quality improvement
+gaphack-decompose input.fasta --resolve-conflicts --refine-close-clusters 0.02 -o results
+
+# Maximum quality: conflicts + aggressive refinement
+gaphack-decompose input.fasta --resolve-conflicts --refine-close-clusters 0.05 -o results
+```
+
+### Design Benefits
+
+This CLI design achieves:
+- **Clear separation**: Correctness vs. quality improvement are distinct operations
+- **User control**: Explicit distance threshold for expansion (no hidden parameters)
+- **Predictable performance**: Users can optimize for speed or quality as needed
+- **Flexible workflow**: Can be used independently or combined
+- **Easy debugging**: Each operation has a single, clear responsibility
+
+## Summary
+
 This design provides a principled, scalable approach to achieving MECE clustering from gaphack-decompose while maintaining the computational advantages of the iterative approach. The scope-limited reclustering framework addresses each of the identified use cases while providing necessary performance safeguards and quality guarantees.
+
+The clean separation between conflict resolution (correctness) and close cluster refinement (quality) gives users explicit control over the speed vs. quality trade-offs, making the system both more predictable and more flexible for different use cases.
