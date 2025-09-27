@@ -305,6 +305,10 @@ Examples:
                        help='Enable principled reclustering for conflict resolution using classic gapHACk')
     parser.add_argument('--refine-close-clusters', action='store_true',
                        help='Enable principled reclustering for close cluster refinement using classic gapHACk')
+    parser.add_argument('--proximity-graph', choices=['brute-force', 'blast-knn'], default='brute-force',
+                       help='Proximity graph implementation for reclustering (default: brute-force)')
+    parser.add_argument('--knn-neighbors', type=int, default=20,
+                       help='Number of K-nearest neighbors for BLAST K-NN graph (default: 20)')
 
     # Control arguments
     parser.add_argument('-v', '--verbose', action='store_true',
@@ -353,6 +357,8 @@ Examples:
         containment_threshold=args.containment_threshold,
         resolve_conflicts=args.resolve_conflicts,
         refine_close_clusters=args.refine_close_clusters,
+        proximity_graph=args.proximity_graph,
+        knn_neighbors=args.knn_neighbors,
         show_progress=not args.no_progress,
         logger=logger
     )

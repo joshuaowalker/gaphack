@@ -259,6 +259,8 @@ class DecomposeClustering:
                  containment_threshold: float = 0.8,
                  resolve_conflicts: bool = False,
                  refine_close_clusters: bool = False,
+                 proximity_graph: str = 'brute-force',
+                 knn_neighbors: int = 20,
                  show_progress: bool = True,
                  logger: Optional[logging.Logger] = None):
         """Initialize decomposition clustering.
@@ -276,6 +278,8 @@ class DecomposeClustering:
             containment_threshold: Containment coefficient threshold for merging (default: 0.8)
             resolve_conflicts: Enable principled reclustering for conflict resolution (default: False)
             refine_close_clusters: Enable principled reclustering for close cluster refinement (default: False)
+            proximity_graph: Proximity graph implementation ('brute-force' or 'blast-knn', default: 'brute-force')
+            knn_neighbors: Number of K-nearest neighbors for BLAST K-NN graph (default: 20)
             show_progress: Show progress bars
             logger: Logger instance
         """
@@ -291,6 +295,8 @@ class DecomposeClustering:
         self.containment_threshold = containment_threshold
         self.resolve_conflicts = resolve_conflicts
         self.refine_close_clusters = refine_close_clusters
+        self.proximity_graph = proximity_graph
+        self.knn_neighbors = knn_neighbors
         self.show_progress = show_progress
         self.logger = logger or logging.getLogger(__name__)
 
@@ -1409,15 +1415,13 @@ class DecomposeClustering:
             Updated DecomposeResults with conflicts resolved
         """
         from .principled_reclustering import resolve_conflicts_via_reclustering, ReclusteringConfig
-        from .cluster_proximity import BruteForceProximityGraph
+        from .cluster_proximity import BruteForceProximityGraph, BlastKNNProximityGraph
 
         # Get global distance provider for the full dataset
         distance_provider = self._get_or_create_distance_provider(sequences)
 
         # Create proximity graph for cluster proximity queries
-        proximity_graph = BruteForceProximityGraph(
-            results.all_clusters, sequences, headers, distance_provider
-        )
+        proximity_graph = self._create_proximity_graph(results.all_clusters, sequences, headers, distance_provider)
 
         # Create reclustering configuration with appropriate thresholds
         config = ReclusteringConfig(
@@ -1479,15 +1483,13 @@ class DecomposeClustering:
             Updated DecomposeResults with close clusters refined
         """
         from .principled_reclustering import refine_close_clusters, ReclusteringConfig
-        from .cluster_proximity import BruteForceProximityGraph
+        from .cluster_proximity import BruteForceProximityGraph, BlastKNNProximityGraph
 
         # Get global distance provider for the full dataset
         distance_provider = self._get_or_create_distance_provider(sequences)
 
         # Create proximity graph for cluster proximity queries
-        proximity_graph = BruteForceProximityGraph(
-            results.all_clusters, sequences, headers, distance_provider
-        )
+        proximity_graph = self._create_proximity_graph(results.all_clusters, sequences, headers, distance_provider)
 
         # Create reclustering configuration with appropriate thresholds
         config = ReclusteringConfig(
@@ -1531,6 +1533,41 @@ class DecomposeClustering:
                         f"{len(results.all_clusters)} -> {len(new_results.all_clusters)} clusters")
 
         return new_results
+
+    def _create_proximity_graph(self, clusters: Dict[str, List[str]], sequences: List[str],
+                               headers: List[str], distance_provider) -> 'ClusterProximityGraph':
+        """Create proximity graph based on configuration.
+
+        Args:
+            clusters: Dictionary mapping cluster_id -> list of sequence headers
+            sequences: Full sequence list
+            headers: Full header list
+            distance_provider: Provider for distance calculations
+
+        Returns:
+            ClusterProximityGraph instance
+        """
+        from .cluster_proximity import BruteForceProximityGraph, BlastKNNProximityGraph
+
+        if self.proximity_graph == 'blast-knn':
+            self.logger.info(f"Creating BLAST K-NN proximity graph with K={self.knn_neighbors}")
+            return BlastKNNProximityGraph(
+                clusters=clusters,
+                sequences=sequences,
+                headers=headers,
+                distance_provider=distance_provider,
+                k_neighbors=self.knn_neighbors,
+                blast_evalue=self.blast_evalue,  # Use user-specified e-value
+                blast_identity=self.min_identity or 90.0  # Use user-specified identity or default
+            )
+        else:
+            self.logger.info("Creating brute force proximity graph")
+            return BruteForceProximityGraph(
+                clusters=clusters,
+                sequences=sequences,
+                headers=headers,
+                distance_provider=distance_provider
+            )
 
     def _renumber_clusters_sequentially(self, clusters: Dict[str, List[str]]) -> Dict[str, List[str]]:
         """Renumber clusters with sequential cluster_XXX naming for consistency.
