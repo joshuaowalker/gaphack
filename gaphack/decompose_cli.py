@@ -294,12 +294,6 @@ Examples:
     parser.add_argument('--target-percentile', type=int, default=95,
                        help='Percentile for gap optimization (default: 95)')
     
-    # Cluster merging arguments
-    parser.add_argument('--merge-overlaps', action='store_true',
-                       help='Enable post-processing to merge overlapping clusters')
-    parser.add_argument('--containment-threshold', type=float, default=0.8,
-                       help='Containment coefficient threshold for merging clusters (default: 0.8)')
-
     # Conflict resolution arguments
     parser.add_argument('--resolve-conflicts', action='store_true',
                        help='Enable principled reclustering for conflict resolution using classic gapHACk')
@@ -353,8 +347,6 @@ Examples:
         blast_evalue=args.blast_evalue,
         min_identity=args.min_identity,
         allow_overlaps=not args.no_overlaps,
-        merge_overlaps=args.merge_overlaps,
-        containment_threshold=args.containment_threshold,
         resolve_conflicts=args.resolve_conflicts,
         refine_close_clusters=args.refine_close_clusters,
         proximity_graph=args.proximity_graph,
