@@ -6,15 +6,19 @@ A Python package for DNA barcode clustering that optimizes for the barcode gap b
 
 gapHACk implements a two-phase clustering algorithm designed specifically for DNA barcoding applications:
 
-1. **Phase 1**: Fast greedy lumping below the min-split threshold (default 0.5% distance)  
+1. **Phase 1**: Fast greedy lumping below the min-split threshold (default 0.5% distance)
 2. **Phase 2**: Gap-aware optimization using gap-based heuristic to find optimal clustering
 
 The algorithm focuses on maximizing the "barcode gap" - the separation between intra-species and inter-species distances at a specified percentile (default P95) to handle outliers robustly.
 
-**gapHACk also includes `gaphack-analyze`**, a companion tool for analyzing pre-clustered FASTA files to assess distance distributions and barcode gap quality without performing new clustering.
+**gapHACk includes three main tools**:
+- **`gaphack`**: Core clustering tool for standard datasets
+- **`gaphack-analyze`**: Analysis tool for pre-clustered FASTA files to assess distance distributions and barcode gap quality
+- **`gaphack-decompose`**: Iterative BLAST-based clustering for large datasets (100K+ sequences) with post-processing refinement
 
 ## Features
 
+### Core Clustering (`gaphack`)
 - **Gap Optimization**: Uses gap-based heuristic to directly maximize the barcode gap
 - **Target Mode**: Single-cluster focused clustering from seed sequences with `--target` parameter
 - **Triangle Inequality Filtering**: Automatically detects and filters alignment failures in mixed-length sequences
@@ -23,7 +27,21 @@ The algorithm focuses on maximizing the "barcode gap" - the separation between i
 - **Progress Tracking**: Unified progress bar with real-time gap and cluster information
 - **Size-ordered Output**: Clusters numbered by size (largest first) for consistent results
 - **Library-friendly**: Configurable progress bars and logging for integration into other applications
-- **Analysis Tools**: `gaphack-analyze` for evaluating pre-clustered data and barcode gap quality
+
+### Large-Scale Clustering (`gaphack-decompose`)
+- **BLAST-based Neighborhoods**: Efficiently handles datasets with 100K+ sequences
+- **Iterative Target Clustering**: Processes data in manageable chunks using target mode
+- **Conflict Resolution**: Ensures mutually exclusive clustering (MECE) through full gapHACk refinement
+- **Close Cluster Refinement**: Optimizes cluster boundaries for closely related groups
+- **Flexible Stopping Criteria**: Control by cluster count, sequence coverage, or exhaustive processing
+- **Memory Efficient**: Uses hash-based deduplication and medoid caching
+
+### Analysis Tools (`gaphack-analyze`)
+- **Pre-clustered Analysis**: Evaluate existing clustering results
+- **Distance Distributions**: Calculate intra-cluster and inter-cluster distances
+- **Barcode Gap Metrics**: Assess gap quality at P90/P95 levels
+- **Visualization**: Generate histograms with percentile markers
+- **Multiple Output Formats**: Text reports, JSON data, or TSV tables
 
 ## Performance
 
@@ -87,19 +105,20 @@ pip install git+https://github.com/joshuaowalker/gaphack.git
 # Download example data
 wget https://raw.githubusercontent.com/joshuaowalker/gaphack/main/examples/data/collybia_nuda_test.fasta
 
-# Run on example data (creates .cluster_001.fasta, .cluster_002.fasta, etc.)
+# Standard clustering (creates .cluster_001.fasta, .cluster_002.fasta, etc.)
 gaphack collybia_nuda_test.fasta
 
-# With detailed output and custom base path
+# Large-scale decompose clustering (for bigger datasets)
+gaphack-decompose collybia_nuda_test.fasta -o decompose_results
+
+# Analyze pre-clustered results
+gaphack-analyze decompose_results.*.fasta -o analysis_results
+
+# With detailed output and custom parameters
 gaphack collybia_nuda_test.fasta \
     -o output/clusters \
     --export-metrics metrics.json \
     --verbose
-
-# Output TSV format instead of FASTA
-gaphack collybia_nuda_test.fasta \
-    --format tsv \
-    -o clusters.tsv
 ```
 
 The example dataset contains 91 *Collybia nuda* ITS sequences from iNaturalist with known clustering structure. See [examples/README.md](examples/README.md) for more details.
@@ -154,6 +173,41 @@ gaphack input.fasta --target seeds.fasta -o target_results
 ```
 
 Target mode focuses on growing one cluster from the provided seed sequences, making it suitable for cases where you want to extract sequences similar to specific targets without attempting to cluster all remaining sequences.
+
+### Large-Scale Decompose Clustering (gaphack-decompose)
+
+The `gaphack-decompose` tool handles datasets too large for standard clustering (100K+ sequences) using iterative BLAST-based neighborhoods:
+
+```bash
+# Basic decompose clustering
+gaphack-decompose large_dataset.fasta -o results
+
+# Directed mode with specific targets
+gaphack-decompose large_dataset.fasta --targets priority_sequences.fasta -o results
+
+# Stop after 50 clusters
+gaphack-decompose large_dataset.fasta --max-clusters 50 -o results
+
+# Enable conflict resolution and close cluster refinement
+gaphack-decompose large_dataset.fasta \
+    --resolve-conflicts \
+    --refine-close-clusters 0.02 \
+    -o results
+
+# Custom BLAST parameters for specific datasets
+gaphack-decompose large_dataset.fasta \
+    --blast-max-hits 1500 \
+    --min-identity 85.0 \
+    --no-overlaps \
+    -o results
+```
+
+**Key Features:**
+- **Automatic mode detection**: Uses targets if provided, otherwise selects targets iteratively
+- **BLAST neighborhoods**: Efficiently finds similar sequences for clustering
+- **Conflict resolution**: `--resolve-conflicts` ensures each sequence appears in only one cluster
+- **Close cluster refinement**: `--refine-close-clusters DISTANCE` optimizes boundaries between similar clusters
+- **No-overlap mode**: `--no-overlaps` prevents sequences from appearing in multiple clusters during processing
 
 ### Analysis Tool (gaphack-analyze)
 
@@ -378,7 +432,9 @@ These parameters control the adjusted identity algorithm when `--alignment-metho
 
 **Note**: Throughout this documentation, "species" refers to Operational Taxonomic Units (OTUs) - clusters of sequences that are presumed to represent biological species based on genetic similarity, but have not been formally taxonomically validated.
 
-### Distance Matrix Calculation
+### Core Algorithm (gaphack)
+
+#### Distance Matrix Calculation
 
 gapHACk begins by calculating a pairwise distance matrix from input sequences using the adjusted identity algorithm (default) or traditional BLAST identity:
 
@@ -387,11 +443,11 @@ gapHACk begins by calculating a pairwise distance matrix from input sequences us
 
 The distance matrix forms the foundation for all subsequent clustering decisions.
 
-### Barcode Gap
+#### Barcode Gap
 
 The barcode gap is the separation between the maximum intra-species distance and the minimum inter-species distance. A clear gap indicates good species delimitation, allowing confident assignment of sequences to species clusters.
 
-### Percentile Gaps
+#### Percentile Gaps
 
 Instead of using absolute max/min values (which are sensitive to outliers), gapHACk uses percentile-based gaps for robustness:
 - **P95 gap**: 95th percentile of intra-species distances vs 5th percentile of inter-species distances
@@ -401,7 +457,7 @@ This approach compares the "worst case" within species (upper percentile of intr
 
 The `target_percentile` parameter (default: 95) determines which percentile gap to optimize during clustering.
 
-### Two-Phase Clustering Strategy
+#### Two-Phase Clustering Strategy
 
 **Phase 1: Fast Greedy Merging**
 1. Start with each sequence as its own cluster
@@ -418,13 +474,47 @@ Between `min_threshold` and `max_threshold` (default: 0.02 or 2%):
 5. **Termination condition**: Stop when all remaining merges exceed `max_threshold`
 6. **Best tracking**: Track and return the clustering configuration that achieved the best gap
 
-### Parameter Roles
+#### Parameter Roles
 
 - **`min_split`**: Defines the boundary between Phase 1 (fast lumping) and Phase 2 (gap optimization). Sequences closer than this are assumed to represent intraspecific variation and are lumped together.
 
 - **`max_lump`**: Upper limit for cluster lumping. Distances beyond this are assumed to represent interspecific divergence and clusters are kept split.
 
 - **`target_percentile`**: Which percentile to use for gap optimization and linkage decisions (e.g., 95 = P95 gap). Higher percentiles are more robust to outliers but may be less sensitive to true gaps.
+
+### Decompose Algorithm (gaphack-decompose)
+
+For datasets too large for the O(n³) core algorithm, `gaphack-decompose` uses an iterative approach:
+
+#### BLAST-based Neighborhood Discovery
+1. **Target Selection**: Choose a target sequence (provided or selected from unassigned sequences)
+2. **BLAST Search**: Find similar sequences using BLAST (default: top 1000 hits)
+3. **Target Clustering**: Apply target mode clustering to the neighborhood
+4. **Iteration**: Repeat until stopping criteria met
+
+#### Post-Processing Refinement
+
+After initial clustering, two optional refinement stages ensure high-quality results:
+
+1. **Conflict Resolution** (`--resolve-conflicts`):
+   - Identifies sequences assigned to multiple clusters
+   - Applies full gapHACk to conflicted clusters
+   - Ensures mutually exclusive clustering (MECE property)
+   - Minimal computational overhead (only processes conflicts)
+
+2. **Close Cluster Refinement** (`--refine-close-clusters DISTANCE`):
+   - Identifies clusters closer than the specified distance threshold
+   - Expands scope to include nearby sequences based on distance
+   - Applies full gapHACk to optimize boundaries
+   - User controls quality vs. performance trade-off
+
+#### Cluster Graph Architecture
+
+The system uses a cluster graph to efficiently track relationships:
+- **Medoid-based representation**: Each cluster represented by its medoid
+- **BLAST K-NN graph**: Efficient nearest-neighbor queries for large datasets
+- **Dynamic updates**: Graph maintained as clusters merge or split
+- **Scalable to 100K+ sequences**: Optimized for large-scale datasets
 
 ## Related Work
 
@@ -487,19 +577,28 @@ Randriamihamison et al. (2021) provided important theoretical support for using 
 
 ```
 gaphack/
-├── gaphack/              # Main package code
+├── gaphack/                   # Main package code
 │   ├── __init__.py
-│   ├── core.py          # Core clustering algorithm
-│   ├── utils.py         # Utility functions and alignment
-│   ├── cli.py           # Command-line interface
-│   ├── analyze.py       # Analysis functions for pre-clustered data
-│   └── analyze_cli.py   # Analysis tool command-line interface
-├── tests/               # Unit tests
-├── examples/            # Example datasets and documentation
-│   ├── data/           # Sample FASTA files
-│   └── README.md       # Examples documentation
-├── pyproject.toml       # Package configuration
-└── README.md           # This file
+│   ├── core.py               # Core clustering algorithm
+│   ├── target_clustering.py  # Target mode clustering
+│   ├── decompose.py          # Decompose clustering orchestrator
+│   ├── decompose_cli.py      # Decompose command-line interface
+│   ├── blast_neighborhood.py # BLAST neighborhood finder
+│   ├── cluster_refinement.py # Conflict resolution and refinement
+│   ├── cluster_graph.py      # Cluster proximity graph
+│   ├── triangle_filtering.py # Triangle inequality filtering
+│   ├── lazy_distances.py     # Efficient distance calculations
+│   ├── scoped_distances.py   # Scoped distance providers
+│   ├── utils.py              # Utility functions and alignment
+│   ├── cli.py                # Main gaphack CLI
+│   ├── analyze.py            # Analysis functions
+│   └── analyze_cli.py        # Analysis tool CLI
+├── tests/                     # Unit tests
+├── examples/                  # Example datasets and documentation
+│   ├── data/                 # Sample FASTA files
+│   └── README.md             # Examples documentation
+├── pyproject.toml            # Package configuration
+└── README.md                 # This file
 ```
 
 ## Development
