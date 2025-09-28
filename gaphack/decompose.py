@@ -140,16 +140,16 @@ class TargetSelector:
         return False
     
     def add_blast_neighborhood(self, target_header: str, neighborhood_headers: List[str]) -> None:
-        """No-op for supervised mode - doesn't use BLAST memory."""
+        """No-op for directed mode - doesn't use BLAST memory."""
         pass
     
     def mark_sequences_processed(self, processed_headers: List[str], allow_overlaps: bool = True) -> None:
-        """No-op for supervised mode - doesn't need memory management."""
+        """No-op for directed mode - doesn't need memory management."""
         pass
 
 
 class BlastResultMemory:
-    """Memory pool for storing BLAST neighborhoods for spiral target selection."""
+    """Memory pool for storing BLAST neighborhoods for nearby target selection."""
     
     def __init__(self):
         self.unprocessed_neighborhoods: Dict[str, Set[str]] = {}  # target_header -> neighborhood_headers
@@ -164,8 +164,8 @@ class BlastResultMemory:
         logger.debug(f"Added neighborhood for {target_header}: {len(neighborhood_headers)} sequences, "
                     f"total pool: {len(self.candidate_pool)}")
     
-    def get_spiral_candidates(self, assignment_tracker: AssignmentTracker) -> List[str]:
-        """Get unassigned sequences from BLAST neighborhoods for spiral selection."""
+    def get_nearby_candidates(self, assignment_tracker: AssignmentTracker) -> List[str]:
+        """Get unassigned sequences from BLAST neighborhoods for nearby selection."""
         candidates = []
         for seq_header in self.candidate_pool:
             if not assignment_tracker.is_assigned(seq_header):
@@ -223,7 +223,7 @@ class NearbyTargetSelector:
         self.iteration_count += 1
         
         # Try nearby selection first: pick from previous BLAST neighborhoods
-        nearby_candidates = self.blast_memory.get_spiral_candidates(assignment_tracker)
+        nearby_candidates = self.blast_memory.get_nearby_candidates(assignment_tracker)
         nearby_candidates = [h for h in nearby_candidates if h not in self.used_targets]
         
         target_header = None
@@ -307,8 +307,8 @@ class DecomposeClustering:
             blast_evalue: BLAST e-value threshold
             min_identity: BLAST identity threshold (auto if None)
             allow_overlaps: Allow sequences to appear in multiple clusters (default: True)
-            resolve_conflicts: Enable principled reclustering for conflict resolution with minimal scope (default: False)
-            refine_close_clusters: Enable principled reclustering for close cluster refinement (default: False)
+            resolve_conflicts: Enable cluster refinement for conflict resolution with minimal scope (default: False)
+            refine_close_clusters: Enable cluster refinement for close cluster refinement (default: False)
             close_cluster_threshold: Distance threshold for close cluster refinement and scope expansion (default: 0.0)
             proximity_graph: Proximity graph implementation ('brute-force' or 'blast-knn', default: 'brute-force')
             knn_neighbors: Number of K-nearest neighbors for BLAST K-NN graph (default: 20)
@@ -407,7 +407,7 @@ class DecomposeClustering:
             # Target selector now works with hash_ids directly
             target_selector = TargetSelector(matched_hash_ids)
         elif mode == "undirected":
-            # Create spiral target selector with all sequence headers
+            # Create nearby target selector with all sequence headers
             target_selector = NearbyTargetSelector(
                 all_headers=headers,
                 max_clusters=max_clusters,
@@ -638,7 +638,7 @@ class DecomposeClustering:
                                 f"clustered {len(target_cluster_headers)} sequences, "
                                 f"gap size: {gap_size:.4f}")
                 
-                # Check stopping criteria for unsupervised modes
+                # Check stopping criteria for undirected mode
                 if max_clusters and iteration >= max_clusters:
                     self.logger.info(f"Reached maximum clusters ({max_clusters}) - stopping")
                     break
@@ -704,9 +704,9 @@ class DecomposeClustering:
         # Store original conflicts for tracking resolution progress
         original_conflicts = results.conflicts.copy() if results.conflicts else {}
 
-        # Apply principled reclustering for conflict resolution if enabled
+        # Apply cluster refinement for conflict resolution if enabled
         if getattr(self, 'resolve_conflicts', False) and results.conflicts:
-            self.logger.info(f"Starting principled reclustering for {len(results.conflicts)} conflicts")
+            self.logger.info(f"Starting cluster refinement for {len(results.conflicts)} conflicts")
             results = self._resolve_conflicts(results, sequences, headers)
 
             # Verify conflict resolution effectiveness
@@ -715,9 +715,9 @@ class DecomposeClustering:
                     results.all_clusters, original_conflicts, "after_conflict_resolution"
                 )
 
-        # Apply principled reclustering for close cluster refinement if enabled
+        # Apply cluster refinement for close cluster refinement if enabled
         if getattr(self, 'refine_close_clusters', False):
-            self.logger.info("Starting principled reclustering for close cluster refinement")
+            self.logger.info("Starting cluster refinement for close cluster refinement")
             results = self._refine_close_clusters_via_reclustering(results, sequences, headers)
 
         # Expand hash IDs back to original headers
@@ -1007,7 +1007,7 @@ class DecomposeClustering:
 
     def _resolve_conflicts(self, results: DecomposeResults,
                                           sequences: List[str], headers: List[str]) -> DecomposeResults:
-        """Resolve conflicts using principled reclustering with full gapHACk.
+        """Resolve conflicts using cluster refinement with full gapHACk.
 
         Args:
             results: Current decomposition results with conflicts
@@ -1082,7 +1082,7 @@ class DecomposeClustering:
 
     def _refine_close_clusters_via_reclustering(self, results: DecomposeResults,
                                               sequences: List[str], headers: List[str]) -> DecomposeResults:
-        """Refine close clusters using principled reclustering with full gapHACk.
+        """Refine close clusters using cluster refinement with full gapHACk.
 
         Args:
             results: Current decomposition results
