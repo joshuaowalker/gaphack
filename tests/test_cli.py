@@ -114,7 +114,6 @@ class TestMainCLI:
                 with pytest.raises(SystemExit):
                     cli_main()
 
-    @pytest.mark.skip(reason="API changes - target mode CLI test needs update")
     def test_cli_target_mode(self):
         """Test CLI target mode functionality."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -122,17 +121,22 @@ class TestMainCLI:
 
             input_fasta = tmpdir / "input.fasta"
             target_fasta = tmpdir / "targets.fasta"
+            output_file = tmpdir / "output.tsv"
 
             self._create_test_fasta(self.test_sequences, input_fasta)
             self._create_test_fasta(self.test_sequences[:2], target_fasta)
 
-            test_args = ['gaphack', str(input_fasta), '--target', str(target_fasta)]
+            test_args = ['gaphack', str(input_fasta), '--target', str(target_fasta), '-o', str(output_file)]
 
             with patch('sys.argv', test_args), \
                  patch('gaphack.cli.TargetModeClustering') as mock_target_clustering, \
                  patch('gaphack.cli.load_sequences_from_fasta') as mock_load, \
-                 patch('gaphack.cli.calculate_distance_matrix') as mock_calc_dist, \
-                 patch('gaphack.cli.save_clusters_to_file') as mock_save:
+                 patch('gaphack.cli.DistanceProviderFactory') as mock_factory, \
+                 patch('gaphack.cli.save_clusters_to_file') as mock_save, \
+                 patch('gaphack.cli.validate_sequences') as mock_validate:
+
+                # Mock sequence validation to return valid
+                mock_validate.return_value = (True, [])
 
                 # Mock load_sequences_from_fasta to return 3 values (sequences, headers, header_mapping)
                 mock_load.return_value = (
@@ -140,16 +144,30 @@ class TestMainCLI:
                     [f"seq_{i}" for i in range(len(self.test_sequences))],
                     {f"seq_{i}": f"seq_{i}" for i in range(len(self.test_sequences))}
                 )
-                mock_calc_dist.return_value = [[0.0, 0.1], [0.1, 0.0]]
 
+                # Mock distance provider
+                mock_provider = Mock()
+                mock_provider.get_cache_stats.return_value = {
+                    'cached_distances': 10,
+                    'theoretical_max': 100
+                }
+                mock_factory.create_lazy_provider.return_value = mock_provider
+
+                # Mock target clustering with correct signature
                 mock_target_instance = Mock()
-                mock_target_instance.cluster.return_value = ([0, 1], [2, 3], {})
+                # cluster(distance_provider, target_indices, sequences) -> (target_cluster, remaining_sequences, metrics)
+                mock_target_instance.cluster.return_value = ([0, 1], [2, 3], {'gap_size': 0.05})
                 mock_target_clustering.return_value = mock_target_instance
 
                 try:
                     cli_main()
                 except SystemExit as e:
                     assert e.code == 0 or e.code is None
+
+                # Verify target clustering was called correctly
+                mock_target_instance.cluster.assert_called_once()
+                args, kwargs = mock_target_instance.cluster.call_args
+                assert len(args) == 3  # distance_provider, target_indices, sequences
 
     def test_cli_metrics_export(self):
         """Test CLI metrics export functionality."""
@@ -309,28 +327,40 @@ class TestAnalyzeCLI:
             analyze_main()
         assert exc_info.value.code == 0
 
-    @pytest.mark.skip(reason="CLI integration issues - needs deeper mock setup")
     def test_analyze_cli_basic_functionality(self):
         """Test basic analyze CLI functionality."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir = Path(tmpdir)
 
-            # Create test cluster file
-            cluster_file = tmpdir / "clusters.tsv"
-            with open(cluster_file, 'w') as f:
-                f.write("cluster_id\tsequence_id\n")
-                f.write("cluster_1\tseq_0\n")
-                f.write("cluster_1\tseq_1\n")
-                f.write("cluster_2\tseq_2\n")
+            # Create test FASTA files (analyze CLI expects FASTA files, not TSV)
+            cluster_file1 = tmpdir / "cluster1.fasta"
+            cluster_file2 = tmpdir / "cluster2.fasta"
+
+            with open(cluster_file1, 'w') as f:
+                f.write(">seq_0\nATGCGATCGATCGATC\n>seq_1\nATGCGATCGATCGATG\n")
+
+            with open(cluster_file2, 'w') as f:
+                f.write(">seq_2\nTTTTTTTTTTTTTTTT\n")
 
             output_dir = tmpdir / "analysis"
 
-            test_args = ['gaphack-analyze', str(cluster_file), '-o', str(output_dir)]
+            test_args = ['gaphack-analyze', str(cluster_file1), str(cluster_file2), '-o', str(output_dir)]
 
             with patch('sys.argv', test_args), \
                  patch('gaphack.analyze_cli.analyze_single_cluster') as mock_analyze:
 
-                mock_analyze.return_value = None  # Mock analysis function
+                # Mock analysis function to return expected structure
+                mock_analyze.return_value = {
+                    'filename': 'test_cluster.fasta',
+                    'n_sequences': 3,
+                    'n_distances': 3,
+                    'distances': [0.1, 0.2, 0.3],
+                    'percentiles': {
+                        'P5': 0.1, 'P25': 0.15, 'P50': 0.2, 'P75': 0.25, 'P95': 0.3
+                    },
+                    'sequences': ['ATGC', 'GCTA', 'CGAT'],
+                    'headers': ['seq_0', 'seq_1', 'seq_2']
+                }
 
                 try:
                     analyze_main()

@@ -174,7 +174,7 @@ Examples:
             
             # Load target sequences
             logging.info(f"Loading target sequences from {args.target}")
-            target_sequences, target_headers = load_sequences_from_fasta(str(target_path))
+            target_sequences, target_headers, _ = load_sequences_from_fasta(str(target_path))
             logging.info(f"Loaded {len(target_sequences)} target sequences")
             
             # Validate target sequences
