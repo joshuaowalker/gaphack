@@ -282,8 +282,7 @@ def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
                                      min_split: float = 0.005,
                                      max_lump: float = 0.02,
                                      target_percentile: int = 95,
-                                     cluster_id_generator=None,
-                                     enable_tracking: bool = False):
+                                     cluster_id_generator=None) -> Tuple[Dict[str, List[str]], 'ProcessingStageInfo']:
     """Resolve assignment conflicts using classic gapHACk reclustering with minimal scope.
 
     Uses only conflicted clusters (no expansion) for fastest, most predictable MECE fixes.
@@ -301,37 +300,32 @@ def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
         target_percentile: Percentile for gap optimization
 
     Returns:
-        If enable_tracking=False: Updated cluster dictionary with conflicts resolved
-        If enable_tracking=True: Tuple of (updated_clusters, tracking_info)
+        Tuple of (updated_clusters, tracking_info): Updated cluster dictionary with conflicts resolved and tracking information
     """
     if config is None:
         config = ReclusteringConfig()
 
-    # Initialize tracking if enabled
-    tracking_info = None
-    if enable_tracking:
-        from .decompose import ProcessingStageInfo
-        tracking_info = ProcessingStageInfo(
-            stage_name="Conflict Resolution",
-            clusters_before=all_clusters.copy(),
-            summary_stats={
-                'conflicts_count': len(conflicts),
-                'conflicted_sequences': list(conflicts.keys()),
-                'clusters_before_count': len(all_clusters)
-            }
-        )
+    # Initialize tracking
+    from .decompose import ProcessingStageInfo
+    tracking_info = ProcessingStageInfo(
+        stage_name="Conflict Resolution",
+        clusters_before=all_clusters.copy(),
+        summary_stats={
+            'conflicts_count': len(conflicts),
+            'conflicted_sequences': list(conflicts.keys()),
+            'clusters_before_count': len(all_clusters)
+        }
+    )
 
     if not conflicts:
         logger.info("No conflicts to resolve")
         result = all_clusters.copy()
-        if enable_tracking:
-            tracking_info.clusters_after = result
-            tracking_info.summary_stats.update({
-                'clusters_after_count': len(result),
-                'components_processed_count': 0
-            })
-            return result, tracking_info
-        return result
+        tracking_info.clusters_after = result
+        tracking_info.summary_stats.update({
+            'clusters_after_count': len(result),
+            'components_processed_count': 0
+        })
+        return result, tracking_info
 
     logger.info(f"Resolving conflicts for {len(conflicts)} sequences across clusters")
 
@@ -404,8 +398,7 @@ def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
             })
 
         # Add component info to tracking
-        if enable_tracking:
-            tracking_info.components_processed.append(component_info)
+        tracking_info.components_processed.append(component_info)
 
     # Verify conflicts are resolved
     remaining_conflicts = 0
@@ -420,16 +413,13 @@ def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
         logger.info("All conflicts successfully resolved")
 
     # Finalize tracking information
-    if enable_tracking:
-        tracking_info.clusters_after = updated_clusters
-        tracking_info.summary_stats.update({
-            'clusters_after_count': len(updated_clusters),
-            'components_processed_count': len(conflict_components),
-            'remaining_conflicts_count': remaining_conflicts
-        })
-        return updated_clusters, tracking_info
-
-    return updated_clusters
+    tracking_info.clusters_after = updated_clusters
+    tracking_info.summary_stats.update({
+        'clusters_after_count': len(updated_clusters),
+        'components_processed_count': len(conflict_components),
+        'remaining_conflicts_count': remaining_conflicts
+    })
+    return updated_clusters, tracking_info
 
 
 def find_connected_close_components(close_pairs: List[Tuple[str, str, float]]) -> List[List[str]]:
@@ -790,8 +780,7 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
                          max_lump: float = 0.02,
                          target_percentile: int = 95,
                          close_threshold: Optional[float] = None,
-                         cluster_id_generator=None,
-                         enable_tracking: bool = False):
+                         cluster_id_generator=None) -> Tuple[Dict[str, List[str]], 'ProcessingStageInfo']:
     """Refine clusters that are closer than expected barcode gaps.
 
     Args:
@@ -807,8 +796,7 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
         close_threshold: Distance threshold for "close" clusters (default: max_lump)
 
     Returns:
-        If enable_tracking=False: Updated cluster dictionary with close clusters refined
-        If enable_tracking=True: Tuple of (updated_clusters, tracking_info)
+        Tuple of (updated_clusters, tracking_info): Updated cluster dictionary with close clusters refined and tracking information
     """
     if config is None:
         config = ReclusteringConfig()
@@ -816,31 +804,27 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
     if close_threshold is None:
         close_threshold = max_lump
 
-    # Initialize tracking if enabled
-    tracking_info = None
-    if enable_tracking:
-        from .decompose import ProcessingStageInfo
-        tracking_info = ProcessingStageInfo(
-            stage_name="Close Cluster Refinement",
-            clusters_before=all_clusters.copy(),
-            summary_stats={
-                'close_threshold': close_threshold,
-                'clusters_before_count': len(all_clusters)
-            }
-        )
+    # Initialize tracking
+    from .decompose import ProcessingStageInfo
+    tracking_info = ProcessingStageInfo(
+        stage_name="Close Cluster Refinement",
+        clusters_before=all_clusters.copy(),
+        summary_stats={
+            'close_threshold': close_threshold,
+            'clusters_before_count': len(all_clusters)
+        }
+    )
 
     if len(all_clusters) < 2:
         logger.info("Insufficient clusters for close cluster refinement")
         result = all_clusters.copy()
-        if enable_tracking:
-            tracking_info.clusters_after = result
-            tracking_info.summary_stats.update({
-                'clusters_after_count': len(result),
-                'components_processed_count': 0,
-                'close_pairs_found': 0
-            })
-            return result, tracking_info
-        return result
+        tracking_info.clusters_after = result
+        tracking_info.summary_stats.update({
+            'clusters_after_count': len(result),
+            'components_processed_count': 0,
+            'close_pairs_found': 0
+        })
+        return result, tracking_info
 
     logger.info(f"Refining close clusters with threshold {close_threshold:.4f}")
 
@@ -850,22 +834,19 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
     if not close_pairs:
         logger.info("No close cluster pairs found")
         result = all_clusters.copy()
-        if enable_tracking:
-            tracking_info.clusters_after = result
-            tracking_info.summary_stats.update({
-                'clusters_after_count': len(result),
-                'components_processed_count': 0,
-                'close_pairs_found': 0
-            })
-            return result, tracking_info
-        return result
+        tracking_info.clusters_after = result
+        tracking_info.summary_stats.update({
+            'clusters_after_count': len(result),
+            'components_processed_count': 0,
+            'close_pairs_found': 0
+        })
+        return result, tracking_info
 
     logger.debug(f"Found {len(close_pairs)} close cluster pairs")
 
     # Update tracking with close pairs info
-    if enable_tracking:
-        tracking_info.summary_stats['close_pairs_found'] = len(close_pairs)
-        tracking_info.summary_stats['close_pairs_list'] = [(p[0], p[1], p[2]) for p in close_pairs]
+    tracking_info.summary_stats['close_pairs_found'] = len(close_pairs)
+    tracking_info.summary_stats['close_pairs_list'] = [(p[0], p[1], p[2]) for p in close_pairs]
 
     # Step 2: Group close pairs into connected components
     close_components = find_connected_close_components(close_pairs)
@@ -919,8 +900,7 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
                 'clusters_after': existing_component_clusters,  # They remain unchanged
                 'clusters_after_count': len(existing_component_clusters)
             })
-            if enable_tracking:
-                tracking_info.components_processed.append(component_info)
+            tracking_info.components_processed.append(component_info)
             processed_components.add(component_signature)
             continue
 
@@ -1005,7 +985,6 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
             logger.warning(f"Iterative context expansion failed for component with {len(component_clusters)} clusters")
 
         # Add component info to tracking
-        if enable_tracking:
             tracking_info.components_processed.append(component_info)
 
         # Mark as processed regardless of outcome
@@ -1018,19 +997,16 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
                f"({final_count - original_count:+d})")
 
     # Finalize tracking information
-    if enable_tracking:
-        tracking_info.clusters_after = updated_clusters
-        tracking_info.summary_stats.update({
-            'clusters_after_count': final_count,
-            'components_processed_count': len(close_components),
-            'cluster_count_change': final_count - original_count,
-            'total_clusters_deleted': len(clusters_deleted_during_processing),
-            'total_clusters_created': len(clusters_created_during_processing),
-            'net_cluster_change_from_tracking': len(clusters_created_during_processing) - len(clusters_deleted_during_processing)
-        })
-        return updated_clusters, tracking_info
-
-    return updated_clusters
+    tracking_info.clusters_after = updated_clusters
+    tracking_info.summary_stats.update({
+        'clusters_after_count': final_count,
+        'components_processed_count': len(close_components),
+        'cluster_count_change': final_count - original_count,
+        'total_clusters_deleted': len(clusters_deleted_during_processing),
+        'total_clusters_created': len(clusters_created_during_processing),
+        'net_cluster_change_from_tracking': len(clusters_created_during_processing) - len(clusters_deleted_during_processing)
+    })
+    return updated_clusters, tracking_info
 
 
 def clusters_significantly_different(original_clusters: Dict[str, List[str]],

@@ -191,9 +191,9 @@ def save_decompose_results(results: DecomposeResults, output_base: str,
         f.write("=" * 40 + "\n\n")
 
         # Header with run metadata
-        if hasattr(results, 'start_time') and results.start_time:
+        if results.start_time:
             f.write(f"Run timestamp: {results.start_time}\n")
-        if hasattr(results, 'command_line') and results.command_line:
+        if results.command_line:
             f.write(f"Command line: {results.command_line}\n")
         f.write("\n")
 
@@ -208,7 +208,7 @@ def save_decompose_results(results: DecomposeResults, output_base: str,
         f.write(f"Conflicts detected: {len(results.conflicts)}\n\n")
 
         # Verification results
-        if hasattr(results, 'verification_results') and results.verification_results:
+        if results.verification_results:
             f.write("Verification Summary:\n")
             f.write("-" * 20 + "\n")
             for stage, verification in results.verification_results.items():
@@ -231,7 +231,7 @@ def save_decompose_results(results: DecomposeResults, output_base: str,
             f.write("\n")
 
         # Processing stages (conflict resolution and close cluster refinement)
-        if hasattr(results, 'processing_stages') and results.processing_stages:
+        if results.processing_stages:
             for stage_info in results.processing_stages:
                 f.write(f"{stage_info.stage_name}:\n")
                 f.write("-" * (len(stage_info.stage_name) + 1) + "\n")
@@ -276,7 +276,7 @@ def save_decompose_results(results: DecomposeResults, output_base: str,
                 f.write("\n")
 
         # Active to final cluster mapping
-        if hasattr(results, 'active_to_final_mapping') and results.active_to_final_mapping:
+        if results.active_to_final_mapping:
             f.write("Active to Final Cluster Mapping:\n")
             f.write("-" * 35 + "\n")
             # Group by final cluster for better readability

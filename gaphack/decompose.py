@@ -949,16 +949,11 @@ class DecomposeClustering:
         expanded_results.iteration_summaries = results.iteration_summaries
 
         # Copy enhanced tracking fields
-        if hasattr(results, 'processing_stages'):
-            expanded_results.processing_stages = results.processing_stages
-        if hasattr(results, 'active_to_final_mapping'):
-            expanded_results.active_to_final_mapping = results.active_to_final_mapping
-        if hasattr(results, 'command_line'):
-            expanded_results.command_line = results.command_line
-        if hasattr(results, 'start_time'):
-            expanded_results.start_time = results.start_time
-        if hasattr(results, 'verification_results'):
-            expanded_results.verification_results = results.verification_results
+        expanded_results.processing_stages = results.processing_stages
+        expanded_results.active_to_final_mapping = results.active_to_final_mapping
+        expanded_results.command_line = results.command_line
+        expanded_results.start_time = results.start_time
+        expanded_results.verification_results = results.verification_results
 
         # Expand clusters
         for cluster_id, hash_ids in results.clusters.items():
@@ -1052,8 +1047,7 @@ class DecomposeClustering:
             min_split=self.min_split,
             max_lump=self.max_lump,
             target_percentile=self.target_percentile,
-            cluster_id_generator=conflict_id_generator,
-            enable_tracking=True
+            cluster_id_generator=conflict_id_generator
         )
 
         # Rebuild results with resolved clusters
@@ -1074,17 +1068,12 @@ class DecomposeClustering:
         new_results.active_to_final_mapping = {}
 
         # Add conflict resolution tracking info
-        if hasattr(results, 'processing_stages'):
-            new_results.processing_stages = results.processing_stages.copy()
-        else:
-            new_results.processing_stages = []
+        new_results.processing_stages = results.processing_stages.copy()
         new_results.processing_stages.append(conflict_tracking)
 
         # Preserve command line and start time
-        if hasattr(results, 'command_line'):
-            new_results.command_line = results.command_line
-        if hasattr(results, 'start_time'):
-            new_results.start_time = results.start_time
+        new_results.command_line = results.command_line
+        new_results.start_time = results.start_time
 
         # Clear conflicts since they've been resolved
         new_results.conflicts = {}
@@ -1139,8 +1128,7 @@ class DecomposeClustering:
             max_lump=self.max_lump,
             target_percentile=self.target_percentile,
             close_threshold=self.max_lump,  # Use max_lump as close threshold
-            cluster_id_generator=refinement_id_generator,
-            enable_tracking=True
+            cluster_id_generator=refinement_id_generator
         )
 
         # Rebuild results with refined clusters
@@ -1161,17 +1149,12 @@ class DecomposeClustering:
         new_results.active_to_final_mapping = mapping
 
         # Add close cluster refinement tracking info
-        if hasattr(results, 'processing_stages'):
-            new_results.processing_stages = results.processing_stages.copy()
-        else:
-            new_results.processing_stages = []
+        new_results.processing_stages = results.processing_stages.copy()
         new_results.processing_stages.append(refinement_tracking)
 
         # Preserve command line and start time
-        if hasattr(results, 'command_line'):
-            new_results.command_line = results.command_line
-        if hasattr(results, 'start_time'):
-            new_results.start_time = results.start_time
+        new_results.command_line = results.command_line
+        new_results.start_time = results.start_time
 
         new_results.conflicts = {}  # Close cluster refinement doesn't create conflicts
         new_results.unassigned = results.unassigned
