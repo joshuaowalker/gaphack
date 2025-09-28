@@ -48,12 +48,7 @@ The barcode gap calculation fundamentally requires both intra-cluster and inter-
 
 ### Technical Debt and Known Issues
 
-#### Significant Difference Check (TO BE REMOVED)
-The `clusters_significantly_different()` check in cluster refinement (20% threshold) was added to prevent unnecessary cluster replacements but creates more problems than it solves:
-- Can prevent legitimate improvements when changes are < 20%
-- Arbitrary threshold without scientific basis
-- Should be removed in favor of always accepting full gapHACk results
-- Located in: `cluster_refinement.py::refine_close_clusters()`
+(No current technical debt items)
 
 ### Performance Considerations
 

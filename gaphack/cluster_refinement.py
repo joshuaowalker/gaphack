@@ -37,7 +37,6 @@ class RefinementConfig:
                  close_cluster_expansion_threshold: Optional[float] = None,
                  incremental_search_distance: Optional[float] = None,
                  jaccard_overlap_threshold: float = 0.1,
-                 significant_difference_threshold: float = 0.2,
                  max_closest_clusters: int = 5):
         """Initialize refinement configuration.
 
@@ -49,7 +48,6 @@ class RefinementConfig:
             close_cluster_expansion_threshold: Distance threshold for close cluster expansion
             incremental_search_distance: Search distance for incremental updates
             jaccard_overlap_threshold: Overlap threshold for scope expansion
-            significant_difference_threshold: Threshold for detecting significant clustering changes
             max_closest_clusters: Maximum clusters to consider for incremental updates
         """
         self.max_full_gaphack_size = max_full_gaphack_size
@@ -59,7 +57,6 @@ class RefinementConfig:
         self.close_cluster_expansion_threshold = close_cluster_expansion_threshold
         self.incremental_search_distance = incremental_search_distance
         self.jaccard_overlap_threshold = jaccard_overlap_threshold
-        self.significant_difference_threshold = significant_difference_threshold
         self.max_closest_clusters = max_closest_clusters
 
 
@@ -931,48 +928,29 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
 
         # Step 6: Check if we got a valid result
         if full_result and len(full_result) > 0:
-            # Step 7: Check if classic result differs significantly from input
-            original_scope_clusters = {cid: updated_clusters[cid] for cid in expanded_scope.cluster_ids
-                                     if cid in updated_clusters}
+            # Step 7: Always replace original clusters with refined result
+            for cluster_id in expanded_scope.cluster_ids:
+                if cluster_id in updated_clusters:
+                    clusters_deleted_during_processing.add(cluster_id)
+                    del updated_clusters[cluster_id]
 
-            if clusters_significantly_different(original_scope_clusters, full_result,
-                                              config.significant_difference_threshold):
-                # Step 8: Replace original clusters with classic result
-                for cluster_id in expanded_scope.cluster_ids:
-                    if cluster_id in updated_clusters:
-                        clusters_deleted_during_processing.add(cluster_id)
-                        del updated_clusters[cluster_id]
+            # Add new clusters from classic result
+            for cluster_id, cluster_headers in full_result.items():
+                clusters_created_during_processing.add(cluster_id)
+                updated_clusters[cluster_id] = cluster_headers
 
-                # Add new clusters from classic result
-                for cluster_id, cluster_headers in full_result.items():
-                    clusters_created_during_processing.add(cluster_id)
-                    updated_clusters[cluster_id] = cluster_headers
+            # Update component tracking for successful refinement
+            component_info.update({
+                'clusters_before': list(expanded_scope.cluster_ids),  # Use expanded scope clusters
+                'clusters_before_count': len(expanded_scope.cluster_ids),  # Use expanded scope as "before"
+                'clusters_after': list(full_result.keys()),
+                'clusters_after_count': len(full_result),
+                'processed': True,
+                'expanded_scope_size': len(expanded_scope.cluster_ids)
+            })
 
-                # Update component tracking for successful refinement
-                component_info.update({
-                    'clusters_before': list(expanded_scope.cluster_ids),  # Use expanded scope clusters
-                    'clusters_before_count': len(expanded_scope.cluster_ids),  # Use expanded scope as "before"
-                    'clusters_after': list(full_result.keys()),
-                    'clusters_after_count': len(full_result),
-                    'processed': True,
-                    'significantly_different': True,
-                    'expanded_scope_size': len(expanded_scope.cluster_ids)
-                })
-
-                logger.info(f"Refined close cluster component: {len(expanded_scope.cluster_ids)} clusters → "
-                           f"{len(full_result)} clusters")
-            else:
-                # Update component tracking for no significant change
-                component_info.update({
-                    'clusters_before': list(expanded_scope.cluster_ids),  # Use expanded scope clusters
-                    'clusters_before_count': len(expanded_scope.cluster_ids),  # Use expanded scope as "before"
-                    'clusters_after': list(expanded_scope.cluster_ids),  # Keep expanded scope clusters
-                    'clusters_after_count': len(expanded_scope.cluster_ids),  # No net change
-                    'processed': True,
-                    'significantly_different': False,
-                    'expanded_scope_size': len(expanded_scope.cluster_ids)
-                })
-                logger.debug(f"Classic gapHACk result not significantly different, keeping original clusters")
+            logger.info(f"Refined close cluster component: {len(expanded_scope.cluster_ids)} clusters → "
+                       f"{len(full_result)} clusters")
 
         else:
             # Fallback: iterative expansion failed
@@ -1009,42 +987,6 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
     return updated_clusters, tracking_info
 
 
-def clusters_significantly_different(original_clusters: Dict[str, List[str]],
-                                   new_clusters: Dict[str, List[str]],
-                                   threshold: float = 0.2) -> bool:
-    """Check if clustering results are significantly different.
-
-    Args:
-        original_clusters: Original cluster assignments
-        new_clusters: New cluster assignments
-        threshold: Fraction of sequences that must change clusters
-
-    Returns:
-        True if clusters are significantly different
-    """
-    # Create sequence -> cluster mappings
-    original_assignments = {}
-    for cluster_id, sequences in original_clusters.items():
-        for seq in sequences:
-            original_assignments[seq] = cluster_id
-
-    new_assignments = {}
-    for cluster_id, sequences in new_clusters.items():
-        for seq in sequences:
-            new_assignments[seq] = cluster_id
-
-    # Count sequences with different assignments
-    all_sequences = set(original_assignments.keys()) | set(new_assignments.keys())
-    changed_sequences = 0
-
-    for seq in all_sequences:
-        original_cluster = original_assignments.get(seq)
-        new_cluster = new_assignments.get(seq)
-        if original_cluster != new_cluster:
-            changed_sequences += 1
-
-    change_fraction = changed_sequences / len(all_sequences) if all_sequences else 0
-    return change_fraction >= threshold
 
 
 def verify_no_conflicts(clusters: Dict[str, List[str]],
