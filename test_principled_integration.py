@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 
 from gaphack.decompose import DecomposeClustering, DecomposeResults
-from gaphack.principled_reclustering import resolve_conflicts_via_reclustering, ReclusteringConfig
+from gaphack.cluster_refinement import resolve_conflicts, RefinementConfig
 from gaphack.cluster_proximity import BruteForceProximityGraph
 
 
@@ -121,7 +121,7 @@ def test_comprehensive_verification():
     """Test the comprehensive MECE verification system."""
     print("\nTesting comprehensive MECE verification system...")
 
-    from gaphack.principled_reclustering import verify_cluster_assignments_mece
+    from gaphack.cluster_refinement import verify_no_conflicts
 
     # Test Case 1: MECE clusters (no conflicts)
     print("Test 1: MECE clusters (should pass)")

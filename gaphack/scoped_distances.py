@@ -1,8 +1,8 @@
 """
-Scoped distance providers for scope-limited reclustering.
+Scoped distance providers for scope-limited cluster refinement.
 
 This module provides efficient distance computation for subsets of sequences
-used in scope-limited reclustering algorithms.
+used in scope-limited cluster refinement algorithms.
 """
 
 import logging
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 class ScopedDistanceProvider:
-    """Efficient distance provider for scope-limited reclustering.
+    """Efficient distance provider for scope-limited cluster refinement.
 
     Maps local indices within a scope to global indices in the full dataset,
     enabling classic gapHACk to work on sequence subsets while reusing
@@ -29,7 +29,7 @@ class ScopedDistanceProvider:
 
         Args:
             global_provider: Provider for full dataset distances
-            scope_headers: Headers of sequences in the reclustering scope
+            scope_headers: Headers of sequences in the refinement scope
             all_headers: Full header list (indices must match global provider)
         """
         self.global_provider = global_provider
@@ -215,7 +215,7 @@ def create_scoped_distance_provider(global_provider: DistanceProvider,
 
     Args:
         global_provider: Provider for full dataset distances
-        scope_headers: Headers of sequences in reclustering scope
+        scope_headers: Headers of sequences in refinement scope
         all_headers: Full header list
         precompute_threshold: Scope size above which to precompute matrix
 

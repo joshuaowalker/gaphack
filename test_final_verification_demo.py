@@ -2,7 +2,7 @@
 """Demo script showing final verification catching missed conflicts."""
 
 import logging
-from gaphack.principled_reclustering import verify_cluster_assignments_mece
+from gaphack.cluster_refinement import verify_no_conflicts
 
 def demo_final_verification_catching_missed_conflicts():
     """Demonstrate how final verification catches conflicts that initial detection missed."""

@@ -485,7 +485,7 @@ class DecomposeClustering:
                 
                 self.logger.debug(f"Found neighborhood of {len(neighborhood_headers)} sequences")
                 
-                # Store BLAST neighborhood in memory for spiral target selection (before pruning)
+                # Store BLAST neighborhood in memory for nearby target selection (before pruning)
                 if target_headers_for_iteration:
                     target_selector.add_blast_neighborhood(target_headers_for_iteration[0], neighborhood_headers)
                 
@@ -575,7 +575,7 @@ class DecomposeClustering:
                 # Assign sequences to cluster
                 assignment_tracker.assign_sequences(target_cluster_headers, cluster_id, iteration)
                 
-                # Update BLAST memory for spiral target selection
+                # Update BLAST memory for nearby target selection
                 target_selector.mark_sequences_processed(target_cluster_headers, self.allow_overlaps)
                 
                 # Record iteration summary
@@ -605,7 +605,7 @@ class DecomposeClustering:
                 
                 # Update progress based on mode
                 if progress_mode == "targets":
-                    # Supervised mode: increment by 1 target processed
+                    # Directed mode: increment by 1 target processed
                     progress_increment = 1
                     postfix = f"med_clust={median_cluster_size}, med_gap={median_gap_size:.3f}, assigned={assigned_total}"
                 elif progress_mode == "clusters":
@@ -718,7 +718,7 @@ class DecomposeClustering:
         # Apply cluster refinement for close cluster refinement if enabled
         if getattr(self, 'refine_close_clusters', False):
             self.logger.info("Starting cluster refinement for close cluster refinement")
-            results = self._refine_close_clusters_via_reclustering(results, sequences, headers)
+            results = self._refine_close_clusters_via_refinement(results, sequences, headers)
 
         # Expand hash IDs back to original headers
         results = self._expand_hash_ids_to_headers(results, hash_to_headers)
@@ -751,7 +751,7 @@ class DecomposeClustering:
         results.conflicts = final_verification['conflicts']
 
         # Log final status
-        if final_verification['mece_property']:
+        if final_verification['no_conflicts']:
             self.logger.info("🎉 Final verification confirms conflict-free clustering achieved")
         else:
             self.logger.error(f"❌ Final verification reveals {len(final_verification['conflicts'])} conflicts in output")
@@ -1022,7 +1022,7 @@ class DecomposeClustering:
         # Get global distance provider for the full dataset
         distance_provider = self._get_or_create_distance_provider(sequences)
 
-        # Create reclustering configuration for minimal conflict resolution
+        # Create refinement configuration for minimal conflict resolution
         config = RefinementConfig(
             max_full_gaphack_size=300,  # Conservative limit for performance
             jaccard_overlap_threshold=0.1,  # Include clusters with 10%+ overlap
@@ -1080,7 +1080,7 @@ class DecomposeClustering:
 
         return new_results
 
-    def _refine_close_clusters_via_reclustering(self, results: DecomposeResults,
+    def _refine_close_clusters_via_refinement(self, results: DecomposeResults,
                                               sequences: List[str], headers: List[str]) -> DecomposeResults:
         """Refine close clusters using cluster refinement with full gapHACk.
 
@@ -1101,7 +1101,7 @@ class DecomposeClustering:
         # Create proximity graph for cluster proximity queries
         proximity_graph = self._create_proximity_graph(results.all_clusters, sequences, headers, distance_provider)
 
-        # Create reclustering configuration with user-provided threshold
+        # Create refinement configuration with user-provided threshold
         config = RefinementConfig(
             max_full_gaphack_size=300,  # Conservative limit for performance
             close_cluster_expansion_threshold=self.close_cluster_threshold,  # User-controlled expansion threshold

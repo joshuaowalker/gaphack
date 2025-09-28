@@ -213,7 +213,7 @@ def save_decompose_results(results: DecomposeResults, output_base: str,
             f.write("-" * 20 + "\n")
             for stage, verification in results.verification_results.items():
                 f.write(f"{stage.title()}: {verification['conflict_count']} conflicts, "
-                       f"Conflict-free: {verification['mece_property']}\n")
+                       f"Conflict-free: {verification['no_conflicts']}\n")
             f.write("\n")
 
         # Iteration summary with active cluster IDs (moved after verification)
@@ -319,7 +319,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Supervised mode with target sequences
+  # Directed mode with target sequences
   gaphack-decompose input.fasta --targets targets.fasta -o results
 
   # Undirected mode with cluster count limit
@@ -376,11 +376,11 @@ Examples:
     
     # Conflict resolution arguments
     parser.add_argument('--resolve-conflicts', action='store_true',
-                       help='Enable principled reclustering for conflict resolution using classic gapHACk (minimal scope)')
+                       help='Enable cluster refinement for conflict resolution using full gapHACk (minimal scope)')
     parser.add_argument('--refine-close-clusters', type=float, default=0.0, metavar='DISTANCE',
                        help='Enable close cluster refinement with distance threshold (0.0 = disabled, e.g. 0.02 for 2%% distance)')
     parser.add_argument('--proximity-graph', choices=['brute-force', 'blast-knn'], default='brute-force',
-                       help='Proximity graph implementation for reclustering (default: brute-force)')
+                       help='Proximity graph implementation for cluster refinement (default: brute-force)')
     parser.add_argument('--knn-neighbors', type=int, default=20,
                        help='Number of K-nearest neighbors for BLAST K-NN graph (default: 20)')
 

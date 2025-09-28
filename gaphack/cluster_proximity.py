@@ -1,8 +1,8 @@
 """
-Cluster proximity graph infrastructure for principled reclustering.
+Cluster proximity graph infrastructure for cluster refinement.
 
 This module provides abstract interfaces and implementations for efficient
-cluster proximity queries needed for scope-limited reclustering algorithms.
+cluster proximity queries needed for scope-limited cluster refinement algorithms.
 """
 
 import logging

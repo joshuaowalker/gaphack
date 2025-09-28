@@ -9,8 +9,8 @@ from pathlib import Path
 from gaphack.decompose import (
     DecomposeClustering, 
     AssignmentTracker, 
-    SupervisedTargetSelector,
-    SpiralTargetSelector,
+    TargetSelector,
+    NearbyTargetSelector,
     BlastResultMemory,
     DecomposeResults
 )
@@ -88,19 +88,19 @@ class TestAssignmentTracker:
         assert set(unassigned) == {"seq2", "seq4"}
 
 
-class TestSupervisedTargetSelector:
+class TestTargetSelector:
     
     def test_init(self):
-        """Test SupervisedTargetSelector initialization."""
+        """Test TargetSelector initialization."""
         targets = ["target1", "target2", "target3"]
-        selector = SupervisedTargetSelector(targets)
+        selector = TargetSelector(targets)
         assert selector.target_headers == targets
         assert len(selector.used_targets) == 0
     
     def test_get_next_target(self):
         """Test getting next target sequence."""
         targets = ["target1", "target2"]
-        selector = SupervisedTargetSelector(targets)
+        selector = TargetSelector(targets)
         tracker = AssignmentTracker()
         
         # First call should return target1
@@ -120,7 +120,7 @@ class TestSupervisedTargetSelector:
     def test_skip_assigned_targets(self):
         """Test that assigned targets are skipped."""
         targets = ["target1", "target2", "target3"]
-        selector = SupervisedTargetSelector(targets)
+        selector = TargetSelector(targets)
         tracker = AssignmentTracker()
         
         # Assign target2 to a cluster
@@ -137,7 +137,7 @@ class TestSupervisedTargetSelector:
     def test_has_more_targets(self):
         """Test checking for remaining targets."""
         targets = ["target1", "target2"]
-        selector = SupervisedTargetSelector(targets)
+        selector = TargetSelector(targets)
         tracker = AssignmentTracker()
         
         assert selector.has_more_targets(tracker)
@@ -321,8 +321,8 @@ class TestBlastResultMemory:
         assert memory.unprocessed_neighborhoods["target1"] == {"seq1", "seq2", "seq3"}
         assert memory.candidate_pool == {"seq1", "seq2", "seq3"}
     
-    def test_get_spiral_candidates(self):
-        """Test getting spiral candidates."""
+    def test_get_nearby_candidates(self):
+        """Test getting nearby candidates."""
         memory = BlastResultMemory()
         tracker = AssignmentTracker()
         
@@ -330,14 +330,14 @@ class TestBlastResultMemory:
         memory.add_neighborhood("target1", ["seq1", "seq2", "seq3"])
         
         # Initially all are candidates
-        candidates = memory.get_spiral_candidates(tracker)
+        candidates = memory.get_nearby_candidates(tracker)
         assert set(candidates) == {"seq1", "seq2", "seq3"}
         
         # Assign one sequence
         tracker.assign_sequence("seq2", "cluster_001", 1)
         
         # Should return only unassigned
-        candidates = memory.get_spiral_candidates(tracker)
+        candidates = memory.get_nearby_candidates(tracker)
         assert set(candidates) == {"seq1", "seq3"}
     
     def test_mark_processed(self):
@@ -369,12 +369,12 @@ class TestBlastResultMemory:
         assert memory.unprocessed_neighborhoods["target2"] == {"seq4", "seq5"}
 
 
-class TestSpiralTargetSelector:
+class TestNearbyTargetSelector:
     
     def test_init(self):
-        """Test SpiralTargetSelector initialization."""
+        """Test NearbyTargetSelector initialization."""
         headers = ["seq1", "seq2", "seq3"]
-        selector = SpiralTargetSelector(headers, max_clusters=5, max_sequences=100)
+        selector = NearbyTargetSelector(headers, max_clusters=5, max_sequences=100)
         
         assert selector.all_headers == headers
         assert selector.max_clusters == 5
@@ -385,7 +385,7 @@ class TestSpiralTargetSelector:
     def test_random_fallback(self):
         """Test random target selection when no BLAST memory."""
         headers = ["seq1", "seq2", "seq3"]
-        selector = SpiralTargetSelector(headers, max_clusters=2)
+        selector = NearbyTargetSelector(headers, max_clusters=2)
         tracker = AssignmentTracker()
         
         # First call should return a target (random fallback)
@@ -398,8 +398,8 @@ class TestSpiralTargetSelector:
         # Target should be marked as used
         assert next_target[0] in selector.used_targets
     
-    def test_spiral_selection_with_blast_memory(self):
-        """Test spiral selection using BLAST memory."""
+    def test_nearby_selection_with_blast_memory(self):
+        """Test nearby selection using BLAST memory."""
         headers = ["seq1", "seq2", "seq3", "seq4", "seq5"]
         selector = SpiralTargetSelector(headers, max_clusters=3)
         tracker = AssignmentTracker()
@@ -425,7 +425,7 @@ class TestSpiralTargetSelector:
         headers = ["seq1", "seq2", "seq3"]
         
         # Test max_clusters limit
-        selector = SpiralTargetSelector(headers, max_clusters=2)
+        selector = NearbyTargetSelector(headers, max_clusters=2)
         tracker = AssignmentTracker()
         
         assert selector.has_more_targets(tracker)
@@ -436,7 +436,7 @@ class TestSpiralTargetSelector:
         
         # Test max_sequences limit with larger header set
         headers_large = ["seq1", "seq2", "seq3", "seq4", "seq5", "seq6", "seq7"]
-        selector2 = SpiralTargetSelector(headers_large, max_sequences=5)
+        selector2 = NearbyTargetSelector(headers_large, max_sequences=5)
         tracker2 = AssignmentTracker()
         
         assert selector2.has_more_targets(tracker2)

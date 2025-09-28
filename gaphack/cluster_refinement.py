@@ -27,7 +27,7 @@ EXPANSION_SIZE_BUFFER = 50
 
 
 class RefinementConfig:
-    """Configuration for principled reclustering algorithms."""
+    """Configuration for cluster refinement algorithms."""
 
     def __init__(self,
                  max_full_gaphack_size: int = 300,
@@ -39,7 +39,7 @@ class RefinementConfig:
                  jaccard_overlap_threshold: float = 0.1,
                  significant_difference_threshold: float = 0.2,
                  max_closest_clusters: int = 5):
-        """Initialize reclustering configuration.
+        """Initialize refinement configuration.
 
         Args:
             max_full_gaphack_size: Maximum sequences for full gapHACk
@@ -64,7 +64,7 @@ class RefinementConfig:
 
 
 class ExpandedScope:
-    """Container for expanded reclustering scope information."""
+    """Container for expanded refinement scope information."""
 
     def __init__(self, sequences: List[str], headers: List[str], cluster_ids: List[str]):
         self.sequences = sequences
@@ -283,7 +283,7 @@ def resolve_conflicts(conflicts: Dict[str, List[str]],
                                      max_lump: float = 0.02,
                                      target_percentile: int = 95,
                                      cluster_id_generator=None) -> Tuple[Dict[str, List[str]], 'ProcessingStageInfo']:
-    """Resolve assignment conflicts using full gapHACk reclustering with minimal scope.
+    """Resolve assignment conflicts using full gapHACk refinement with minimal scope.
 
     Uses only conflicted clusters (no expansion) for fastest, most predictable conflict-free fixes.
     This is pure correctness operation - quality improvement belongs to close cluster refinement.
@@ -294,7 +294,7 @@ def resolve_conflicts(conflicts: Dict[str, List[str]],
         sequences: Full sequence list
         headers: Full header list (indices must match sequences)
         distance_provider: Provider for distance calculations
-        config: Configuration for reclustering parameters
+        config: Configuration for refinement parameters
         min_split: Minimum distance to split clusters
         max_lump: Maximum distance to lump clusters
         target_percentile: Percentile for gap optimization
@@ -577,7 +577,7 @@ def expand_context_for_gap_optimization(core_cluster_ids: List[str],
         max_iterations: Maximum context expansion iterations
 
     Returns:
-        Tuple of (final_scope, classic_gaphack_result)
+        Tuple of (final_scope, full_gaphack_result)
     """
     # Start with core clusters
     current_cluster_ids = set(core_cluster_ids)
@@ -605,7 +605,7 @@ def expand_context_for_gap_optimization(core_cluster_ids: List[str],
             logger.debug(f"Iteration {iteration}: testing scope with {len(current_cluster_ids)} clusters, "
                         f"{len(scope_sequences)} sequences")
 
-            classic_clusters, classic_metadata = apply_full_gaphack_to_scope_with_metadata(
+            full_clusters, full_metadata = apply_full_gaphack_to_scope_with_metadata(
                 current_scope.sequences, current_scope.headers,
                 sequences, headers, distance_provider,
                 min_split, max_lump, target_percentile,
@@ -613,19 +613,19 @@ def expand_context_for_gap_optimization(core_cluster_ids: List[str],
             )
 
             # Extract gap from the metadata
-            current_gap = classic_metadata.get('gap_size', float('-inf'))
+            current_gap = full_metadata.get('gap_size', float('-inf'))
 
             logger.debug(f"Iteration {iteration}: achieved gap = {current_gap:.4f}")
 
             # Track best result
             if current_gap > best_gap:
                 best_gap = current_gap
-                best_result = classic_clusters
+                best_result = full_clusters
 
             # Check if we've achieved target gap
             if current_gap >= target_gap:
                 logger.info(f"Achieved positive gap {current_gap:.4f} after {iteration} context expansions")
-                return current_scope, classic_clusters
+                return current_scope, full_clusters
 
         # Gap still insufficient - add more distant context
         context_distance = max_lump * (1.5 + iteration * 0.5)  # 1.5x, 2.0x, 2.5x, etc.
@@ -789,7 +789,7 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
         headers: Full header list (indices must match sequences)
         distance_provider: Provider for distance calculations
         proximity_graph: Graph for finding close cluster pairs
-        config: Configuration for reclustering parameters
+        config: Configuration for refinement parameters
         min_split: Minimum distance to split clusters
         max_lump: Maximum distance to lump clusters
         target_percentile: Percentile for gap optimization
@@ -1182,7 +1182,7 @@ def verify_no_conflicts(clusters: Dict[str, List[str]],
             logger.error("CRITICAL: Final output contains conflicts - clustering is not conflict-free!")
             logger.error("This may indicate:")
             logger.error("  1. Conflicts exceeded MAX_FULL_GAPHACK_SIZE and were skipped")
-            logger.error("  2. New conflicts were introduced during full gapHACk reclustering")
+            logger.error("  2. New conflicts were introduced during full gapHACk refinement")
             logger.error("  3. Scope expansion was insufficient to capture all related conflicts")
             logger.error("  4. Multi-cluster conflicts were not properly handled")
 
