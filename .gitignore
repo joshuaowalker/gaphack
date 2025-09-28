@@ -44,3 +44,4 @@ env/
 extract_collybia_nuda.py
 graph_builder.py
 *.pdf
+.hypothesis/
