@@ -379,10 +379,6 @@ Examples:
                        help='Enable cluster refinement for conflict resolution using full gapHACk (minimal scope)')
     parser.add_argument('--refine-close-clusters', type=float, default=0.0, metavar='DISTANCE',
                        help='Enable close cluster refinement with distance threshold (0.0 = disabled, e.g. 0.02 for 2%% distance)')
-    parser.add_argument('--proximity-graph', choices=['brute-force', 'blast-knn'], default='brute-force',
-                       help='Proximity graph implementation for cluster refinement (default: brute-force)')
-    parser.add_argument('--knn-neighbors', type=int, default=20,
-                       help='Number of K-nearest neighbors for BLAST K-NN graph (default: 20)')
 
     # Control arguments
     parser.add_argument('-v', '--verbose', action='store_true',
@@ -430,8 +426,6 @@ Examples:
         resolve_conflicts=args.resolve_conflicts,
         refine_close_clusters=args.refine_close_clusters > 0.0,
         close_cluster_threshold=args.refine_close_clusters,
-        proximity_graph=args.proximity_graph,
-        knn_neighbors=args.knn_neighbors,
         show_progress=not args.no_progress,
         logger=logger
     )

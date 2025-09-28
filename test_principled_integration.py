@@ -7,7 +7,7 @@ from pathlib import Path
 
 from gaphack.decompose import DecomposeClustering, DecomposeResults
 from gaphack.cluster_refinement import resolve_conflicts, RefinementConfig
-from gaphack.cluster_proximity import BruteForceProximityGraph
+from gaphack.cluster_graph import ClusterGraph
 
 
 def create_test_fasta(sequences, filename):

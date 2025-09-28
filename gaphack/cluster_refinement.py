@@ -11,7 +11,7 @@ from collections import defaultdict
 from typing import List, Dict, Tuple, Set, Optional, Union
 import numpy as np
 
-from .cluster_proximity import ClusterProximityGraph, BruteForceProximityGraph
+from .cluster_graph import ClusterGraph
 from .scoped_distances import ScopedDistanceProvider, create_scoped_distance_provider
 from .lazy_distances import DistanceProvider
 from .core import GapOptimizedClustering
@@ -117,7 +117,7 @@ def find_conflict_components(conflicts: Dict[str, List[str]],
 def expand_scope_for_conflicts(initial_sequences: Set[str],
                              core_cluster_ids: List[str],
                              all_clusters: Dict[str, List[str]],
-                             proximity_graph: ClusterProximityGraph,
+                             proximity_graph: ClusterGraph,
                              expansion_threshold: float,
                              max_scope_size: int = MAX_FULL_GAPHACK_SIZE) -> ExpandedScope:
     """Expand conflict resolution scope to include nearby clusters.
@@ -465,7 +465,7 @@ def find_connected_close_components(close_pairs: List[Tuple[str, str, float]]) -
 
 def needs_minimal_context_for_gap_calculation(core_cluster_ids: List[str],
                                              all_clusters: Dict[str, List[str]],
-                                             proximity_graph: ClusterProximityGraph,
+                                             proximity_graph: ClusterGraph,
                                              max_lump: float) -> bool:
     """Check if we need to add context to prevent gap calculation issues.
 
@@ -507,7 +507,7 @@ def needs_minimal_context_for_gap_calculation(core_cluster_ids: List[str],
 
 def add_context_at_distance_threshold(current_cluster_ids: Set[str],
                                      all_clusters: Dict[str, List[str]],
-                                     proximity_graph: ClusterProximityGraph,
+                                     proximity_graph: ClusterGraph,
                                      distance_threshold: float,
                                      max_scope_size: int) -> Tuple[bool, str, float]:
     """Add one context cluster beyond the given distance threshold.
@@ -550,7 +550,7 @@ def expand_context_for_gap_optimization(core_cluster_ids: List[str],
                                        sequences: List[str],
                                        headers: List[str],
                                        distance_provider: DistanceProvider,
-                                       proximity_graph: ClusterProximityGraph,
+                                       proximity_graph: ClusterGraph,
                                        expansion_threshold: float,
                                        max_scope_size: int,
                                        max_lump: float,
@@ -683,7 +683,7 @@ def expand_context_for_gap_optimization(core_cluster_ids: List[str],
 def expand_scope_for_close_clusters(initial_sequences: Set[str],
                                    core_cluster_ids: List[str],
                                    all_clusters: Dict[str, List[str]],
-                                   proximity_graph: ClusterProximityGraph,
+                                   proximity_graph: ClusterGraph,
                                    expansion_threshold: float,
                                    max_scope_size: int = MAX_FULL_GAPHACK_SIZE,
                                    max_lump: float = 0.02) -> ExpandedScope:
@@ -774,7 +774,7 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
                          sequences: List[str],
                          headers: List[str],
                          distance_provider: DistanceProvider,
-                         proximity_graph: ClusterProximityGraph,
+                         proximity_graph: ClusterGraph,
                          config: Optional[RefinementConfig] = None,
                          min_split: float = 0.005,
                          max_lump: float = 0.02,
