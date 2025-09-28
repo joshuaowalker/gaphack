@@ -14,8 +14,8 @@ from .lazy_distances import DistanceProviderFactory, SubsetDistanceProvider, Dis
 logger = logging.getLogger(__name__)
 
 
-class ActiveClusterIDGenerator:
-    """Generates sequential active cluster IDs for internal processing."""
+class ClusterIDGenerator:
+    """Generates sequential cluster IDs for internal processing."""
 
     def __init__(self, prefix: str = "active"):
         self.prefix = prefix
@@ -113,8 +113,8 @@ class AssignmentTracker:
         return [seq_id for seq_id in all_sequence_ids if not self.is_assigned(seq_id)]
 
 
-class SupervisedTargetSelector:
-    """Target selection strategy for supervised mode using provided target sequences."""
+class TargetSelector:
+    """Target selection strategy using provided target sequences."""
     
     def __init__(self, target_headers: List[str]):
         self.target_headers = target_headers
@@ -202,8 +202,8 @@ class BlastResultMemory:
                         f"active neighborhoods: {len(self.unprocessed_neighborhoods)}")
 
 
-class SpiralTargetSelector:
-    """Target selection strategy using spiral exploration with random fallback."""
+class NearbyTargetSelector:
+    """Target selection strategy using nearby sequence exploration with random fallback."""
     
     def __init__(self, all_headers: List[str], max_clusters: Optional[int] = None, 
                  max_sequences: Optional[int] = None):
@@ -219,20 +219,20 @@ class SpiralTargetSelector:
         self.random_state = random.Random(42)  # Deterministic for reproducibility
     
     def get_next_target(self, assignment_tracker: AssignmentTracker) -> Optional[List[str]]:
-        """Get next target using spiral logic with random fallback."""
+        """Get next target using nearby sequence logic with random fallback."""
         self.iteration_count += 1
         
-        # Try spiral selection first: pick from previous BLAST neighborhoods
-        spiral_candidates = self.blast_memory.get_spiral_candidates(assignment_tracker)
-        spiral_candidates = [h for h in spiral_candidates if h not in self.used_targets]
+        # Try nearby selection first: pick from previous BLAST neighborhoods
+        nearby_candidates = self.blast_memory.get_spiral_candidates(assignment_tracker)
+        nearby_candidates = [h for h in nearby_candidates if h not in self.used_targets]
         
         target_header = None
         selection_method = ""
         
-        if spiral_candidates:
-            # Spiral selection: choose from BLAST neighborhood candidates
-            target_header = self.random_state.choice(spiral_candidates)
-            selection_method = "spiral"
+        if nearby_candidates:
+            # Nearby selection: choose from BLAST neighborhood candidates
+            target_header = self.random_state.choice(nearby_candidates)
+            selection_method = "nearby"
         else:
             # Random fallback: choose any unassigned sequence
             unassigned_candidates = [h for h in self.all_headers 
@@ -245,7 +245,7 @@ class SpiralTargetSelector:
         if target_header:
             self.used_targets.add(target_header)
             logger.debug(f"Iteration {self.iteration_count}: selected '{target_header}' via {selection_method} "
-                        f"(spiral_pool: {len(spiral_candidates)}, total_unassigned: {len([h for h in self.all_headers if not assignment_tracker.is_assigned(h)])})")
+                        f"(nearby_pool: {len(nearby_candidates)}, total_unassigned: {len([h for h in self.all_headers if not assignment_tracker.is_assigned(h)])})")
             return [target_header]
         
         return None  # No more targets available
@@ -269,7 +269,7 @@ class SpiralTargetSelector:
         return len(unassigned_candidates) > 0
     
     def add_blast_neighborhood(self, target_header: str, neighborhood_headers: List[str]) -> None:
-        """Store BLAST neighborhood before pruning for future spiral selection."""
+        """Store BLAST neighborhood before pruning for future nearby selection."""
         self.blast_memory.add_neighborhood(target_header, neighborhood_headers)
     
     def mark_sequences_processed(self, processed_headers: List[str], allow_overlaps: bool = True) -> None:
@@ -405,10 +405,10 @@ class DecomposeClustering:
             self.logger.info(f"Found {len(matched_hash_ids)} target sequences matching input sequences")
 
             # Target selector now works with hash_ids directly
-            target_selector = SupervisedTargetSelector(matched_hash_ids)
+            target_selector = TargetSelector(matched_hash_ids)
         elif mode == "undirected":
             # Create spiral target selector with all sequence headers
-            target_selector = SpiralTargetSelector(
+            target_selector = NearbyTargetSelector(
                 all_headers=headers,
                 max_clusters=max_clusters,
                 max_sequences=max_sequences
@@ -707,7 +707,7 @@ class DecomposeClustering:
         # Apply principled reclustering for conflict resolution if enabled
         if getattr(self, 'resolve_conflicts', False) and results.conflicts:
             self.logger.info(f"Starting principled reclustering for {len(results.conflicts)} conflicts")
-            results = self._resolve_conflicts_via_reclustering(results, sequences, headers)
+            results = self._resolve_conflicts(results, sequences, headers)
 
             # Verify conflict resolution effectiveness
             if original_conflicts:
@@ -1005,7 +1005,7 @@ class DecomposeClustering:
             )
         return self._global_distance_provider
 
-    def _resolve_conflicts_via_reclustering(self, results: DecomposeResults,
+    def _resolve_conflicts(self, results: DecomposeResults,
                                           sequences: List[str], headers: List[str]) -> DecomposeResults:
         """Resolve conflicts using principled reclustering with full gapHACk.
 
@@ -1017,7 +1017,7 @@ class DecomposeClustering:
         Returns:
             Updated DecomposeResults with conflicts resolved
         """
-        from .cluster_refinement import resolve_conflicts_via_reclustering, RefinementConfig
+        from .cluster_refinement import resolve_conflicts, RefinementConfig
 
         # Get global distance provider for the full dataset
         distance_provider = self._get_or_create_distance_provider(sequences)
@@ -1030,8 +1030,8 @@ class DecomposeClustering:
         )
 
         # Apply conflict resolution (no proximity graph needed - uses minimal scope only)
-        conflict_id_generator = ActiveClusterIDGenerator(prefix="deconflicted")
-        resolved_clusters, conflict_tracking = resolve_conflicts_via_reclustering(
+        conflict_id_generator = ClusterIDGenerator(prefix="deconflicted")
+        resolved_clusters, conflict_tracking = resolve_conflicts(
             conflicts=results.conflicts,
             all_clusters=results.all_clusters,
             sequences=sequences,
@@ -1110,7 +1110,7 @@ class DecomposeClustering:
         )
 
         # Apply close cluster refinement
-        refinement_id_generator = ActiveClusterIDGenerator(prefix="refined")
+        refinement_id_generator = ClusterIDGenerator(prefix="refined")
         refined_clusters, refinement_tracking = refine_close_clusters(
             all_clusters=results.all_clusters,
             sequences=sequences,

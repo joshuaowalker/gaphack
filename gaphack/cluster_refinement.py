@@ -72,7 +72,7 @@ class ExpandedScope:
         self.cluster_ids = cluster_ids
 
 
-def find_connected_conflict_components(conflicts: Dict[str, List[str]],
+def find_conflict_components(conflicts: Dict[str, List[str]],
                                      all_clusters: Dict[str, List[str]]) -> List[List[str]]:
     """Group conflicted clusters into connected components.
 
@@ -212,11 +212,11 @@ def apply_full_gaphack_to_scope_with_metadata(scope_sequences: List[str],
     clusters = {}
 
     # Import here to avoid circular imports
-    from .decompose import ActiveClusterIDGenerator
+    from .decompose import ClusterIDGenerator
 
     # Use provided generator or create a temporary one
     if cluster_id_generator is None:
-        cluster_id_generator = ActiveClusterIDGenerator(prefix="classic")
+        cluster_id_generator = ClusterIDGenerator(prefix="classic")
 
     # Process multi-member clusters (list of lists of indices)
     for cluster_idx, cluster_indices_list in enumerate(final_clusters):
@@ -273,7 +273,7 @@ def apply_full_gaphack_to_scope(scope_sequences: List[str],
     return clusters
 
 
-def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
+def resolve_conflicts(conflicts: Dict[str, List[str]],
                                      all_clusters: Dict[str, List[str]],
                                      sequences: List[str],
                                      headers: List[str],
@@ -330,7 +330,7 @@ def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
     logger.info(f"Resolving conflicts for {len(conflicts)} sequences across clusters")
 
     # Step 1: Group conflicts by connected components
-    conflict_components = find_connected_conflict_components(conflicts, all_clusters)
+    conflict_components = find_conflict_components(conflicts, all_clusters)
     logger.debug(f"Found {len(conflict_components)} connected conflict components")
 
     updated_clusters = all_clusters.copy()
@@ -545,7 +545,7 @@ def add_context_at_distance_threshold(current_cluster_ids: Set[str],
     return False, "", 0.0
 
 
-def expand_scope_with_iterative_context(core_cluster_ids: List[str],
+def expand_context_for_gap_optimization(core_cluster_ids: List[str],
                                        all_clusters: Dict[str, List[str]],
                                        sequences: List[str],
                                        headers: List[str],
@@ -862,8 +862,8 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
 
     # Create shared cluster ID generator for all components
     if cluster_id_generator is None:
-        from .decompose import ActiveClusterIDGenerator
-        cluster_id_generator = ActiveClusterIDGenerator(prefix="classic")
+        from .decompose import ClusterIDGenerator
+        cluster_id_generator = ClusterIDGenerator(prefix="classic")
 
     for component_idx, component_clusters in enumerate(close_components):
         component_signature = frozenset(component_clusters)
@@ -912,7 +912,7 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
         # Use iterative expansion to achieve positive gap
         logger.debug(f"Applying iterative context expansion to component with {len(existing_component_clusters)} clusters")
 
-        expanded_scope, full_result = expand_scope_with_iterative_context(
+        expanded_scope, full_result = expand_context_for_gap_optimization(
             existing_component_clusters,
             updated_clusters,
             sequences,
