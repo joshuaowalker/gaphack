@@ -484,35 +484,68 @@ Between `min_threshold` and `max_threshold` (default: 0.02 or 2%):
 
 ### Decompose Algorithm (gaphack-decompose)
 
-For datasets too large for the O(n³) core algorithm, `gaphack-decompose` uses an iterative approach:
+For datasets too large for the O(n³) core algorithm, `gaphack-decompose` uses an iterative approach that carefully balances computational efficiency with clustering quality.
 
 #### BLAST-based Neighborhood Discovery
+
 1. **Target Selection**: Choose a target sequence (provided or selected from unassigned sequences)
 2. **BLAST Search**: Find similar sequences using BLAST (default: top 1000 hits)
-3. **Target Clustering**: Apply target mode clustering to the neighborhood
-4. **Iteration**: Repeat until stopping criteria met
+3. **Neighborhood Pruning**: Apply the N+N pruning strategy (see below)
+4. **Target Clustering**: Apply target mode clustering to the pruned neighborhood
+5. **Iteration**: Repeat until stopping criteria met
+
+#### The N+N Neighborhood Pruning Strategy
+
+A critical challenge in iterative clustering is ensuring the barcode gap can be properly evaluated. The gap calculation requires both intra-cluster distances (sequences within the same species) and inter-cluster distances (sequences from different species). Without sufficient inter-cluster context, the algorithm cannot determine whether a gap exists.
+
+The N+N pruning strategy addresses this:
+
+1. **Calculate distances** from each neighborhood sequence to the target(s)
+2. **Sort sequences** by their minimum distance to any target
+3. **Select N sequences within max_lump** (0.02 default): These are potential cluster members
+4. **Add N additional sequences beyond max_lump**: These provide inter-cluster context
+
+This balanced selection ensures:
+- **Complete cluster coverage**: All sequences likely to belong to the target's species are included
+- **Sufficient context**: An equal number of sequences from other species provide the inter-cluster distances needed for gap calculation
+- **Computational efficiency**: The neighborhood is pruned to 2N sequences rather than processing all BLAST hits
+- **Robust gap estimation**: The percentile-based gap calculation (e.g., P95) has sufficient samples from both intra- and inter-cluster distributions
 
 #### Post-Processing Refinement
 
 After initial clustering, two optional refinement stages ensure high-quality results:
 
-1. **Conflict Resolution** (`--resolve-conflicts`):
-   - Identifies sequences assigned to multiple clusters
-   - Applies full gapHACk to conflicted clusters
-   - Ensures mutually exclusive clustering (MECE property)
-   - Minimal computational overhead (only processes conflicts)
+##### Conflict Resolution (`--resolve-conflicts`)
 
-2. **Close Cluster Refinement** (`--refine-close-clusters DISTANCE`):
-   - Identifies clusters closer than the specified distance threshold
-   - Expands scope to include nearby sequences based on distance
-   - Applies full gapHACk to optimize boundaries
-   - User controls quality vs. performance trade-off
+Ensures mutually exclusive clustering (MECE property):
+- Identifies sequences assigned to multiple clusters
+- Groups conflicts into connected components
+- Applies full gapHACk to each component using minimal scope
+- Pure correctness focus with minimal computational overhead
+
+##### Close Cluster Refinement (`--refine-close-clusters DISTANCE`)
+
+Optimizes boundaries between closely related clusters:
+
+**The Context Expansion Problem**: When clusters are very close (e.g., subspecies or recent divergences), applying full gapHACk to just those clusters often results in complete merging because there's no inter-cluster context to establish a gap. This is particularly problematic when refining clusters that are all within the max_lump distance.
+
+**Iterative Context Expansion Solution**:
+1. **Start with core clusters** to be refined
+2. **Apply full gapHACk** and measure the resulting gap
+3. **If gap is insufficient** (< 0.001):
+   - Add one additional cluster beyond the expansion threshold as context
+   - This provides inter-cluster distances needed for gap calculation
+   - Reapply full gapHACk with expanded scope
+4. **Iterate** up to 5 times or until a positive gap is achieved
+5. **Return best result** across all iterations
+
+This approach ensures that even closely related clusters can be properly evaluated by providing sufficient evolutionary context for the gap calculation.
 
 #### Cluster Graph Architecture
 
 The system uses a cluster graph to efficiently track relationships:
-- **Medoid-based representation**: Each cluster represented by its medoid
-- **BLAST K-NN graph**: Efficient nearest-neighbor queries for large datasets
+- **Medoid-based representation**: Each cluster represented by its medoid (most central sequence)
+- **Proximity queries**: Efficient finding of nearby clusters for refinement
 - **Dynamic updates**: Graph maintained as clusters merge or split
 - **Scalable to 100K+ sequences**: Optimized for large-scale datasets
 
