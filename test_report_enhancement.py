@@ -46,7 +46,6 @@ def test_enhanced_report():
             min_split=0.005,
             max_lump=0.02,
             target_percentile=95,
-            allow_overlaps=True,
             resolve_conflicts=True,
             refine_close_clusters=True,
             close_cluster_threshold=0.03,  # 3% distance threshold

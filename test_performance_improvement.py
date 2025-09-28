@@ -70,7 +70,6 @@ def demonstrate_performance_improvement():
                 min_split=0.005,
                 max_lump=0.02,
                 target_percentile=95,
-                allow_overlaps=True,
                 resolve_conflicts=True,  # Only conflict resolution
                 refine_close_clusters=False,  # No close cluster refinement
                 close_cluster_threshold=0.0,
@@ -89,7 +88,6 @@ def demonstrate_performance_improvement():
                 min_split=0.005,
                 max_lump=0.02,
                 target_percentile=95,
-                allow_overlaps=True,
                 resolve_conflicts=False,  # No conflict resolution
                 refine_close_clusters=True,  # Only close cluster refinement
                 close_cluster_threshold=0.02,

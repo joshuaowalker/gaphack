@@ -198,7 +198,6 @@ gaphack-decompose large_dataset.fasta \
 gaphack-decompose large_dataset.fasta \
     --blast-max-hits 1500 \
     --min-identity 85.0 \
-    --no-overlaps \
     -o results
 ```
 
@@ -207,7 +206,6 @@ gaphack-decompose large_dataset.fasta \
 - **BLAST neighborhoods**: Efficiently finds similar sequences for clustering
 - **Conflict resolution**: `--resolve-conflicts` ensures each sequence appears in only one cluster
 - **Close cluster refinement**: `--refine-close-clusters DISTANCE` optimizes boundaries between similar clusters
-- **No-overlap mode**: `--no-overlaps` prevents sequences from appearing in multiple clusters during processing
 
 ### Analysis Tool (gaphack-analyze)
 

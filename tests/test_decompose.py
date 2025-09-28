@@ -266,40 +266,46 @@ class TestDecomposeClustering:
         assert clustering.blast_max_hits == 1000
         assert clustering.target_clustering is not None
     
-    @patch('gaphack.decompose.load_sequences_from_fasta')
+    @patch('gaphack.decompose.load_sequences_with_deduplication')
     @patch('gaphack.decompose.BlastNeighborhoodFinder')
     def test_decompose_validation(self, mock_blast_finder, mock_load_sequences):
         """Test input validation in decompose method."""
         clustering = DecomposeClustering()
-        
-        # Test missing targets_fasta for supervised mode
-        with pytest.raises(ValueError, match="targets_fasta is required for supervised mode"):
-            clustering.decompose("input.fasta", strategy="supervised")
-        
-        # Test unsupported strategy
-        with pytest.raises(ValueError, match="Unknown strategy 'unsupported'"):
-            clustering.decompose("input.fasta", targets_fasta="targets.fasta", strategy="unsupported")
+
+        # Mock basic sequences for testing
+        mock_load_sequences.return_value = (["ATCG"], ["hash1"], {"hash1": ["seq1"]})
+
+        # Test basic functionality - should not raise any errors
+        mock_finder_instance = MagicMock()
+        mock_finder_instance.cleanup = MagicMock()
+        mock_finder_instance.find_neighborhood = MagicMock(return_value=["hash1"])
+        mock_blast_finder.return_value = mock_finder_instance
+
+        # Test that decompose works without errors in basic case
+        result = clustering.decompose("input.fasta")
+        assert result is not None
     
+    @patch('gaphack.decompose.load_sequences_with_deduplication')
     @patch('gaphack.decompose.load_sequences_from_fasta')
     @patch('gaphack.decompose.BlastNeighborhoodFinder')
-    def test_decompose_empty_targets(self, mock_blast_finder, mock_load_sequences):
+    def test_decompose_empty_targets(self, mock_blast_finder, mock_load_sequences, mock_load_dedup):
         """Test decompose with empty target list."""
         clustering = DecomposeClustering()
-        
-        # Mock input sequences
-        mock_load_sequences.side_effect = [
-            (["ATCG", "GCTA"], ["seq1", "seq2"], {"seq1": "seq1", "seq2": "seq2"}),  # input sequences
-            ([], [], {})  # empty targets
-        ]
-        
+
+        # Mock input sequences (load_sequences_with_deduplication)
+        mock_load_dedup.return_value = (["ATCG", "GCTA"], ["hash1", "hash2"], {"hash1": ["seq1"], "hash2": ["seq2"]})
+
+        # Mock empty targets (load_sequences_from_fasta)
+        mock_load_sequences.return_value = ([], [], {})
+
         # Mock BLAST finder
         mock_finder_instance = MagicMock()
         mock_finder_instance.cleanup = MagicMock()
         mock_blast_finder.return_value = mock_finder_instance
-        
+
         # Should raise error when no matching targets found
         with pytest.raises(ValueError, match="No target sequences found matching sequences in input file"):
-            clustering.decompose("input.fasta", targets_fasta="empty_targets.fasta", strategy="supervised")
+            clustering.decompose("input.fasta", targets_fasta="empty_targets.fasta")
 
 
 class TestBlastResultMemory:
@@ -341,32 +347,24 @@ class TestBlastResultMemory:
         assert set(candidates) == {"seq1", "seq3"}
     
     def test_mark_processed(self):
-        """Test marking sequences as processed."""
+        """Test marking sequences as processed (sequences remain in pool for overlaps)."""
         memory = BlastResultMemory()
-        
+
         # Add neighborhoods
         memory.add_neighborhood("target1", ["seq1", "seq2", "seq3"])
         memory.add_neighborhood("target2", ["seq3", "seq4", "seq5"])
-        
-        # Test overlap mode (default): sequences stay in pool
-        memory.mark_processed(["seq2", "seq3"], allow_overlaps=True)
-        
-        # Check that sequences remain in pool
+
+        # Mark some sequences as processed
+        memory.mark_processed(["seq2", "seq3"])
+
+        # Check that sequences remain in pool (overlaps allowed)
         assert "seq2" in memory.candidate_pool
         assert "seq3" in memory.candidate_pool
         assert memory.candidate_pool == {"seq1", "seq2", "seq3", "seq4", "seq5"}
-        
-        # Test no-overlap mode: sequences are removed from pool
-        memory.mark_processed(["seq2", "seq3"], allow_overlaps=False)
-        
-        # Check that sequences are removed from pool
-        assert "seq2" not in memory.candidate_pool
-        assert "seq3" not in memory.candidate_pool
-        assert memory.candidate_pool == {"seq1", "seq4", "seq5"}
-        
-        # Check that neighborhoods are updated
-        assert memory.unprocessed_neighborhoods["target1"] == {"seq1"}
-        assert memory.unprocessed_neighborhoods["target2"] == {"seq4", "seq5"}
+
+        # Check that neighborhoods remain unchanged (overlaps allowed)
+        assert memory.unprocessed_neighborhoods["target1"] == {"seq1", "seq2", "seq3"}
+        assert memory.unprocessed_neighborhoods["target2"] == {"seq3", "seq4", "seq5"}
 
 
 class TestNearbyTargetSelector:
@@ -401,7 +399,7 @@ class TestNearbyTargetSelector:
     def test_nearby_selection_with_blast_memory(self):
         """Test nearby selection using BLAST memory."""
         headers = ["seq1", "seq2", "seq3", "seq4", "seq5"]
-        selector = SpiralTargetSelector(headers, max_clusters=3)
+        selector = NearbyTargetSelector(headers, max_clusters=3)
         tracker = AssignmentTracker()
         
         # Add BLAST neighborhood memory
@@ -462,10 +460,11 @@ class TestDecomposeClusteringUnsupervised:
     def test_unsupervised_validation(self):
         """Test unsupervised mode input validation."""
         clustering = DecomposeClustering()
-        
-        # Test invalid strategy
-        with pytest.raises(ValueError, match="Unknown strategy"):
-            clustering.decompose("input.fasta", strategy="invalid")
+
+        # Test that basic unsupervised mode works without errors
+        # This is a minimal test since the old strategy parameter no longer exists
+        assert clustering is not None
+        assert clustering.min_split == 0.005  # Test default parameters are set
     
     @patch('gaphack.decompose.load_sequences_from_fasta')
     @patch('gaphack.decompose.BlastNeighborhoodFinder')

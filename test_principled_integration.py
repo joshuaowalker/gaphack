@@ -47,7 +47,6 @@ def test_conflict_resolution_integration():
             min_split=0.005,
             max_lump=0.02,  # Low threshold to encourage conflicts
             target_percentile=95,
-            allow_overlaps=True,  # Enable overlaps to create conflicts
             resolve_conflicts=True,  # Enable our new feature
             show_progress=False,
             logger=logging.getLogger(__name__)
@@ -235,7 +234,6 @@ def test_verification_integration():
             min_split=0.005,
             max_lump=0.02,
             target_percentile=95,
-            allow_overlaps=True,
             resolve_conflicts=False,  # Disabled
             show_progress=False,
             logger=logging.getLogger(__name__)
@@ -261,7 +259,6 @@ def test_verification_integration():
             min_split=0.005,
             max_lump=0.02,
             target_percentile=95,
-            allow_overlaps=True,
             resolve_conflicts=True,  # Enabled
             show_progress=False,
             logger=logging.getLogger(__name__)

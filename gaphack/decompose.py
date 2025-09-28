@@ -143,7 +143,7 @@ class TargetSelector:
         """No-op for directed mode - doesn't use BLAST memory."""
         pass
     
-    def mark_sequences_processed(self, processed_headers: List[str], allow_overlaps: bool = True) -> None:
+    def mark_sequences_processed(self, processed_headers: List[str]) -> None:
         """No-op for directed mode - doesn't need memory management."""
         pass
 
@@ -172,34 +172,11 @@ class BlastResultMemory:
                 candidates.append(seq_header)
         return candidates
     
-    def mark_processed(self, processed_headers: List[str], allow_overlaps: bool = True) -> None:
-        """Mark sequences as processed and clean up empty neighborhoods."""
-        processed_set = set(processed_headers)
-        
-        if not allow_overlaps:
-            # No overlaps mode: remove processed sequences from candidate pool
-            self.candidate_pool -= processed_set
-            
-            # Clean up neighborhoods that are now fully processed
-            targets_to_remove = []
-            for target_header, neighborhood in self.unprocessed_neighborhoods.items():
-                neighborhood -= processed_set
-                if not neighborhood:  # Neighborhood is empty
-                    targets_to_remove.append(target_header)
-            
-            # Remove empty neighborhoods
-            for target_header in targets_to_remove:
-                del self.unprocessed_neighborhoods[target_header]
-                self.fully_processed_targets.add(target_header)
-            
-            logger.debug(f"Processed {len(processed_headers)} sequences (no overlaps), "
-                        f"pool now: {len(self.candidate_pool)}, "
-                        f"active neighborhoods: {len(self.unprocessed_neighborhoods)}")
-        else:
-            # Overlap mode: keep sequences in candidate pool for future clusters
-            logger.debug(f"Processed {len(processed_headers)} sequences (overlaps allowed), "
-                        f"pool unchanged: {len(self.candidate_pool)}, "
-                        f"active neighborhoods: {len(self.unprocessed_neighborhoods)}")
+    def mark_processed(self, processed_headers: List[str]) -> None:
+        """Mark sequences as processed. Sequences remain in candidate pool for future clusters."""
+        logger.debug(f"Processed {len(processed_headers)} sequences, "
+                    f"pool unchanged: {len(self.candidate_pool)}, "
+                    f"active neighborhoods: {len(self.unprocessed_neighborhoods)}")
 
 
 class NearbyTargetSelector:
@@ -272,9 +249,9 @@ class NearbyTargetSelector:
         """Store BLAST neighborhood before pruning for future nearby selection."""
         self.blast_memory.add_neighborhood(target_header, neighborhood_headers)
     
-    def mark_sequences_processed(self, processed_headers: List[str], allow_overlaps: bool = True) -> None:
+    def mark_sequences_processed(self, processed_headers: List[str]) -> None:
         """Update memory after clustering iteration."""
-        self.blast_memory.mark_processed(processed_headers, allow_overlaps)
+        self.blast_memory.mark_processed(processed_headers)
 
 
 class DecomposeClustering:
@@ -288,7 +265,6 @@ class DecomposeClustering:
                  blast_threads: Optional[int] = None,
                  blast_evalue: float = 1e-5,
                  min_identity: Optional[float] = None,
-                 allow_overlaps: bool = True,
                  resolve_conflicts: bool = False,
                  refine_close_clusters: bool = False,
                  close_cluster_threshold: float = 0.0,
@@ -304,7 +280,6 @@ class DecomposeClustering:
             blast_threads: BLAST thread count (auto if None)
             blast_evalue: BLAST e-value threshold
             min_identity: BLAST identity threshold (auto if None)
-            allow_overlaps: Allow sequences to appear in multiple clusters (default: True)
             resolve_conflicts: Enable cluster refinement for conflict resolution with minimal scope (default: False)
             refine_close_clusters: Enable cluster refinement for close cluster refinement (default: False)
             close_cluster_threshold: Distance threshold for close cluster refinement and scope expansion (default: 0.0)
@@ -318,7 +293,6 @@ class DecomposeClustering:
         self.blast_threads = blast_threads
         self.blast_evalue = blast_evalue
         self.min_identity = min_identity
-        self.allow_overlaps = allow_overlaps
         self.resolve_conflicts = resolve_conflicts
         self.refine_close_clusters = refine_close_clusters
         self.close_cluster_threshold = close_cluster_threshold
@@ -368,9 +342,8 @@ class DecomposeClustering:
         # For backward compatibility, create headers list using hash_ids
         headers = hash_ids
         
-        # Log overlap policy
-        overlap_mode = "allowed" if self.allow_overlaps else "disabled"
-        self.logger.info(f"Sequence overlaps: {overlap_mode}")
+        # Sequence overlaps are always allowed
+        self.logger.info("Sequence overlaps: allowed")
         
         # Initialize BLAST neighborhood finder
         blast_finder = BlastNeighborhoodFinder(sequences, headers)
@@ -484,22 +457,9 @@ class DecomposeClustering:
                 if target_headers_for_iteration:
                     target_selector.add_blast_neighborhood(target_headers_for_iteration[0], neighborhood_headers)
                 
-                # Filter neighborhood based on overlap policy
-                if self.allow_overlaps:
-                    # Allow overlaps: use all sequences in neighborhood
-                    sequences_for_clustering = neighborhood_headers
-                    self.logger.debug(f"Using all {len(sequences_for_clustering)} sequences in neighborhood (overlaps allowed)")
-                else:
-                    # No overlaps: filter to unassigned sequences only  
-                    sequences_for_clustering = [h for h in neighborhood_headers 
-                                              if not assignment_tracker.is_assigned(h)]
-                    
-                    if len(sequences_for_clustering) < len(target_headers_for_iteration):
-                        self.logger.debug(f"Some targets already assigned - using {len(sequences_for_clustering)} unassigned sequences")
-                    
-                    if not sequences_for_clustering:
-                        self.logger.debug(f"No unassigned sequences in neighborhood - skipping iteration")
-                        continue
+                # Use all sequences in neighborhood (overlaps allowed)
+                sequences_for_clustering = neighborhood_headers
+                self.logger.debug(f"Using all {len(sequences_for_clustering)} sequences in neighborhood")
                 
                 # Get target indices in the neighborhood subset
                 neighborhood_to_full_idx = {h: headers.index(h) for h in sequences_for_clustering}
@@ -571,7 +531,7 @@ class DecomposeClustering:
                 assignment_tracker.assign_sequences(target_cluster_headers, cluster_id, iteration)
                 
                 # Update BLAST memory for nearby target selection
-                target_selector.mark_sequences_processed(target_cluster_headers, self.allow_overlaps)
+                target_selector.mark_sequences_processed(target_cluster_headers)
                 
                 # Record iteration summary
                 iteration_summary = {
@@ -608,15 +568,10 @@ class DecomposeClustering:
                     progress_increment = 1
                     postfix = f"med_clust={median_cluster_size}, med_gap={median_gap_size:.3f}, assigned={assigned_total}"
                 elif progress_mode in ["sequences", "sequences_exhaustive"]:
-                    # Sequence count mode: track unique sequences assigned
-                    if self.allow_overlaps:
-                        # In overlap mode, count unique sequences assigned (deduplicate)
-                        unique_assigned_count = len(assignment_tracker.assigned_sequences)
-                        progress_increment = unique_assigned_count - pbar.n  # Only increment by new unique assignments
-                    else:
-                        # In no-overlap mode, all assignments are unique
-                        progress_increment = len(target_cluster_headers)
-                    
+                    # Sequence count mode: count unique sequences assigned (deduplicate)
+                    unique_assigned_count = len(assignment_tracker.assigned_sequences)
+                    progress_increment = unique_assigned_count - pbar.n  # Only increment by new unique assignments
+
                     postfix = f"clusters={clusters_created}, med_clust={median_cluster_size}, med_gap={median_gap_size:.3f}"
                 else:
                     # Fallback

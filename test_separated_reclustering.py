@@ -44,7 +44,6 @@ def test_separated_functionality():
             min_split=0.005,
             max_lump=0.02,
             target_percentile=95,
-            allow_overlaps=True,
             resolve_conflicts=True,   # Enable conflict resolution
             refine_close_clusters=False,  # Disable close cluster refinement
             close_cluster_threshold=0.0,  # No expansion
@@ -68,7 +67,6 @@ def test_separated_functionality():
             min_split=0.005,
             max_lump=0.02,
             target_percentile=95,
-            allow_overlaps=True,
             resolve_conflicts=False,  # Disable conflict resolution
             refine_close_clusters=True,  # Enable close cluster refinement
             close_cluster_threshold=0.03,  # 3% distance threshold for expansion
@@ -92,7 +90,6 @@ def test_separated_functionality():
             min_split=0.005,
             max_lump=0.02,
             target_percentile=95,
-            allow_overlaps=True,
             resolve_conflicts=True,   # Enable conflict resolution
             refine_close_clusters=True,  # Enable close cluster refinement
             close_cluster_threshold=0.025,  # 2.5% distance threshold

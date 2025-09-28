@@ -331,8 +331,6 @@ Examples:
   # Undirected mode until input exhausted (cluster all sequences)
   gaphack-decompose input.fasta -o results
 
-  # Disable overlaps (each sequence in at most one cluster)
-  gaphack-decompose input.fasta --no-overlaps -o results
 
   # Custom BLAST parameters
   gaphack-decompose input.fasta --targets targets.fasta \\
@@ -353,8 +351,6 @@ Examples:
                        help='Maximum clusters to create (undirected mode, optional)')
     parser.add_argument('--max-sequences', type=int,
                        help='Maximum sequences to assign (undirected mode, optional)')
-    parser.add_argument('--no-overlaps', action='store_true',
-                       help='Disable sequence overlaps - each sequence assigned to at most one cluster')
     
     # BLAST parameters
     parser.add_argument('--blast-max-hits', type=int, default=1000,
@@ -422,7 +418,6 @@ Examples:
         blast_threads=args.blast_threads,
         blast_evalue=args.blast_evalue,
         min_identity=args.min_identity,
-        allow_overlaps=not args.no_overlaps,
         resolve_conflicts=args.resolve_conflicts,
         refine_close_clusters=args.refine_close_clusters > 0.0,
         close_cluster_threshold=args.refine_close_clusters,
