@@ -184,40 +184,122 @@ def save_decompose_results(results: DecomposeResults, output_base: str,
             for seq_id, cluster_ids in results.conflicts.items():
                 f.write(f"{seq_id}\t{','.join(cluster_ids)}\n")
     
-    # Save summary report
+    # Save enhanced summary report
     report_file = f"{output_base}.decompose_report.txt"
     with open(report_file, 'w') as f:
         f.write("Gaphack-Decompose Clustering Report\n")
         f.write("=" * 40 + "\n\n")
-        
+
+        # Header with run metadata
+        if hasattr(results, 'start_time') and results.start_time:
+            f.write(f"Run timestamp: {results.start_time}\n")
+        if hasattr(results, 'command_line') and results.command_line:
+            f.write(f"Command line: {results.command_line}\n")
+        f.write("\n")
+
+        # Basic summary statistics
+        f.write("Summary Statistics:\n")
+        f.write("-" * 20 + "\n")
         f.write(f"Total iterations: {results.total_iterations}\n")
         f.write(f"Total sequences processed: {results.total_sequences_processed}\n")
         f.write(f"Coverage percentage: {results.coverage_percentage:.1f}%\n")
         f.write(f"Clusters created: {len(results.clusters)}\n")
         f.write(f"Unassigned sequences: {len(results.unassigned)}\n")
         f.write(f"Conflicts detected: {len(results.conflicts)}\n\n")
-        
-        f.write("Cluster Summary:\n")
-        f.write("-" * 20 + "\n")
-        for cluster_id, cluster_headers in results.clusters.items():
-            f.write(f"{cluster_id}: {len(cluster_headers)} sequences\n")
-        
+
+        # Verification results
+        if hasattr(results, 'verification_results') and results.verification_results:
+            f.write("Verification Summary:\n")
+            f.write("-" * 20 + "\n")
+            for stage, verification in results.verification_results.items():
+                f.write(f"{stage.title()}: {verification['conflict_count']} conflicts, "
+                       f"MECE: {verification['mece_property']}\n")
+            f.write("\n")
+
+        # Iteration summary with active cluster IDs (moved after verification)
         if results.iteration_summaries:
-            f.write("\nIteration Summary:\n")
+            f.write("Iteration Summary:\n")
             f.write("-" * 20 + "\n")
             for summary in results.iteration_summaries:
+                # Show the cluster name created during this iteration
+                cluster_name = summary.get('cluster_id', 'unknown')
+
                 f.write(f"Iteration {summary['iteration']}: "
-                       f"targets={summary['target_headers']}, "
-                       f"neighborhood_size={summary['neighborhood_size']}, "
-                       f"pruned_size={summary.get('pruned_size', 'N/A')}, "
                        f"cluster_size={summary['cluster_size']}, "
-                       f"gap_size={summary['gap_size']:.4f}\n")
-        
+                       f"gap_size={summary['gap_size']:.4f}, "
+                       f"cluster_name={cluster_name}\n")
+            f.write("\n")
+
+        # Processing stages (conflict resolution and close cluster refinement)
+        if hasattr(results, 'processing_stages') and results.processing_stages:
+            for stage_info in results.processing_stages:
+                f.write(f"{stage_info.stage_name}:\n")
+                f.write("-" * (len(stage_info.stage_name) + 1) + "\n")
+
+                # Stage summary
+                stats = stage_info.summary_stats
+                before_count = stats.get('clusters_before_count', 0)
+                after_count = stats.get('clusters_after_count', 0)
+                change = after_count - before_count
+
+                f.write(f"Clusters before: {before_count}\n")
+                f.write(f"Clusters after: {after_count}\n")
+                f.write(f"Net change: {change:+d}\n")
+
+                if 'conflicts_count' in stats:  # Conflict resolution
+                    f.write(f"Conflicts resolved: {stats['conflicts_count']}\n")
+                    f.write(f"Components processed: {stats.get('components_processed_count', 0)}\n")
+                    f.write(f"Remaining conflicts: {stats.get('remaining_conflicts_count', 0)}\n")
+
+                if 'close_pairs_found' in stats:  # Close cluster refinement
+                    f.write(f"Close pairs found: {stats['close_pairs_found']}\n")
+                    f.write(f"Close threshold: {stats.get('close_threshold', 'N/A')}\n")
+                    f.write(f"Components processed: {stats.get('components_processed_count', 0)}\n")
+
+                # Component-by-component transformations will be shown in Component Details section below
+
+                # Component details
+                if stage_info.components_processed:
+                    f.write(f"\nComponent Details:\n")
+                    for comp in stage_info.components_processed:
+                        status = "✓ processed" if comp.get('processed', False) else "✗ skipped"
+                        f.write(f"  Component {comp['component_index']}: "
+                               f"{comp['clusters_before_count']} → {comp['clusters_after_count']} clusters "
+                               f"({status})\n")
+                        if 'skipped_reason' in comp:
+                            f.write(f"    Reason: {comp['skipped_reason']}\n")
+                        # Show source → destination cluster mapping
+                        if 'clusters_before' in comp:
+                            f.write(f"    Source: {', '.join(sorted(comp['clusters_before']))}\n")
+                        if 'clusters_after' in comp and comp.get('processed', False):
+                            f.write(f"    Result: {', '.join(sorted(comp['clusters_after']))}\n")
+                f.write("\n")
+
+        # Active to final cluster mapping
+        if hasattr(results, 'active_to_final_mapping') and results.active_to_final_mapping:
+            f.write("Active to Final Cluster Mapping:\n")
+            f.write("-" * 35 + "\n")
+            # Group by final cluster for better readability
+            final_to_active = {}
+            for active_id, final_id in results.active_to_final_mapping.items():
+                if final_id not in final_to_active:
+                    final_to_active[final_id] = []
+                final_to_active[final_id].append(active_id)
+
+            for final_id in sorted(final_to_active.keys()):
+                active_list = final_to_active[final_id]
+                f.write(f"{final_id}: {', '.join(sorted(active_list))}\n")
+            f.write("\n")
+
+
+
+        # Conflicts (if any)
         if results.conflicts:
-            f.write("\nConflicts:\n")
-            f.write("-" * 20 + "\n")
+            f.write("Conflicts:\n")
+            f.write("-" * 10 + "\n")
             for seq_id, cluster_ids in results.conflicts.items():
                 f.write(f"{seq_id}: assigned to {', '.join(cluster_ids)}\n")
+            f.write("\n")
     
     print(f"Results saved:")
     if sequences:
@@ -357,6 +439,12 @@ Examples:
     )
     
     try:
+        # Capture command line and start time for reporting
+        import sys
+        import datetime
+        command_line = ' '.join(sys.argv)
+        start_time = datetime.datetime.now().isoformat()
+
         # Run decomposition clustering
         results = decomposer.decompose(
             input_fasta=args.input_fasta,
@@ -365,6 +453,10 @@ Examples:
             max_clusters=args.max_clusters,
             max_sequences=args.max_sequences
         )
+
+        # Add metadata to results for reporting
+        results.command_line = command_line
+        results.start_time = start_time
         
         # Save results
         save_decompose_results(results, args.output, args.input_fasta)

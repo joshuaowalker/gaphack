@@ -171,7 +171,8 @@ def apply_classic_gaphack_to_scope_with_metadata(scope_sequences: List[str],
                                                global_distance_provider: DistanceProvider,
                                                min_split: float = 0.005,
                                                max_lump: float = 0.02,
-                                               target_percentile: int = 95) -> Tuple[Dict[str, List[str]], Dict]:
+                                               target_percentile: int = 95,
+                                               cluster_id_generator=None) -> Tuple[Dict[str, List[str]], Dict]:
     """Apply classic gapHACk clustering to a scope of sequences, returning clusters and metadata.
 
     Args:
@@ -210,19 +211,26 @@ def apply_classic_gaphack_to_scope_with_metadata(scope_sequences: List[str],
     # Convert result to cluster dictionary format
     clusters = {}
 
+    # Import here to avoid circular imports
+    from .decompose import ActiveClusterIDGenerator
+
+    # Use provided generator or create a temporary one
+    if cluster_id_generator is None:
+        cluster_id_generator = ActiveClusterIDGenerator(prefix="classic")
+
     # Process multi-member clusters (list of lists of indices)
     for cluster_idx, cluster_indices_list in enumerate(final_clusters):
         cluster_headers = []
         for seq_idx in cluster_indices_list:
             cluster_headers.append(scope_headers[seq_idx])
 
-        cluster_id = f"classic_{hash(tuple(sorted(cluster_headers)))}"
+        cluster_id = cluster_id_generator.next_id()
         clusters[cluster_id] = cluster_headers
 
     # Process singletons (list of indices)
     for singleton_idx in singletons:
         cluster_headers = [scope_headers[singleton_idx]]
-        cluster_id = f"classic_{hash(tuple(cluster_headers))}"
+        cluster_id = cluster_id_generator.next_id()
         clusters[cluster_id] = cluster_headers
 
     # Extract gap size from metadata
@@ -239,7 +247,8 @@ def apply_classic_gaphack_to_scope(scope_sequences: List[str],
                                  global_distance_provider: DistanceProvider,
                                  min_split: float = 0.005,
                                  max_lump: float = 0.02,
-                                 target_percentile: int = 95) -> Dict[str, List[str]]:
+                                 target_percentile: int = 95,
+                                 cluster_id_generator=None) -> Dict[str, List[str]]:
     """Apply classic gapHACk clustering to a scope of sequences.
 
     Args:
@@ -258,7 +267,8 @@ def apply_classic_gaphack_to_scope(scope_sequences: List[str],
     # Use the metadata version and just return the clusters
     clusters, _ = apply_classic_gaphack_to_scope_with_metadata(
         scope_sequences, scope_headers, global_sequences, global_headers,
-        global_distance_provider, min_split, max_lump, target_percentile
+        global_distance_provider, min_split, max_lump, target_percentile,
+        cluster_id_generator
     )
     return clusters
 
@@ -271,7 +281,9 @@ def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
                                      config: Optional[ReclusteringConfig] = None,
                                      min_split: float = 0.005,
                                      max_lump: float = 0.02,
-                                     target_percentile: int = 95) -> Dict[str, List[str]]:
+                                     target_percentile: int = 95,
+                                     cluster_id_generator=None,
+                                     enable_tracking: bool = False):
     """Resolve assignment conflicts using classic gapHACk reclustering with minimal scope.
 
     Uses only conflicted clusters (no expansion) for fastest, most predictable MECE fixes.
@@ -289,14 +301,37 @@ def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
         target_percentile: Percentile for gap optimization
 
     Returns:
-        Updated cluster dictionary with conflicts resolved using minimal scope
+        If enable_tracking=False: Updated cluster dictionary with conflicts resolved
+        If enable_tracking=True: Tuple of (updated_clusters, tracking_info)
     """
     if config is None:
         config = ReclusteringConfig()
 
+    # Initialize tracking if enabled
+    tracking_info = None
+    if enable_tracking:
+        from .decompose import ProcessingStageInfo
+        tracking_info = ProcessingStageInfo(
+            stage_name="Conflict Resolution",
+            clusters_before=all_clusters.copy(),
+            summary_stats={
+                'conflicts_count': len(conflicts),
+                'conflicted_sequences': list(conflicts.keys()),
+                'clusters_before_count': len(all_clusters)
+            }
+        )
+
     if not conflicts:
         logger.info("No conflicts to resolve")
-        return all_clusters.copy()
+        result = all_clusters.copy()
+        if enable_tracking:
+            tracking_info.clusters_after = result
+            tracking_info.summary_stats.update({
+                'clusters_after_count': len(result),
+                'components_processed_count': 0
+            })
+            return result, tracking_info
+        return result
 
     logger.info(f"Resolving conflicts for {len(conflicts)} sequences across clusters")
 
@@ -318,6 +353,15 @@ def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
 
         scope_headers = list(scope_sequences)  # Headers same as sequences for decompose
 
+        # Track component before processing
+        component_info = {
+            'component_index': component_idx,
+            'clusters_before': list(component_clusters),
+            'clusters_before_count': len(component_clusters),
+            'sequences_count': len(scope_sequences),
+            'processed': False
+        }
+
         # Step 3: Apply classic gapHACk to minimal conflict scope (no expansion)
         if len(scope_sequences) <= config.max_classic_gaphack_size:
             logger.debug(f"Applying classic gapHACk to minimal conflict scope of {len(scope_sequences)} sequences")
@@ -325,7 +369,8 @@ def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
             classic_result = apply_classic_gaphack_to_scope(
                 scope_headers, scope_headers,  # Use minimal scope directly
                 sequences, headers, distance_provider,
-                min_split, max_lump, target_percentile
+                min_split, max_lump, target_percentile,
+                cluster_id_generator
             )
 
             # Step 4: Replace original conflicted clusters with classic result
@@ -337,6 +382,13 @@ def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
             for cluster_id, cluster_headers in classic_result.items():
                 updated_clusters[cluster_id] = cluster_headers
 
+            # Update component tracking with destination clusters
+            component_info.update({
+                'clusters_after': list(classic_result.keys()),
+                'clusters_after_count': len(classic_result),
+                'processed': True
+            })
+
             logger.info(f"Resolved conflict component: {len(component_clusters)} clusters → "
                        f"{len(classic_result)} clusters")
 
@@ -344,6 +396,16 @@ def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
             # Fallback: skip oversized components with warning
             logger.warning(f"Skipping conflict component with {len(scope_sequences)} sequences "
                           f"(exceeds limit of {config.max_classic_gaphack_size})")
+            component_info.update({
+                'clusters_after': list(component_clusters),  # Unchanged
+                'clusters_after_count': len(component_clusters),
+                'processed': False,
+                'skipped_reason': 'oversized'
+            })
+
+        # Add component info to tracking
+        if enable_tracking:
+            tracking_info.components_processed.append(component_info)
 
     # Verify conflicts are resolved
     remaining_conflicts = 0
@@ -356,6 +418,16 @@ def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
         logger.warning(f"{remaining_conflicts} conflicts remain unresolved")
     else:
         logger.info("All conflicts successfully resolved")
+
+    # Finalize tracking information
+    if enable_tracking:
+        tracking_info.clusters_after = updated_clusters
+        tracking_info.summary_stats.update({
+            'clusters_after_count': len(updated_clusters),
+            'components_processed_count': len(conflict_components),
+            'remaining_conflicts_count': remaining_conflicts
+        })
+        return updated_clusters, tracking_info
 
     return updated_clusters
 
@@ -495,7 +567,8 @@ def expand_scope_with_iterative_context(core_cluster_ids: List[str],
                                        min_split: float,
                                        target_percentile: int,
                                        target_gap: float = 0.001,
-                                       max_iterations: int = 5) -> Tuple[ExpandedScope, Dict]:
+                                       max_iterations: int = 5,
+                                       cluster_id_generator=None) -> Tuple[ExpandedScope, Dict]:
     """Iteratively expand context until positive gap is achieved.
 
     Args:
@@ -545,7 +618,8 @@ def expand_scope_with_iterative_context(core_cluster_ids: List[str],
             classic_clusters, classic_metadata = apply_classic_gaphack_to_scope_with_metadata(
                 current_scope.sequences, current_scope.headers,
                 sequences, headers, distance_provider,
-                min_split, max_lump, target_percentile
+                min_split, max_lump, target_percentile,
+                cluster_id_generator=cluster_id_generator  # Use shared generator
             )
 
             # Extract gap from the metadata
@@ -715,7 +789,9 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
                          min_split: float = 0.005,
                          max_lump: float = 0.02,
                          target_percentile: int = 95,
-                         close_threshold: Optional[float] = None) -> Dict[str, List[str]]:
+                         close_threshold: Optional[float] = None,
+                         cluster_id_generator=None,
+                         enable_tracking: bool = False):
     """Refine clusters that are closer than expected barcode gaps.
 
     Args:
@@ -731,7 +807,8 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
         close_threshold: Distance threshold for "close" clusters (default: max_lump)
 
     Returns:
-        Updated cluster dictionary with close clusters refined
+        If enable_tracking=False: Updated cluster dictionary with close clusters refined
+        If enable_tracking=True: Tuple of (updated_clusters, tracking_info)
     """
     if config is None:
         config = ReclusteringConfig()
@@ -739,9 +816,31 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
     if close_threshold is None:
         close_threshold = max_lump
 
+    # Initialize tracking if enabled
+    tracking_info = None
+    if enable_tracking:
+        from .decompose import ProcessingStageInfo
+        tracking_info = ProcessingStageInfo(
+            stage_name="Close Cluster Refinement",
+            clusters_before=all_clusters.copy(),
+            summary_stats={
+                'close_threshold': close_threshold,
+                'clusters_before_count': len(all_clusters)
+            }
+        )
+
     if len(all_clusters) < 2:
         logger.info("Insufficient clusters for close cluster refinement")
-        return all_clusters.copy()
+        result = all_clusters.copy()
+        if enable_tracking:
+            tracking_info.clusters_after = result
+            tracking_info.summary_stats.update({
+                'clusters_after_count': len(result),
+                'components_processed_count': 0,
+                'close_pairs_found': 0
+            })
+            return result, tracking_info
+        return result
 
     logger.info(f"Refining close clusters with threshold {close_threshold:.4f}")
 
@@ -750,9 +849,23 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
 
     if not close_pairs:
         logger.info("No close cluster pairs found")
-        return all_clusters.copy()
+        result = all_clusters.copy()
+        if enable_tracking:
+            tracking_info.clusters_after = result
+            tracking_info.summary_stats.update({
+                'clusters_after_count': len(result),
+                'components_processed_count': 0,
+                'close_pairs_found': 0
+            })
+            return result, tracking_info
+        return result
 
     logger.debug(f"Found {len(close_pairs)} close cluster pairs")
+
+    # Update tracking with close pairs info
+    if enable_tracking:
+        tracking_info.summary_stats['close_pairs_found'] = len(close_pairs)
+        tracking_info.summary_stats['close_pairs_list'] = [(p[0], p[1], p[2]) for p in close_pairs]
 
     # Step 2: Group close pairs into connected components
     close_components = find_connected_close_components(close_pairs)
@@ -761,6 +874,15 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
     # Step 3: Track processed components to avoid infinite loops
     processed_components = set()
     updated_clusters = all_clusters.copy()
+
+    # Track all cluster changes for accurate net change calculation
+    clusters_deleted_during_processing = set()
+    clusters_created_during_processing = set()
+
+    # Create shared cluster ID generator for all components
+    if cluster_id_generator is None:
+        from .decompose import ActiveClusterIDGenerator
+        cluster_id_generator = ActiveClusterIDGenerator(prefix="classic")
 
     for component_idx, component_clusters in enumerate(close_components):
         component_signature = frozenset(component_clusters)
@@ -772,14 +894,33 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
         logger.debug(f"Processing close cluster component {component_idx+1}/{len(close_components)} "
                     f"with {len(component_clusters)} clusters")
 
+        # Track component before processing - only count clusters that actually exist
+        existing_component_clusters = [cid for cid in component_clusters if cid in updated_clusters]
+        component_info = {
+            'component_index': component_idx,
+            'clusters_before': existing_component_clusters,
+            'clusters_before_count': len(existing_component_clusters),
+            'processed': False
+        }
+
         # Step 4: Extract and expand scope
         scope_sequences = set()
-        for cluster_id in component_clusters:
+        for cluster_id in existing_component_clusters:
             if cluster_id in updated_clusters:
                 scope_sequences.update(updated_clusters[cluster_id])
 
+        component_info['sequences_count'] = len(scope_sequences)
+
         if not scope_sequences:
-            logger.warning(f"No sequences found for component {component_idx+1}")
+            logger.warning(f"No sequences found for component {component_idx+1} (all existing clusters are empty)")
+            component_info.update({
+                'processed': False,
+                'skipped_reason': 'no_sequences',
+                'clusters_after': existing_component_clusters,  # They remain unchanged
+                'clusters_after_count': len(existing_component_clusters)
+            })
+            if enable_tracking:
+                tracking_info.components_processed.append(component_info)
             processed_components.add(component_signature)
             continue
 
@@ -789,10 +930,10 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
             expansion_threshold = close_threshold * 1.2  # Slightly broader than close threshold
 
         # Use iterative expansion to achieve positive gap
-        logger.debug(f"Applying iterative context expansion to component with {len(component_clusters)} clusters")
+        logger.debug(f"Applying iterative context expansion to component with {len(existing_component_clusters)} clusters")
 
         expanded_scope, classic_result = expand_scope_with_iterative_context(
-            component_clusters,
+            existing_component_clusters,
             updated_clusters,
             sequences,
             headers,
@@ -804,7 +945,8 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
             min_split,
             target_percentile,
             target_gap=0.001,  # Target positive gap
-            max_iterations=5
+            max_iterations=5,
+            cluster_id_generator=cluster_id_generator
         )
 
         # Step 6: Check if we got a valid result
@@ -818,20 +960,53 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
                 # Step 8: Replace original clusters with classic result
                 for cluster_id in expanded_scope.cluster_ids:
                     if cluster_id in updated_clusters:
+                        clusters_deleted_during_processing.add(cluster_id)
                         del updated_clusters[cluster_id]
 
                 # Add new clusters from classic result
                 for cluster_id, cluster_headers in classic_result.items():
+                    clusters_created_during_processing.add(cluster_id)
                     updated_clusters[cluster_id] = cluster_headers
+
+                # Update component tracking for successful refinement
+                component_info.update({
+                    'clusters_before': list(expanded_scope.cluster_ids),  # Use expanded scope clusters
+                    'clusters_before_count': len(expanded_scope.cluster_ids),  # Use expanded scope as "before"
+                    'clusters_after': list(classic_result.keys()),
+                    'clusters_after_count': len(classic_result),
+                    'processed': True,
+                    'significantly_different': True,
+                    'expanded_scope_size': len(expanded_scope.cluster_ids)
+                })
 
                 logger.info(f"Refined close cluster component: {len(expanded_scope.cluster_ids)} clusters → "
                            f"{len(classic_result)} clusters")
             else:
+                # Update component tracking for no significant change
+                component_info.update({
+                    'clusters_before': list(expanded_scope.cluster_ids),  # Use expanded scope clusters
+                    'clusters_before_count': len(expanded_scope.cluster_ids),  # Use expanded scope as "before"
+                    'clusters_after': list(expanded_scope.cluster_ids),  # Keep expanded scope clusters
+                    'clusters_after_count': len(expanded_scope.cluster_ids),  # No net change
+                    'processed': True,
+                    'significantly_different': False,
+                    'expanded_scope_size': len(expanded_scope.cluster_ids)
+                })
                 logger.debug(f"Classic gapHACk result not significantly different, keeping original clusters")
 
         else:
             # Fallback: iterative expansion failed
+            component_info.update({
+                'clusters_after': list(component_clusters),
+                'clusters_after_count': len(component_clusters),
+                'processed': False,
+                'skipped_reason': 'expansion_failed'
+            })
             logger.warning(f"Iterative context expansion failed for component with {len(component_clusters)} clusters")
+
+        # Add component info to tracking
+        if enable_tracking:
+            tracking_info.components_processed.append(component_info)
 
         # Mark as processed regardless of outcome
         processed_components.add(component_signature)
@@ -841,6 +1016,19 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
     final_count = len(updated_clusters)
     logger.info(f"Close cluster refinement: {original_count} clusters → {final_count} clusters "
                f"({final_count - original_count:+d})")
+
+    # Finalize tracking information
+    if enable_tracking:
+        tracking_info.clusters_after = updated_clusters
+        tracking_info.summary_stats.update({
+            'clusters_after_count': final_count,
+            'components_processed_count': len(close_components),
+            'cluster_count_change': final_count - original_count,
+            'total_clusters_deleted': len(clusters_deleted_during_processing),
+            'total_clusters_created': len(clusters_created_during_processing),
+            'net_cluster_change_from_tracking': len(clusters_created_during_processing) - len(clusters_deleted_during_processing)
+        })
+        return updated_clusters, tracking_info
 
     return updated_clusters
 

@@ -14,6 +14,34 @@ from .lazy_distances import DistanceProviderFactory, SubsetDistanceProvider, Dis
 logger = logging.getLogger(__name__)
 
 
+class ActiveClusterIDGenerator:
+    """Generates sequential active cluster IDs for internal processing."""
+
+    def __init__(self, prefix: str = "active"):
+        self.prefix = prefix
+        self.counter = 1
+
+    def next_id(self) -> str:
+        """Generate next sequential active cluster ID."""
+        cluster_id = f"{self.prefix}_{self.counter:04d}"
+        self.counter += 1
+        return cluster_id
+
+    def get_current_count(self) -> int:
+        """Get current counter value."""
+        return self.counter - 1
+
+
+@dataclass
+class ProcessingStageInfo:
+    """Information about a processing stage (conflict resolution or close cluster refinement)."""
+    stage_name: str
+    clusters_before: Dict[str, List[str]] = field(default_factory=dict)  # active_id -> sequence headers
+    clusters_after: Dict[str, List[str]] = field(default_factory=dict)   # active_id -> sequence headers
+    components_processed: List[Dict] = field(default_factory=list)       # details about each component processed
+    summary_stats: Dict = field(default_factory=dict)                    # before/after counts, etc.
+
+
 @dataclass
 class DecomposeResults:
     """Results from decomposition clustering."""
@@ -26,6 +54,12 @@ class DecomposeResults:
     total_sequences_processed: int = 0
     coverage_percentage: float = 0.0
     verification_results: Dict[str, Dict] = field(default_factory=dict)  # comprehensive MECE verification results
+
+    # Enhanced tracking for debugging
+    processing_stages: List[ProcessingStageInfo] = field(default_factory=list)  # conflict resolution, refinement stages
+    active_to_final_mapping: Dict[str, str] = field(default_factory=dict)       # active_id -> final_id
+    command_line: str = ""                                                        # command used to run decompose
+    start_time: str = ""                                                         # ISO timestamp of run start
 
 
 class AssignmentTracker:
@@ -542,7 +576,7 @@ class DecomposeClustering:
                 remaining_headers = [pruned_headers[i] for i in remaining_indices]
                 
                 # Generate unique cluster ID
-                cluster_id = f"cluster_{iteration:03d}"
+                cluster_id = f"initial_{iteration:03d}"
                 
                 # Assign sequences to cluster
                 assignment_tracker.assign_sequences(target_cluster_headers, cluster_id, iteration)
@@ -914,6 +948,18 @@ class DecomposeClustering:
         expanded_results.coverage_percentage = results.coverage_percentage
         expanded_results.iteration_summaries = results.iteration_summaries
 
+        # Copy enhanced tracking fields
+        if hasattr(results, 'processing_stages'):
+            expanded_results.processing_stages = results.processing_stages
+        if hasattr(results, 'active_to_final_mapping'):
+            expanded_results.active_to_final_mapping = results.active_to_final_mapping
+        if hasattr(results, 'command_line'):
+            expanded_results.command_line = results.command_line
+        if hasattr(results, 'start_time'):
+            expanded_results.start_time = results.start_time
+        if hasattr(results, 'verification_results'):
+            expanded_results.verification_results = results.verification_results
+
         # Expand clusters
         for cluster_id, hash_ids in results.clusters.items():
             expanded_headers = []
@@ -995,7 +1041,8 @@ class DecomposeClustering:
         )
 
         # Apply conflict resolution (no proximity graph needed - uses minimal scope only)
-        resolved_clusters = resolve_conflicts_via_reclustering(
+        conflict_id_generator = ActiveClusterIDGenerator(prefix="deconflicted")
+        resolved_clusters, conflict_tracking = resolve_conflicts_via_reclustering(
             conflicts=results.conflicts,
             all_clusters=results.all_clusters,
             sequences=sequences,
@@ -1004,7 +1051,9 @@ class DecomposeClustering:
             config=config,
             min_split=self.min_split,
             max_lump=self.max_lump,
-            target_percentile=self.target_percentile
+            target_percentile=self.target_percentile,
+            cluster_id_generator=conflict_id_generator,
+            enable_tracking=True
         )
 
         # Rebuild results with resolved clusters
@@ -1015,11 +1064,27 @@ class DecomposeClustering:
         new_results.coverage_percentage = results.coverage_percentage
 
         # Renumber clusters sequentially for consistent naming
-        renumbered_clusters = self._renumber_clusters_sequentially(resolved_clusters)
+        renumbered_clusters, mapping = self._renumber_clusters_sequentially(resolved_clusters)
 
         # Set resolved clusters (should be MECE now)
         new_results.all_clusters = renumbered_clusters
         new_results.clusters = renumbered_clusters  # No conflicts after resolution
+
+        # Initialize active to final mapping (will be set properly at final renumbering)
+        new_results.active_to_final_mapping = {}
+
+        # Add conflict resolution tracking info
+        if hasattr(results, 'processing_stages'):
+            new_results.processing_stages = results.processing_stages.copy()
+        else:
+            new_results.processing_stages = []
+        new_results.processing_stages.append(conflict_tracking)
+
+        # Preserve command line and start time
+        if hasattr(results, 'command_line'):
+            new_results.command_line = results.command_line
+        if hasattr(results, 'start_time'):
+            new_results.start_time = results.start_time
 
         # Clear conflicts since they've been resolved
         new_results.conflicts = {}
@@ -1062,7 +1127,8 @@ class DecomposeClustering:
         )
 
         # Apply close cluster refinement
-        refined_clusters = refine_close_clusters(
+        refinement_id_generator = ActiveClusterIDGenerator(prefix="refined")
+        refined_clusters, refinement_tracking = refine_close_clusters(
             all_clusters=results.all_clusters,
             sequences=sequences,
             headers=headers,
@@ -1072,7 +1138,9 @@ class DecomposeClustering:
             min_split=self.min_split,
             max_lump=self.max_lump,
             target_percentile=self.target_percentile,
-            close_threshold=self.max_lump  # Use max_lump as close threshold
+            close_threshold=self.max_lump,  # Use max_lump as close threshold
+            cluster_id_generator=refinement_id_generator,
+            enable_tracking=True
         )
 
         # Rebuild results with refined clusters
@@ -1083,11 +1151,28 @@ class DecomposeClustering:
         new_results.coverage_percentage = results.coverage_percentage
 
         # Apply sequential renumbering for consistency
-        refined_clusters = self._renumber_clusters_sequentially(refined_clusters)
+        refined_clusters, mapping = self._renumber_clusters_sequentially(refined_clusters)
 
         # Update cluster assignments
         new_results.all_clusters = refined_clusters
         new_results.clusters = refined_clusters  # No conflicts expected after refinement
+
+        # Set final active to final mapping (replace any previous mappings)
+        new_results.active_to_final_mapping = mapping
+
+        # Add close cluster refinement tracking info
+        if hasattr(results, 'processing_stages'):
+            new_results.processing_stages = results.processing_stages.copy()
+        else:
+            new_results.processing_stages = []
+        new_results.processing_stages.append(refinement_tracking)
+
+        # Preserve command line and start time
+        if hasattr(results, 'command_line'):
+            new_results.command_line = results.command_line
+        if hasattr(results, 'start_time'):
+            new_results.start_time = results.start_time
+
         new_results.conflicts = {}  # Close cluster refinement doesn't create conflicts
         new_results.unassigned = results.unassigned
 
@@ -1131,31 +1216,33 @@ class DecomposeClustering:
                 distance_provider=distance_provider
             )
 
-    def _renumber_clusters_sequentially(self, clusters: Dict[str, List[str]]) -> Dict[str, List[str]]:
+    def _renumber_clusters_sequentially(self, clusters: Dict[str, List[str]]) -> Tuple[Dict[str, List[str]], Dict[str, str]]:
         """Renumber clusters with sequential cluster_XXX naming for consistency.
 
         Args:
             clusters: Dictionary mapping cluster_id -> list of sequence headers
 
         Returns:
-            Dictionary with clusters renumbered as cluster_001, cluster_002, etc.
+            Tuple of (renumbered_clusters, active_to_final_mapping)
         """
         if not clusters:
-            return {}
+            return {}, {}
 
         # Sort clusters by size (largest first) for consistent ordering
         sorted_clusters = sorted(clusters.items(), key=lambda x: len(x[1]), reverse=True)
 
-        # Create new sequential mapping
+        # Create new sequential mapping and track active→final mapping
         renumbered = {}
+        active_to_final_mapping = {}
         for i, (old_cluster_id, cluster_headers) in enumerate(sorted_clusters, 1):
             new_cluster_id = f"cluster_{i:03d}"
             renumbered[new_cluster_id] = cluster_headers
+            active_to_final_mapping[old_cluster_id] = new_cluster_id
 
         self.logger.debug(f"Renumbered {len(clusters)} clusters with sequential IDs: "
                          f"{list(clusters.keys())[:3]}... → {list(renumbered.keys())[:3]}...")
 
-        return renumbered
+        return renumbered, active_to_final_mapping
 
     def _verify_mece_property(self, clusters: Dict[str, List[str]],
                              original_conflicts: Optional[Dict[str, List[str]]] = None,
