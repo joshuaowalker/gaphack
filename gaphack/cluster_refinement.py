@@ -1,7 +1,7 @@
 """
-Principled reclustering algorithms for achieving MECE clustering from gaphack-decompose.
+Cluster refinement algorithms for achieving conflict-free clustering from gaphack-decompose.
 
-This module implements scope-limited reclustering using classic gapHACk to resolve
+This module implements scope-limited refinement using full gapHACk to resolve
 conflicts, refine close clusters, and handle incremental updates.
 """
 
@@ -21,16 +21,16 @@ from .decompose import DecomposeResults
 logger = logging.getLogger(__name__)
 
 # Configuration constants
-MAX_CLASSIC_GAPHACK_SIZE = 300
+MAX_FULL_GAPHACK_SIZE = 300
 PREFERRED_SCOPE_SIZE = 250
 EXPANSION_SIZE_BUFFER = 50
 
 
-class ReclusteringConfig:
+class RefinementConfig:
     """Configuration for principled reclustering algorithms."""
 
     def __init__(self,
-                 max_classic_gaphack_size: int = 300,
+                 max_full_gaphack_size: int = 300,
                  preferred_scope_size: int = 250,
                  expansion_size_buffer: int = 50,
                  conflict_expansion_threshold: Optional[float] = None,
@@ -42,7 +42,7 @@ class ReclusteringConfig:
         """Initialize reclustering configuration.
 
         Args:
-            max_classic_gaphack_size: Maximum sequences for classic gapHACk
+            max_full_gaphack_size: Maximum sequences for full gapHACk
             preferred_scope_size: Target scope size for optimal performance
             expansion_size_buffer: Reserve capacity for scope expansion
             conflict_expansion_threshold: Distance threshold for conflict scope expansion
@@ -52,7 +52,7 @@ class ReclusteringConfig:
             significant_difference_threshold: Threshold for detecting significant clustering changes
             max_closest_clusters: Maximum clusters to consider for incremental updates
         """
-        self.max_classic_gaphack_size = max_classic_gaphack_size
+        self.max_full_gaphack_size = max_full_gaphack_size
         self.preferred_scope_size = preferred_scope_size
         self.expansion_size_buffer = expansion_size_buffer
         self.conflict_expansion_threshold = conflict_expansion_threshold
@@ -119,7 +119,7 @@ def expand_scope_for_conflicts(initial_sequences: Set[str],
                              all_clusters: Dict[str, List[str]],
                              proximity_graph: ClusterProximityGraph,
                              expansion_threshold: float,
-                             max_scope_size: int = MAX_CLASSIC_GAPHACK_SIZE) -> ExpandedScope:
+                             max_scope_size: int = MAX_FULL_GAPHACK_SIZE) -> ExpandedScope:
     """Expand conflict resolution scope to include nearby clusters.
 
     Args:
@@ -164,7 +164,7 @@ def expand_scope_for_conflicts(initial_sequences: Set[str],
     )
 
 
-def apply_classic_gaphack_to_scope_with_metadata(scope_sequences: List[str],
+def apply_full_gaphack_to_scope_with_metadata(scope_sequences: List[str],
                                                scope_headers: List[str],
                                                global_sequences: List[str],
                                                global_headers: List[str],
@@ -173,7 +173,7 @@ def apply_classic_gaphack_to_scope_with_metadata(scope_sequences: List[str],
                                                max_lump: float = 0.02,
                                                target_percentile: int = 95,
                                                cluster_id_generator=None) -> Tuple[Dict[str, List[str]], Dict]:
-    """Apply classic gapHACk clustering to a scope of sequences, returning clusters and metadata.
+    """Apply full gapHACk clustering to a scope of sequences, returning clusters and metadata.
 
     Args:
         scope_sequences: Sequences to cluster (in scope order)
@@ -193,10 +193,10 @@ def apply_classic_gaphack_to_scope_with_metadata(scope_sequences: List[str],
         global_distance_provider, scope_headers, global_headers
     )
 
-    # Build distance matrix for classic gapHACk
+    # Build distance matrix for full gapHACk
     distance_matrix = scoped_provider.build_distance_matrix()
 
-    # Apply classic gapHACk clustering
+    # Apply full gapHACk clustering
     clusterer = GapOptimizedClustering(
         min_split=min_split,
         max_lump=max_lump,
@@ -240,7 +240,7 @@ def apply_classic_gaphack_to_scope_with_metadata(scope_sequences: List[str],
     return clusters, {'gap_size': gap_size, 'metadata': metadata}
 
 
-def apply_classic_gaphack_to_scope(scope_sequences: List[str],
+def apply_full_gaphack_to_scope(scope_sequences: List[str],
                                  scope_headers: List[str],
                                  global_sequences: List[str],
                                  global_headers: List[str],
@@ -249,7 +249,7 @@ def apply_classic_gaphack_to_scope(scope_sequences: List[str],
                                  max_lump: float = 0.02,
                                  target_percentile: int = 95,
                                  cluster_id_generator=None) -> Dict[str, List[str]]:
-    """Apply classic gapHACk clustering to a scope of sequences.
+    """Apply full gapHACk clustering to a scope of sequences.
 
     Args:
         scope_sequences: Sequences to cluster (in scope order)
@@ -265,7 +265,7 @@ def apply_classic_gaphack_to_scope(scope_sequences: List[str],
         Dict mapping cluster_id -> list of sequence headers
     """
     # Use the metadata version and just return the clusters
-    clusters, _ = apply_classic_gaphack_to_scope_with_metadata(
+    clusters, _ = apply_full_gaphack_to_scope_with_metadata(
         scope_sequences, scope_headers, global_sequences, global_headers,
         global_distance_provider, min_split, max_lump, target_percentile,
         cluster_id_generator
@@ -278,14 +278,14 @@ def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
                                      sequences: List[str],
                                      headers: List[str],
                                      distance_provider: DistanceProvider,
-                                     config: Optional[ReclusteringConfig] = None,
+                                     config: Optional[RefinementConfig] = None,
                                      min_split: float = 0.005,
                                      max_lump: float = 0.02,
                                      target_percentile: int = 95,
                                      cluster_id_generator=None) -> Tuple[Dict[str, List[str]], 'ProcessingStageInfo']:
-    """Resolve assignment conflicts using classic gapHACk reclustering with minimal scope.
+    """Resolve assignment conflicts using full gapHACk reclustering with minimal scope.
 
-    Uses only conflicted clusters (no expansion) for fastest, most predictable MECE fixes.
+    Uses only conflicted clusters (no expansion) for fastest, most predictable conflict-free fixes.
     This is pure correctness operation - quality improvement belongs to close cluster refinement.
 
     Args:
@@ -303,7 +303,7 @@ def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
         Tuple of (updated_clusters, tracking_info): Updated cluster dictionary with conflicts resolved and tracking information
     """
     if config is None:
-        config = ReclusteringConfig()
+        config = RefinementConfig()
 
     # Initialize tracking
     from .decompose import ProcessingStageInfo
@@ -356,11 +356,11 @@ def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
             'processed': False
         }
 
-        # Step 3: Apply classic gapHACk to minimal conflict scope (no expansion)
-        if len(scope_sequences) <= config.max_classic_gaphack_size:
-            logger.debug(f"Applying classic gapHACk to minimal conflict scope of {len(scope_sequences)} sequences")
+        # Step 3: Apply full gapHACk to minimal conflict scope (no expansion)
+        if len(scope_sequences) <= config.max_full_gaphack_size:
+            logger.debug(f"Applying full gapHACk to minimal conflict scope of {len(scope_sequences)} sequences")
 
-            classic_result = apply_classic_gaphack_to_scope(
+            full_result = apply_full_gaphack_to_scope(
                 scope_headers, scope_headers,  # Use minimal scope directly
                 sequences, headers, distance_provider,
                 min_split, max_lump, target_percentile,
@@ -373,23 +373,23 @@ def resolve_conflicts_via_reclustering(conflicts: Dict[str, List[str]],
                     del updated_clusters[cluster_id]
 
             # Add new clusters from classic result
-            for cluster_id, cluster_headers in classic_result.items():
+            for cluster_id, cluster_headers in full_result.items():
                 updated_clusters[cluster_id] = cluster_headers
 
             # Update component tracking with destination clusters
             component_info.update({
-                'clusters_after': list(classic_result.keys()),
-                'clusters_after_count': len(classic_result),
+                'clusters_after': list(full_result.keys()),
+                'clusters_after_count': len(full_result),
                 'processed': True
             })
 
             logger.info(f"Resolved conflict component: {len(component_clusters)} clusters → "
-                       f"{len(classic_result)} clusters")
+                       f"{len(full_result)} clusters")
 
         else:
             # Fallback: skip oversized components with warning
             logger.warning(f"Skipping conflict component with {len(scope_sequences)} sequences "
-                          f"(exceeds limit of {config.max_classic_gaphack_size})")
+                          f"(exceeds limit of {config.max_full_gaphack_size})")
             component_info.update({
                 'clusters_after': list(component_clusters),  # Unchanged
                 'clusters_after_count': len(component_clusters),
@@ -470,13 +470,13 @@ def needs_minimal_context_for_gap_calculation(core_cluster_ids: List[str],
     """Check if we need to add context to prevent gap calculation issues.
 
     Returns True if all pairwise cluster distances are within max_lump,
-    meaning classic gapHACk would merge everything and have no inter-cluster distances.
+    meaning full gapHACk would merge everything and have no inter-cluster distances.
 
     Args:
         core_cluster_ids: Core cluster IDs being refined
         all_clusters: All cluster data
         proximity_graph: Graph for distance queries
-        max_lump: Maximum distance for classic gapHACk merging
+        max_lump: Maximum distance for full gapHACk merging
 
     Returns:
         True if minimal context is needed for proper gap calculation
@@ -600,12 +600,12 @@ def expand_scope_with_iterative_context(core_cluster_ids: List[str],
             cluster_ids=list(current_cluster_ids)
         )
 
-        # Apply classic gapHACk to current scope
+        # Apply full gapHACk to current scope
         if len(scope_sequences) <= max_scope_size:
             logger.debug(f"Iteration {iteration}: testing scope with {len(current_cluster_ids)} clusters, "
                         f"{len(scope_sequences)} sequences")
 
-            classic_clusters, classic_metadata = apply_classic_gaphack_to_scope_with_metadata(
+            classic_clusters, classic_metadata = apply_full_gaphack_to_scope_with_metadata(
                 current_scope.sequences, current_scope.headers,
                 sequences, headers, distance_provider,
                 min_split, max_lump, target_percentile,
@@ -649,7 +649,7 @@ def expand_scope_with_iterative_context(core_cluster_ids: List[str],
 
     # Return best result found
     if best_result is None:
-        logger.warning("No valid classic gapHACk results obtained during iterative expansion")
+        logger.warning("No valid full gapHACk results obtained during iterative expansion")
         # Fallback to minimal scope
         scope_sequences = set()
         for cluster_id in core_cluster_ids:
@@ -685,7 +685,7 @@ def expand_scope_for_close_clusters(initial_sequences: Set[str],
                                    all_clusters: Dict[str, List[str]],
                                    proximity_graph: ClusterProximityGraph,
                                    expansion_threshold: float,
-                                   max_scope_size: int = MAX_CLASSIC_GAPHACK_SIZE,
+                                   max_scope_size: int = MAX_FULL_GAPHACK_SIZE,
                                    max_lump: float = 0.02) -> ExpandedScope:
     """Expand close cluster refinement scope to include nearby clusters.
 
@@ -696,7 +696,7 @@ def expand_scope_for_close_clusters(initial_sequences: Set[str],
         proximity_graph: Graph for finding nearby clusters
         expansion_threshold: Distance threshold for expansion
         max_scope_size: Maximum number of sequences in expanded scope
-        max_lump: Maximum distance for classic gapHACk merging
+        max_lump: Maximum distance for full gapHACk merging
 
     Returns:
         ExpandedScope containing expanded sequence and cluster sets
@@ -775,7 +775,7 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
                          headers: List[str],
                          distance_provider: DistanceProvider,
                          proximity_graph: ClusterProximityGraph,
-                         config: Optional[ReclusteringConfig] = None,
+                         config: Optional[RefinementConfig] = None,
                          min_split: float = 0.005,
                          max_lump: float = 0.02,
                          target_percentile: int = 95,
@@ -799,7 +799,7 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
         Tuple of (updated_clusters, tracking_info): Updated cluster dictionary with close clusters refined and tracking information
     """
     if config is None:
-        config = ReclusteringConfig()
+        config = RefinementConfig()
 
     if close_threshold is None:
         close_threshold = max_lump
@@ -912,7 +912,7 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
         # Use iterative expansion to achieve positive gap
         logger.debug(f"Applying iterative context expansion to component with {len(existing_component_clusters)} clusters")
 
-        expanded_scope, classic_result = expand_scope_with_iterative_context(
+        expanded_scope, full_result = expand_scope_with_iterative_context(
             existing_component_clusters,
             updated_clusters,
             sequences,
@@ -920,7 +920,7 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
             distance_provider,
             proximity_graph,
             expansion_threshold,
-            config.max_classic_gaphack_size,
+            config.max_full_gaphack_size,
             max_lump,
             min_split,
             target_percentile,
@@ -930,12 +930,12 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
         )
 
         # Step 6: Check if we got a valid result
-        if classic_result and len(classic_result) > 0:
+        if full_result and len(full_result) > 0:
             # Step 7: Check if classic result differs significantly from input
             original_scope_clusters = {cid: updated_clusters[cid] for cid in expanded_scope.cluster_ids
                                      if cid in updated_clusters}
 
-            if clusters_significantly_different(original_scope_clusters, classic_result,
+            if clusters_significantly_different(original_scope_clusters, full_result,
                                               config.significant_difference_threshold):
                 # Step 8: Replace original clusters with classic result
                 for cluster_id in expanded_scope.cluster_ids:
@@ -944,7 +944,7 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
                         del updated_clusters[cluster_id]
 
                 # Add new clusters from classic result
-                for cluster_id, cluster_headers in classic_result.items():
+                for cluster_id, cluster_headers in full_result.items():
                     clusters_created_during_processing.add(cluster_id)
                     updated_clusters[cluster_id] = cluster_headers
 
@@ -952,15 +952,15 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
                 component_info.update({
                     'clusters_before': list(expanded_scope.cluster_ids),  # Use expanded scope clusters
                     'clusters_before_count': len(expanded_scope.cluster_ids),  # Use expanded scope as "before"
-                    'clusters_after': list(classic_result.keys()),
-                    'clusters_after_count': len(classic_result),
+                    'clusters_after': list(full_result.keys()),
+                    'clusters_after_count': len(full_result),
                     'processed': True,
                     'significantly_different': True,
                     'expanded_scope_size': len(expanded_scope.cluster_ids)
                 })
 
                 logger.info(f"Refined close cluster component: {len(expanded_scope.cluster_ids)} clusters → "
-                           f"{len(classic_result)} clusters")
+                           f"{len(full_result)} clusters")
             else:
                 # Update component tracking for no significant change
                 component_info.update({
@@ -1047,10 +1047,10 @@ def clusters_significantly_different(original_clusters: Dict[str, List[str]],
     return change_fraction >= threshold
 
 
-def verify_cluster_assignments_mece(clusters: Dict[str, List[str]],
+def verify_no_conflicts(clusters: Dict[str, List[str]],
                                    original_conflicts: Optional[Dict[str, List[str]]] = None,
                                    context: str = "final") -> Dict[str, any]:
-    """Perform comprehensive verification of cluster assignments for MECE property.
+    """Perform comprehensive verification of cluster assignments for conflict-free property.
 
     Scans all cluster assignments to detect:
     1. Remaining conflicts (sequences in multiple clusters)
@@ -1068,12 +1068,12 @@ def verify_cluster_assignments_mece(clusters: Dict[str, List[str]],
         - 'conflict_count': int - number of conflicted sequences
         - 'total_sequences': int - total unique sequences across all clusters
         - 'total_assignments': int - total sequence assignments (with duplicates)
-        - 'mece_property': bool - True if MECE (no conflicts)
+        - 'no_conflicts': bool - True if conflict-free (no conflicts)
         - 'new_conflicts': Dict[str, List[str]] - conflicts not in original set
         - 'unresolved_conflicts': Dict[str, List[str]] - original conflicts still present
         - 'resolved_conflicts': Dict[str, List[str]] - original conflicts that were resolved
     """
-    logger.info(f"Performing comprehensive MECE verification ({context})")
+    logger.info(f"Performing comprehensive conflict-free verification ({context})")
 
     # Build sequence -> cluster mapping to detect conflicts
     sequence_assignments = defaultdict(list)
@@ -1093,7 +1093,7 @@ def verify_cluster_assignments_mece(clusters: Dict[str, List[str]],
     # Calculate basic metrics
     total_sequences = len(sequence_assignments)
     conflict_count = len(current_conflicts)
-    mece_property = conflict_count == 0
+    no_conflicts = conflict_count == 0
 
     # Compare with original conflicts if provided
     new_conflicts = {}
@@ -1120,11 +1120,11 @@ def verify_cluster_assignments_mece(clusters: Dict[str, List[str]],
                 resolved_conflicts[seq_id] = original_cluster_ids
 
     # Log verification results
-    logger.info(f"MECE Verification Results ({context}):")
+    logger.info(f"conflict-free Verification Results ({context}):")
     logger.info(f"  Total sequences: {total_sequences}")
     logger.info(f"  Total assignments: {total_assignments}")
     logger.info(f"  Conflicted sequences: {conflict_count}")
-    logger.info(f"  MECE property satisfied: {mece_property}")
+    logger.info(f"  conflict-free property satisfied: {no_conflicts}")
 
     if original_conflicts:
         original_count = len(original_conflicts)
@@ -1143,7 +1143,7 @@ def verify_cluster_assignments_mece(clusters: Dict[str, List[str]],
 
     # Log detailed conflict information for debugging
     if current_conflicts:
-        logger.warning(f"MECE property violated: {conflict_count} sequences in multiple clusters")
+        logger.warning(f"conflict-free property violated: {conflict_count} sequences in multiple clusters")
         if conflict_count <= 10:  # Log details for small conflict sets
             for seq_id, cluster_ids in current_conflicts.items():
                 logger.warning(f"  Conflict: {seq_id} → clusters {cluster_ids}")
@@ -1168,10 +1168,10 @@ def verify_cluster_assignments_mece(clusters: Dict[str, List[str]],
 
     # Final status determination - critical for catching missed conflicts
     if context.startswith("final"):
-        if mece_property:
-            logger.info(f"✓ FINAL VERIFICATION PASSED: MECE property satisfied - no conflicts detected in final cluster assignments")
+        if no_conflicts:
+            logger.info(f"✓ FINAL VERIFICATION PASSED: conflict-free property satisfied - no conflicts detected in final cluster assignments")
         else:
-            logger.error(f"✗ FINAL VERIFICATION FAILED: MECE property violated - {conflict_count} conflicts remain in final output")
+            logger.error(f"✗ FINAL VERIFICATION FAILED: conflict-free property violated - {conflict_count} conflicts remain in final output")
             logger.error("This indicates conflicts were missed or introduced during processing!")
 
         # Log summary of what was processed
@@ -1179,10 +1179,10 @@ def verify_cluster_assignments_mece(clusters: Dict[str, List[str]],
 
         # If this is truly the final verification, any conflicts are critical
         if conflict_count > 0:
-            logger.error("CRITICAL: Final output contains conflicts - clustering is not MECE!")
+            logger.error("CRITICAL: Final output contains conflicts - clustering is not conflict-free!")
             logger.error("This may indicate:")
-            logger.error("  1. Conflicts exceeded MAX_CLASSIC_GAPHACK_SIZE and were skipped")
-            logger.error("  2. New conflicts were introduced during classic gapHACk reclustering")
+            logger.error("  1. Conflicts exceeded MAX_FULL_GAPHACK_SIZE and were skipped")
+            logger.error("  2. New conflicts were introduced during full gapHACk reclustering")
             logger.error("  3. Scope expansion was insufficient to capture all related conflicts")
             logger.error("  4. Multi-cluster conflicts were not properly handled")
 
@@ -1192,10 +1192,10 @@ def verify_cluster_assignments_mece(clusters: Dict[str, List[str]],
         'conflict_count': conflict_count,
         'total_sequences': total_sequences,
         'total_assignments': total_assignments,
-        'mece_property': mece_property,
+        'no_conflicts': no_conflicts,
         'new_conflicts': new_conflicts,
         'unresolved_conflicts': unresolved_conflicts,
         'resolved_conflicts': resolved_conflicts,
         'verification_context': context,
-        'critical_failure': context.startswith("final") and not mece_property
+        'critical_failure': context.startswith("final") and not no_conflicts
     }

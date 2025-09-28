@@ -53,7 +53,7 @@ class DecomposeResults:
     total_iterations: int = 0
     total_sequences_processed: int = 0
     coverage_percentage: float = 0.0
-    verification_results: Dict[str, Dict] = field(default_factory=dict)  # comprehensive MECE verification results
+    verification_results: Dict[str, Dict] = field(default_factory=dict)  # comprehensive conflict verification results
 
     # Enhanced tracking for debugging
     processing_stages: List[ProcessingStageInfo] = field(default_factory=list)  # conflict resolution, refinement stages
@@ -343,34 +343,28 @@ class DecomposeClustering:
             logger=self.logger
         )
     
-    def decompose(self, input_fasta: str, 
+    def decompose(self, input_fasta: str,
                  targets_fasta: Optional[str] = None,
-                 strategy: str = "supervised",
                  max_clusters: Optional[int] = None,
                  max_sequences: Optional[int] = None) -> DecomposeResults:
         """Perform decomposition clustering.
-        
+
         Args:
             input_fasta: Path to input FASTA file with all sequences
-            targets_fasta: Path to FASTA file with target sequences (supervised mode)
-            strategy: Target selection strategy ("supervised", "random", "spiral")
-            max_clusters: Maximum clusters to create (unsupervised modes)
-            max_sequences: Maximum sequences to assign (unsupervised modes)
+            targets_fasta: Path to FASTA file with target sequences (directed mode)
+            max_clusters: Maximum clusters to create (undirected mode)
+            max_sequences: Maximum sequences to assign (undirected mode)
             
         Returns:
             DecomposeResults with clustering results
         """
-        self.logger.info(f"Starting decomposition clustering with strategy '{strategy}'")
-        
-        # Validate inputs early
-        if strategy == "supervised":
-            if not targets_fasta:
-                raise ValueError("targets_fasta is required for supervised mode")
-        elif strategy == "unsupervised":
-            # No validation needed - will run until input exhausted if no limits specified
-            pass
+        # Auto-detect mode based on targets
+        if targets_fasta:
+            mode = "directed"
+            self.logger.info("Starting decomposition clustering in directed mode (targets provided)")
         else:
-            raise ValueError(f"Unknown strategy '{strategy}'. Valid strategies: 'supervised', 'unsupervised'")
+            mode = "undirected"
+            self.logger.info("Starting decomposition clustering in undirected mode")
         
         # Load input sequences with deduplication
         sequences, hash_ids, hash_to_headers = load_sequences_with_deduplication(input_fasta)
@@ -389,8 +383,8 @@ class DecomposeClustering:
         # Initialize assignment tracker
         assignment_tracker = AssignmentTracker()
         
-        # Initialize target selector based on strategy
-        if strategy == "supervised":
+        # Initialize target selector based on mode
+        if mode == "directed":
             target_sequences, target_headers, _ = load_sequences_from_fasta(targets_fasta)
             self.logger.info(f"Loaded {len(target_headers)} target sequences from targets file")
 
@@ -412,26 +406,26 @@ class DecomposeClustering:
 
             # Target selector now works with hash_ids directly
             target_selector = SupervisedTargetSelector(matched_hash_ids)
-        elif strategy == "unsupervised":
+        elif mode == "undirected":
             # Create spiral target selector with all sequence headers
             target_selector = SpiralTargetSelector(
                 all_headers=headers,
-                max_clusters=max_clusters, 
+                max_clusters=max_clusters,
                 max_sequences=max_sequences
             )
-            self.logger.info(f"Initialized unsupervised mode with spiral target selection: "
+            self.logger.info(f"Initialized undirected mode with nearby target selection: "
                            f"max_clusters={max_clusters}, max_sequences={max_sequences}")
         else:
-            raise ValueError(f"Unknown strategy '{strategy}'")
+            raise ValueError(f"Unknown mode '{mode}'")
         
-        # Initialize progress tracking based on strategy and stopping criteria
-        if strategy == "supervised":
-            # Supervised mode: track target completion
+        # Initialize progress tracking based on mode and stopping criteria
+        if mode == "directed":
+            # Directed mode: track target completion
             progress_mode = "targets"
             progress_total = len(matched_hash_ids)
             progress_unit = " targets"
             progress_desc = "Processing targets"
-        elif strategy == "unsupervised":
+        elif mode == "undirected":
             if max_clusters:
                 # Cluster count mode: track cluster creation
                 progress_mode = "clusters"
@@ -704,8 +698,8 @@ class DecomposeClustering:
         if results.conflicts:
             self.logger.info(f"Conflicts detected: {len(results.conflicts)}")
 
-        # Perform initial MECE verification after decomposition
-        initial_verification = self._verify_mece_property(results.all_clusters, results.conflicts, "after_decomposition")
+        # Perform initial conflict verification after decomposition
+        initial_verification = self._verify_no_conflicts(results.all_clusters, results.conflicts, "after_decomposition")
 
         # Store original conflicts for tracking resolution progress
         original_conflicts = results.conflicts.copy() if results.conflicts else {}
@@ -717,7 +711,7 @@ class DecomposeClustering:
 
             # Verify conflict resolution effectiveness
             if original_conflicts:
-                post_resolution_verification = self._verify_mece_property(
+                post_resolution_verification = self._verify_no_conflicts(
                     results.all_clusters, original_conflicts, "after_conflict_resolution"
                 )
 
@@ -729,11 +723,11 @@ class DecomposeClustering:
         # Expand hash IDs back to original headers
         results = self._expand_hash_ids_to_headers(results, hash_to_headers)
 
-        # CRITICAL: Always perform final comprehensive MECE verification
+        # CRITICAL: Always perform final comprehensive conflict verification
         # This runs regardless of whether initial conflicts were detected or resolved
         # to catch any conflicts that may have been missed or introduced during processing
-        self.logger.info("Performing final comprehensive MECE verification (always runs regardless of initial conflict status)")
-        final_verification = self._verify_mece_property(results.all_clusters, original_conflicts, "final_comprehensive")
+        self.logger.info("Performing final comprehensive conflict verification (always runs regardless of initial conflict status)")
+        final_verification = self._verify_no_conflicts(results.all_clusters, original_conflicts, "final_comprehensive")
 
         # Store verification results in the results object for external access
         results.verification_results = {
@@ -758,7 +752,7 @@ class DecomposeClustering:
 
         # Log final status
         if final_verification['mece_property']:
-            self.logger.info("🎉 Final verification confirms MECE clustering achieved")
+            self.logger.info("🎉 Final verification confirms conflict-free clustering achieved")
         else:
             self.logger.error(f"❌ Final verification reveals {len(final_verification['conflicts'])} conflicts in output")
 
@@ -1013,7 +1007,7 @@ class DecomposeClustering:
 
     def _resolve_conflicts_via_reclustering(self, results: DecomposeResults,
                                           sequences: List[str], headers: List[str]) -> DecomposeResults:
-        """Resolve conflicts using principled reclustering with classic gapHACk.
+        """Resolve conflicts using principled reclustering with full gapHACk.
 
         Args:
             results: Current decomposition results with conflicts
@@ -1023,14 +1017,14 @@ class DecomposeClustering:
         Returns:
             Updated DecomposeResults with conflicts resolved
         """
-        from .principled_reclustering import resolve_conflicts_via_reclustering, ReclusteringConfig
+        from .cluster_refinement import resolve_conflicts_via_reclustering, RefinementConfig
 
         # Get global distance provider for the full dataset
         distance_provider = self._get_or_create_distance_provider(sequences)
 
         # Create reclustering configuration for minimal conflict resolution
-        config = ReclusteringConfig(
-            max_classic_gaphack_size=300,  # Conservative limit for performance
+        config = RefinementConfig(
+            max_full_gaphack_size=300,  # Conservative limit for performance
             jaccard_overlap_threshold=0.1,  # Include clusters with 10%+ overlap
             significant_difference_threshold=0.2  # 20% sequences must change for significant difference
         )
@@ -1060,7 +1054,7 @@ class DecomposeClustering:
         # Renumber clusters sequentially for consistent naming
         renumbered_clusters, mapping = self._renumber_clusters_sequentially(resolved_clusters)
 
-        # Set resolved clusters (should be MECE now)
+        # Set resolved clusters (should be conflict-free now)
         new_results.all_clusters = renumbered_clusters
         new_results.clusters = renumbered_clusters  # No conflicts after resolution
 
@@ -1088,7 +1082,7 @@ class DecomposeClustering:
 
     def _refine_close_clusters_via_reclustering(self, results: DecomposeResults,
                                               sequences: List[str], headers: List[str]) -> DecomposeResults:
-        """Refine close clusters using principled reclustering with classic gapHACk.
+        """Refine close clusters using principled reclustering with full gapHACk.
 
         Args:
             results: Current decomposition results
@@ -1098,7 +1092,7 @@ class DecomposeClustering:
         Returns:
             Updated DecomposeResults with close clusters refined
         """
-        from .principled_reclustering import refine_close_clusters, ReclusteringConfig
+        from .cluster_refinement import refine_close_clusters, RefinementConfig
         from .cluster_proximity import BruteForceProximityGraph, BlastKNNProximityGraph
 
         # Get global distance provider for the full dataset
@@ -1108,8 +1102,8 @@ class DecomposeClustering:
         proximity_graph = self._create_proximity_graph(results.all_clusters, sequences, headers, distance_provider)
 
         # Create reclustering configuration with user-provided threshold
-        config = ReclusteringConfig(
-            max_classic_gaphack_size=300,  # Conservative limit for performance
+        config = RefinementConfig(
+            max_full_gaphack_size=300,  # Conservative limit for performance
             close_cluster_expansion_threshold=self.close_cluster_threshold,  # User-controlled expansion threshold
             jaccard_overlap_threshold=0.1,  # Include clusters with 10%+ overlap
             significant_difference_threshold=0.2  # 20% sequences must change for significant difference
@@ -1227,10 +1221,10 @@ class DecomposeClustering:
 
         return renumbered, active_to_final_mapping
 
-    def _verify_mece_property(self, clusters: Dict[str, List[str]],
+    def _verify_no_conflicts(self, clusters: Dict[str, List[str]],
                              original_conflicts: Optional[Dict[str, List[str]]] = None,
                              context: str = "verification") -> Dict[str, any]:
-        """Verify MECE property of cluster assignments using comprehensive verification.
+        """Verify no conflicts of cluster assignments using comprehensive verification.
 
         Args:
             clusters: Dictionary mapping cluster_id -> list of sequence headers
@@ -1240,9 +1234,9 @@ class DecomposeClustering:
         Returns:
             Dictionary with verification results from comprehensive scan
         """
-        from .principled_reclustering import verify_cluster_assignments_mece
+        from .cluster_refinement import verify_no_conflicts
 
-        return verify_cluster_assignments_mece(
+        return verify_no_conflicts(
             clusters=clusters,
             original_conflicts=original_conflicts,
             context=context

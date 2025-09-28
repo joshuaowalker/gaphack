@@ -213,7 +213,7 @@ def save_decompose_results(results: DecomposeResults, output_base: str,
             f.write("-" * 20 + "\n")
             for stage, verification in results.verification_results.items():
                 f.write(f"{stage.title()}: {verification['conflict_count']} conflicts, "
-                       f"MECE: {verification['mece_property']}\n")
+                       f"Conflict-free: {verification['mece_property']}\n")
             f.write("\n")
 
         # Iteration summary with active cluster IDs (moved after verification)
@@ -322,17 +322,17 @@ Examples:
   # Supervised mode with target sequences
   gaphack-decompose input.fasta --targets targets.fasta -o results
 
-  # Unsupervised mode with cluster count limit
-  gaphack-decompose input.fasta --strategy unsupervised --max-clusters 50 -o results
+  # Undirected mode with cluster count limit
+  gaphack-decompose input.fasta --max-clusters 50 -o results
 
-  # Unsupervised mode with sequence coverage limit
-  gaphack-decompose input.fasta --strategy unsupervised --max-sequences 1000 -o results
+  # Undirected mode with sequence coverage limit
+  gaphack-decompose input.fasta --max-sequences 1000 -o results
 
-  # Unsupervised mode until input exhausted (cluster all sequences)
-  gaphack-decompose input.fasta --strategy unsupervised -o results
+  # Undirected mode until input exhausted (cluster all sequences)
+  gaphack-decompose input.fasta -o results
 
   # Disable overlaps (each sequence in at most one cluster)
-  gaphack-decompose input.fasta --strategy unsupervised --no-overlaps -o results
+  gaphack-decompose input.fasta --no-overlaps -o results
 
   # Custom BLAST parameters
   gaphack-decompose input.fasta --targets targets.fasta \\
@@ -347,14 +347,12 @@ Examples:
                        help='Output base path for result files')
     
     # Target selection arguments
-    parser.add_argument('--targets', 
-                       help='FASTA file containing target sequences for supervised mode')
-    parser.add_argument('--strategy', choices=['supervised', 'unsupervised'], default='supervised',
-                       help='Target selection strategy (default: supervised)')
+    parser.add_argument('--targets',
+                       help='FASTA file containing target sequences for directed mode')
     parser.add_argument('--max-clusters', type=int,
-                       help='Maximum clusters to create (unsupervised mode, optional)')
+                       help='Maximum clusters to create (undirected mode, optional)')
     parser.add_argument('--max-sequences', type=int,
-                       help='Maximum sequences to assign (unsupervised mode, optional)')
+                       help='Maximum sequences to assign (undirected mode, optional)')
     parser.add_argument('--no-overlaps', action='store_true',
                        help='Disable sequence overlaps - each sequence assigned to at most one cluster')
     
@@ -403,19 +401,19 @@ Examples:
         logger.error(f"Input FASTA file not found: {args.input_fasta}")
         sys.exit(1)
     
-    # Strategy-specific validation
-    if args.strategy == "supervised":
-        if not args.targets:
-            logger.error("--targets is required for supervised mode")
-            sys.exit(1)
+    # Auto-detect mode based on targets
+    if args.targets:
+        # Directed mode - validate targets file exists
         if not Path(args.targets).exists():
             logger.error(f"Targets FASTA file not found: {args.targets}")
             sys.exit(1)
-    elif args.strategy == "unsupervised":
-        if args.targets:
-            logger.warning("--targets specified but ignored in unsupervised mode")
+        logger.info("Running in directed mode (targets provided)")
+    else:
+        # Undirected mode
         if not args.max_clusters and not args.max_sequences:
-            logger.info("No stopping criteria specified - will cluster until input is exhausted")
+            logger.info("Running in undirected mode - will cluster until input is exhausted")
+        else:
+            logger.info("Running in undirected mode with stopping criteria")
     
     # Initialize decomposition clustering
     logger.info("Initializing gaphack-decompose")
@@ -449,7 +447,6 @@ Examples:
         results = decomposer.decompose(
             input_fasta=args.input_fasta,
             targets_fasta=args.targets,
-            strategy=args.strategy,
             max_clusters=args.max_clusters,
             max_sequences=args.max_sequences
         )
