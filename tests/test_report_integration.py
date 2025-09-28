@@ -56,7 +56,6 @@ def test_enhanced_report():
         results = decomposer.decompose(
             input_fasta=str(input_fasta),
             targets_fasta=str(targets_fasta),
-            strategy="supervised"
         )
 
         # Save report to check formatting
@@ -79,8 +78,6 @@ def test_enhanced_report():
             print(report_content)
 
         print("✓ Enhanced report generation test completed!")
-        return True
+        # Test completed successfully
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.WARNING)  # Reduce log noise
-    test_enhanced_report()
+# Report integration test converted to pytest format

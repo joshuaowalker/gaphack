@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 
 from gaphack.decompose import DecomposeClustering, DecomposeResults
-from gaphack.cluster_refinement import resolve_conflicts, RefinementConfig
+from gaphack.cluster_refinement import resolve_conflicts, RefinementConfig, verify_no_conflicts
 from gaphack.cluster_graph import ClusterGraph
 
 
@@ -57,7 +57,6 @@ def test_conflict_resolution_integration():
         results = decomposer.decompose(
             input_fasta=str(input_fasta),
             targets_fasta=str(targets_fasta),
-            strategy="supervised"
         )
 
         # Analyze results
@@ -84,7 +83,7 @@ def test_conflict_resolution_integration():
                 all_assigned_sequences.add(seq)
 
         print(f"  ✓ MECE property verified - no sequence appears in multiple clusters")
-        return True
+        # Test completed successfully
 
 
 def test_conflict_resolution_algorithm_directly():
@@ -113,7 +112,7 @@ def test_conflict_resolution_algorithm_directly():
     # This would normally require a real distance provider, but for this test
     # we just verify the integration works
     print("✓ Conflict resolution algorithm structure is properly integrated")
-    return True
+    # Test completed successfully
 
 
 def test_comprehensive_verification():
@@ -130,8 +129,8 @@ def test_comprehensive_verification():
         "cluster_3": ["seq_E"]
     }
 
-    verification_1 = verify_cluster_assignments_mece(mece_clusters, context="test_mece")
-    assert verification_1['mece_property'] == True, "MECE clusters should satisfy MECE property"
+    verification_1 = verify_no_conflicts(mece_clusters, context="test_mece")
+    assert verification_1['no_conflicts'] == True, "MECE clusters should satisfy MECE property"
     assert verification_1['conflict_count'] == 0, "MECE clusters should have no conflicts"
     print("  ✓ MECE verification passed")
 
@@ -144,8 +143,8 @@ def test_comprehensive_verification():
         "cluster_4": ["seq_Y", "seq_F"]  # seq_Y in both clusters
     }
 
-    verification_2 = verify_cluster_assignments_mece(conflicted_clusters, context="test_conflicts")
-    assert verification_2['mece_property'] == False, "Conflicted clusters should violate MECE property"
+    verification_2 = verify_no_conflicts(conflicted_clusters, context="test_conflicts")
+    assert verification_2['no_conflicts'] == False, "Conflicted clusters should violate MECE property"
     assert verification_2['conflict_count'] == 2, "Should detect 2 conflicted sequences"
     assert "seq_X" in verification_2['conflicts'], "Should detect seq_X conflict"
     assert "seq_Y" in verification_2['conflicts'], "Should detect seq_Y conflict"
@@ -160,8 +159,8 @@ def test_comprehensive_verification():
         "cluster_4": ["seq_D"]
     }
 
-    verification_3 = verify_cluster_assignments_mece(multi_conflict_clusters, context="test_multi_conflicts")
-    assert verification_3['mece_property'] == False, "Multi-cluster conflicts should violate MECE property"
+    verification_3 = verify_no_conflicts(multi_conflict_clusters, context="test_multi_conflicts")
+    assert verification_3['no_conflicts'] == False, "Multi-cluster conflicts should violate MECE property"
     assert verification_3['conflict_count'] == 1, "Should detect 1 conflicted sequence"
     assert "seq_MULTI" in verification_3['conflicts'], "Should detect seq_MULTI conflict"
     assert len(verification_3['conflicts']['seq_MULTI']) == 3, "seq_MULTI should be in 3 clusters"
@@ -187,7 +186,7 @@ def test_comprehensive_verification():
         "cluster_8": ["seq_H", "seq_NEW"]
     }
 
-    verification_4 = verify_cluster_assignments_mece(
+    verification_4 = verify_no_conflicts(
         partially_resolved_clusters,
         original_conflicts=original_conflicts,
         context="test_resolution_tracking"
@@ -203,7 +202,7 @@ def test_comprehensive_verification():
     print("  ✓ Resolution tracking passed")
 
     print("✓ All comprehensive verification tests passed!")
-    return True
+    # Test completed successfully
 
 
 def test_verification_integration():
@@ -242,7 +241,6 @@ def test_verification_integration():
         results_no_resolution = decomposer_no_resolution.decompose(
             input_fasta=str(input_fasta),
             targets_fasta=str(targets_fasta),
-            strategy="supervised"
         )
 
         # Verify verification results are present
@@ -251,7 +249,7 @@ def test_verification_integration():
         assert 'final' in results_no_resolution.verification_results, "Should have final verification"
 
         final_verification = results_no_resolution.verification_results['final']
-        print(f"  Final verification results: {final_verification['conflict_count']} conflicts, MECE: {final_verification['mece_property']}")
+        print(f"  Final verification results: {final_verification['conflict_count']} conflicts, MECE: {final_verification['no_conflicts']}")
 
         # Test with conflict resolution enabled (should resolve conflicts)
         print("Testing with conflict resolution enabled...")
@@ -267,12 +265,11 @@ def test_verification_integration():
         results_with_resolution = decomposer_with_resolution.decompose(
             input_fasta=str(input_fasta),
             targets_fasta=str(targets_fasta),
-            strategy="supervised"
         )
 
         # Check if post-resolution verification exists (only if there were conflicts to resolve)
         final_verification_resolved = results_with_resolution.verification_results['final']
-        print(f"  Final verification results after resolution: {final_verification_resolved['conflict_count']} conflicts, MECE: {final_verification_resolved['mece_property']}")
+        print(f"  Final verification results after resolution: {final_verification_resolved['conflict_count']} conflicts, MECE: {final_verification_resolved['no_conflicts']}")
 
         # If there were original conflicts that got resolved, post_resolution should exist
         if results_with_resolution.verification_results['initial']['conflict_count'] > 0:
@@ -281,7 +278,7 @@ def test_verification_integration():
             print("  No conflicts detected in initial decomposition, so no post-resolution verification needed")
 
         print("✓ Verification integration tests passed!")
-        return True
+        # Test completed successfully
 
 
 if __name__ == "__main__":

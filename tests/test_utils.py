@@ -33,10 +33,11 @@ TTTTAAAA
             temp_path = f.name
         
         try:
-            sequences, headers = load_sequences_from_fasta(temp_path)
-            
+            sequences, headers, header_mapping = load_sequences_from_fasta(temp_path)
+
             assert len(sequences) == 3
             assert len(headers) == 3
+            assert len(header_mapping) == 3
             assert sequences[0] == "ATCGATCG"
             assert sequences[1] == "GCTAGCTA"
             assert sequences[2] == "TTTTAAAA"

@@ -27,7 +27,7 @@ def time_operation(operation_name, operation_func):
     return result, duration
 
 
-def demonstrate_performance_improvement():
+def test_performance_improvement():
     """Demonstrate the performance improvement from removing proximity graph from conflict resolution."""
     print("=== Performance Improvement Demonstration ===\n")
     print("Comparing conflict resolution performance before/after proximity graph removal\n")
@@ -79,7 +79,6 @@ def demonstrate_performance_improvement():
             return decomposer.decompose(
                 input_fasta=str(input_fasta),
                 targets_fasta=str(targets_fasta),
-                strategy="supervised"
             )
 
         # Test close cluster refinement (still uses proximity graph)
@@ -97,7 +96,6 @@ def demonstrate_performance_improvement():
             return decomposer.decompose(
                 input_fasta=str(input_fasta),
                 targets_fasta=str(targets_fasta),
-                strategy="supervised"
             )
 
         # Time both operations
@@ -128,14 +126,15 @@ def demonstrate_performance_improvement():
         print()
 
         print("Verification:")
-        print(f"  Conflict resolution MECE: {results_conflicts.verification_results['final']['mece_property']}")
-        print(f"  Close refinement MECE:    {results_refinement.verification_results['final']['mece_property']}")
+        print(f"  Conflict resolution MECE: {results_conflicts.verification_results.get('final', {}).get('no_conflicts', 'Not verified')}")
+        print(f"  Close refinement MECE:    {results_refinement.verification_results.get('final', {}).get('no_conflicts', 'Not verified')}")
 
         print()
         print("✓ Performance improvement demonstration completed!")
-        return True
+
+        # Add assertions to make it a proper test
+        assert results_conflicts is not None, "Conflict resolution should produce results"
+        assert results_refinement is not None, "Close cluster refinement should produce results"
 
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.WARNING)  # Reduce log noise for timing
-    demonstrate_performance_improvement()
+# Performance test converted to pytest format

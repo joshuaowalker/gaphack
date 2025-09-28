@@ -48,7 +48,11 @@ The barcode gap calculation fundamentally requires both intra-cluster and inter-
 
 ### Technical Debt and Known Issues
 
-(No current technical debt items)
+#### Target Clustering Linkage Consistency
+- `_find_closest_to_target()` hardcodes 95th percentile linkage instead of using `self.target_percentile`
+- Should be updated to use the configured percentile for consistency
+- Location: `target_clustering.py:309` - change `np.percentile(filtered_distances, 95)` to `np.percentile(filtered_distances, self.target_percentile)`
+- Current behavior works correctly with default 95th percentile but inconsistent with other percentile settings
 
 ### Performance Considerations
 

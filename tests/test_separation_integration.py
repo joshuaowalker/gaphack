@@ -54,12 +54,11 @@ def test_separated_functionality():
         results_conflicts = decomposer_conflicts_only.decompose(
             input_fasta=str(input_fasta),
             targets_fasta=str(targets_fasta),
-            strategy="supervised"
         )
 
         print(f"  Clusters: {len(results_conflicts.clusters)}")
         print(f"  Conflicts: {len(results_conflicts.conflicts)}")
-        print(f"  Final verification passed: {results_conflicts.verification_results['final']['mece_property']}")
+        print(f"  Final verification passed: {results_conflicts.verification_results['final']['no_conflicts']}")
         print()
 
         print("Test 2: Close cluster refinement with expansion threshold")
@@ -77,12 +76,11 @@ def test_separated_functionality():
         results_refinement = decomposer_refinement.decompose(
             input_fasta=str(input_fasta),
             targets_fasta=str(targets_fasta),
-            strategy="supervised"
         )
 
         print(f"  Clusters: {len(results_refinement.clusters)}")
         print(f"  Conflicts: {len(results_refinement.conflicts)}")
-        print(f"  Final verification passed: {results_refinement.verification_results['final']['mece_property']}")
+        print(f"  Final verification passed: {results_refinement.verification_results['final']['no_conflicts']}")
         print()
 
         print("Test 3: Both conflict resolution and refinement")
@@ -100,12 +98,11 @@ def test_separated_functionality():
         results_both = decomposer_both.decompose(
             input_fasta=str(input_fasta),
             targets_fasta=str(targets_fasta),
-            strategy="supervised"
         )
 
         print(f"  Clusters: {len(results_both.clusters)}")
         print(f"  Conflicts: {len(results_both.conflicts)}")
-        print(f"  Final verification passed: {results_both.verification_results['final']['mece_property']}")
+        print(f"  Final verification passed: {results_both.verification_results['final']['no_conflicts']}")
         print()
 
         print("Test 4: CLI-style usage demonstration")
@@ -120,9 +117,7 @@ def test_separated_functionality():
         print()
 
         print("✓ All separated functionality tests completed successfully!")
-        return True
+        # Test completed successfully
 
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    test_separated_functionality()
+# Separation integration test converted to pytest format
