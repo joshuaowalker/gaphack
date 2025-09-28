@@ -65,3 +65,16 @@ python_version = "3.8"
 warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+markers = [
+    "integration: marks tests as integration tests",
+    "performance: marks tests as performance benchmarks",
+    "memory: marks tests that monitor memory usage",
+    "scalability: marks tests that validate scaling properties",
+    "quality: marks tests that validate clustering quality"
+]
