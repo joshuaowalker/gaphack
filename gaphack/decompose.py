@@ -1019,8 +1019,7 @@ class DecomposeClustering:
 
         # Create refinement configuration for minimal conflict resolution
         config = RefinementConfig(
-            max_full_gaphack_size=300,  # Conservative limit for performance
-            jaccard_overlap_threshold=0.1  # Include clusters with 10%+ overlap
+            max_full_gaphack_size=300  # Conservative limit for performance
         )
 
         # Apply conflict resolution (no proximity graph needed - uses minimal scope only)
@@ -1098,8 +1097,7 @@ class DecomposeClustering:
         # Create refinement configuration with user-provided threshold
         config = RefinementConfig(
             max_full_gaphack_size=300,  # Conservative limit for performance
-            close_cluster_expansion_threshold=self.close_cluster_threshold,  # User-controlled expansion threshold
-            jaccard_overlap_threshold=0.1  # Include clusters with 10%+ overlap
+            close_cluster_expansion_threshold=self.close_cluster_threshold  # User-controlled expansion threshold
         )
 
         # Apply close cluster refinement

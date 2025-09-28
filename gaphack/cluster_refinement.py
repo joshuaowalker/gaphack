@@ -36,7 +36,6 @@ class RefinementConfig:
                  conflict_expansion_threshold: Optional[float] = None,
                  close_cluster_expansion_threshold: Optional[float] = None,
                  incremental_search_distance: Optional[float] = None,
-                 jaccard_overlap_threshold: float = 0.1,
                  max_closest_clusters: int = 5):
         """Initialize refinement configuration.
 
@@ -47,7 +46,6 @@ class RefinementConfig:
             conflict_expansion_threshold: Distance threshold for conflict scope expansion
             close_cluster_expansion_threshold: Distance threshold for close cluster expansion
             incremental_search_distance: Search distance for incremental updates
-            jaccard_overlap_threshold: Overlap threshold for scope expansion
             max_closest_clusters: Maximum clusters to consider for incremental updates
         """
         self.max_full_gaphack_size = max_full_gaphack_size
@@ -56,7 +54,6 @@ class RefinementConfig:
         self.conflict_expansion_threshold = conflict_expansion_threshold
         self.close_cluster_expansion_threshold = close_cluster_expansion_threshold
         self.incremental_search_distance = incremental_search_distance
-        self.jaccard_overlap_threshold = jaccard_overlap_threshold
         self.max_closest_clusters = max_closest_clusters
 
 
