@@ -706,6 +706,28 @@ class DecomposeClustering:
         else:
             self.logger.error(f"❌ Final verification reveals {len(final_verification['conflicts'])} conflicts in output")
 
+        # Final renumbering: internal names (initial_xxx, deconflicted_xxx, refined_xxx) -> cluster_xxx
+        # This is the only renumbering, creating a clean 1:1 mapping for output
+        self.logger.info("Applying final cluster renumbering for output")
+        final_clusters, final_mapping = self._renumber_clusters_sequentially(results.all_clusters)
+
+        results.all_clusters = final_clusters
+        # For results.clusters, we need to rebuild from non-conflicted sequences
+        # since the cluster IDs have changed
+        if results.conflicts:
+            # Rebuild clusters dict excluding conflicted sequences
+            results.clusters = {}
+            for cluster_id, headers in final_clusters.items():
+                non_conflicted_headers = [h for h in headers if h not in results.conflicts]
+                if non_conflicted_headers:
+                    results.clusters[cluster_id] = non_conflicted_headers
+        else:
+            results.clusters = final_clusters.copy()
+
+        results.active_to_final_mapping = final_mapping
+
+        self.logger.debug(f"Final renumbering: {len(final_mapping)} internal clusters -> {len(final_clusters)} output clusters")
+
         return results
     
     def _prune_neighborhood_by_distance(self, neighborhood_sequences: List[str],
@@ -999,14 +1021,12 @@ class DecomposeClustering:
         new_results.total_sequences_processed = results.total_sequences_processed
         new_results.coverage_percentage = results.coverage_percentage
 
-        # Renumber clusters sequentially for consistent naming
-        renumbered_clusters, mapping = self._renumber_clusters_sequentially(resolved_clusters)
+        # Keep internal cluster names (deconflicted_xxx) - no renumbering yet
+        # Final renumbering will happen at the end of decompose()
+        new_results.all_clusters = resolved_clusters
+        new_results.clusters = resolved_clusters  # No conflicts after resolution
 
-        # Set resolved clusters (should be conflict-free now)
-        new_results.all_clusters = renumbered_clusters
-        new_results.clusters = renumbered_clusters  # No conflicts after resolution
-
-        # Initialize active to final mapping (will be set properly at final renumbering)
+        # No active_to_final_mapping yet - that will be created during final renumbering
         new_results.active_to_final_mapping = {}
 
         # Add conflict resolution tracking info
@@ -1078,15 +1098,13 @@ class DecomposeClustering:
         new_results.total_sequences_processed = results.total_sequences_processed
         new_results.coverage_percentage = results.coverage_percentage
 
-        # Apply sequential renumbering for consistency
-        refined_clusters, mapping = self._renumber_clusters_sequentially(refined_clusters)
-
-        # Update cluster assignments
+        # Keep internal cluster names (refined_xxx) - no renumbering yet
+        # Final renumbering will happen at the end of decompose()
         new_results.all_clusters = refined_clusters
         new_results.clusters = refined_clusters  # No conflicts expected after refinement
 
-        # Set final active to final mapping (replace any previous mappings)
-        new_results.active_to_final_mapping = mapping
+        # No active_to_final_mapping yet - that will be created during final renumbering
+        new_results.active_to_final_mapping = {}
 
         # Add close cluster refinement tracking info
         new_results.processing_stages = results.processing_stages.copy()

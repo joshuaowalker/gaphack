@@ -959,8 +959,8 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
             })
             logger.warning(f"Iterative context expansion failed for component with {len(component_clusters)} clusters")
 
-        # Add component info to tracking
-            tracking_info.components_processed.append(component_info)
+        # Add component info to tracking (always, regardless of success/failure)
+        tracking_info.components_processed.append(component_info)
 
         # Mark as processed regardless of outcome
         processed_components.add(component_signature)
