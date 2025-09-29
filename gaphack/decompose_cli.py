@@ -339,11 +339,19 @@ Examples:
     )
     
     # Input/output arguments
-    parser.add_argument('input_fasta',
+    parser.add_argument('input_fasta', nargs='?',
                        help='Input FASTA file containing all sequences to cluster')
-    parser.add_argument('-o', '--output', required=True,
+    parser.add_argument('-o', '--output',
                        help='Output directory for result files')
-    
+
+    # Resume arguments
+    parser.add_argument('--resume', action='store_true',
+                       help='Resume from existing output directory (uses state.json)')
+    parser.add_argument('--force-input-change', action='store_true',
+                       help='Allow resuming with modified input FASTA (may cause inconsistencies)')
+    parser.add_argument('--checkpoint-interval', type=int, default=10,
+                       help='Save checkpoint every N iterations (default: 10)')
+
     # Target selection arguments
     parser.add_argument('--targets',
                        help='FASTA file containing target sequences for directed mode')
@@ -383,11 +391,69 @@ Examples:
                        help='Disable progress bars')
     
     args = parser.parse_args()
-    
+
     # Set up logging
     setup_logging(args.verbose)
     logger = logging.getLogger(__name__)
-    
+
+    # Handle resume mode
+    if args.resume:
+        if not args.output:
+            logger.error("--resume requires -o/--output to specify output directory")
+            sys.exit(1)
+
+        output_dir = Path(args.output)
+        if not output_dir.exists():
+            logger.error(f"Output directory not found: {output_dir}")
+            sys.exit(1)
+
+        if not (output_dir / "state.json").exists():
+            logger.error(f"No state.json found in output directory: {output_dir}")
+            sys.exit(1)
+
+        logger.info(f"Resuming from output directory: {output_dir}")
+
+        # Import resume function
+        from .decompose import resume_decompose
+
+        try:
+            results = resume_decompose(
+                output_dir=output_dir,
+                max_clusters=args.max_clusters,
+                max_sequences=args.max_sequences,
+                resolve_conflicts=args.resolve_conflicts,
+                refine_close_clusters=args.refine_close_clusters,
+                force_input_change=args.force_input_change,
+                checkpoint_interval=args.checkpoint_interval,
+                show_progress=not args.no_progress
+            )
+
+            # Save results
+            output_base = str(output_dir / "decompose")
+            # Get input_fasta from state for saving results
+            from .state import DecomposeState
+            state = DecomposeState.load(output_dir)
+            save_decompose_results(results, output_base, state.input.fasta_path)
+
+            logger.info("Resume completed successfully")
+            sys.exit(0)
+
+        except Exception as e:
+            logger.error(f"Resume failed: {e}")
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
+            sys.exit(1)
+
+    # Normal (non-resume) mode validation
+    if not args.input_fasta:
+        logger.error("input_fasta is required (unless using --resume)")
+        sys.exit(1)
+
+    if not args.output:
+        logger.error("-o/--output is required")
+        sys.exit(1)
+
     # Validate inputs
     if not Path(args.input_fasta).exists():
         logger.error(f"Input FASTA file not found: {args.input_fasta}")
@@ -432,7 +498,6 @@ Examples:
     
     try:
         # Capture command line and start time for reporting
-        import sys
         import datetime
         command_line = ' '.join(sys.argv)
         start_time = datetime.datetime.now().isoformat()
@@ -443,7 +508,8 @@ Examples:
             targets_fasta=args.targets,
             max_clusters=args.max_clusters,
             max_sequences=args.max_sequences,
-            output_dir=str(output_dir)
+            output_dir=str(output_dir),
+            checkpoint_interval=args.checkpoint_interval
         )
 
         # Add metadata to results for reporting

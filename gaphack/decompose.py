@@ -318,7 +318,9 @@ class DecomposeClustering:
                  targets_fasta: Optional[str] = None,
                  max_clusters: Optional[int] = None,
                  max_sequences: Optional[int] = None,
-                 output_dir: Optional[str] = None) -> DecomposeResults:
+                 output_dir: Optional[str] = None,
+                 resume_from_state: Optional[DecomposeState] = None,
+                 checkpoint_interval: int = 10) -> DecomposeResults:
         """Perform decomposition clustering.
 
         Args:
@@ -327,309 +329,431 @@ class DecomposeClustering:
             max_clusters: Maximum clusters to create (undirected mode)
             max_sequences: Maximum sequences to assign (undirected mode)
             output_dir: Output directory for results and BLAST database (optional)
+            resume_from_state: DecomposeState to resume from (internal use for continuation)
+            checkpoint_interval: Save checkpoint every N iterations (default: 10)
 
         Returns:
             DecomposeResults with clustering results
         """
-        # Auto-detect mode based on targets
-        if targets_fasta:
-            mode = "directed"
-            self.logger.info("Starting decomposition clustering in directed mode (targets provided)")
-        else:
-            mode = "undirected"
-            self.logger.info("Starting decomposition clustering in undirected mode")
-        
-        # Load input sequences with deduplication
-        sequences, hash_ids, hash_to_headers = load_sequences_with_deduplication(input_fasta)
-        self.logger.info(f"Loaded {len(sequences)} unique sequences from {input_fasta}")
+        import signal
 
-        # For backward compatibility, create headers list using hash_ids
-        headers = hash_ids
-        
-        # Sequence overlaps are always allowed
-        self.logger.info("Sequence overlaps: allowed")
+        # Set up signal handler for graceful interruption
+        interruption_requested = {'flag': False}
+        original_handler = None
 
-        # Convert output_dir to Path if provided
-        output_dir_path = Path(output_dir) if output_dir else None
-
-        # Initialize state management if output_dir provided
-        state_manager = None
-        state = None
-        if output_dir_path:
-            import sys
-            state_manager = StateManager(output_dir_path)
-
-            # Build parameters dict
-            parameters = {
-                "min_split": self.min_split,
-                "max_lump": self.max_lump,
-                "target_percentile": self.target_percentile,
-                "blast_max_hits": self.blast_max_hits,
-                "blast_evalue": self.blast_evalue,
-                "min_identity": self.min_identity,
-                "max_clusters": max_clusters,
-                "max_sequences": max_sequences,
-                "resolve_conflicts": self.resolve_conflicts,
-                "refine_close_clusters": self.refine_close_clusters,
-                "close_cluster_threshold": self.close_cluster_threshold
-            }
-
-            # Create initial state
-            command = ' '.join(sys.argv) if hasattr(sys, 'argv') else "gaphack-decompose"
-            from . import __version__
-            state = create_initial_state(
-                input_fasta=input_fasta,
-                parameters=parameters,
-                command=command,
-                version=__version__
-            )
-            self.logger.info(f"State management initialized in {output_dir_path}")
-
-        # Initialize BLAST neighborhood finder with output directory
-        blast_finder = BlastNeighborhoodFinder(sequences, headers, output_dir=output_dir_path)
-
-        # Initialize assignment tracker
-        assignment_tracker = AssignmentTracker()
-        
-        # Initialize target selector based on mode
-        if mode == "directed":
-            target_sequences, target_headers, _ = load_sequences_from_fasta(targets_fasta)
-            self.logger.info(f"Loaded {len(target_headers)} target sequences from targets file")
-
-            # Find matching sequences in input based on sequence content
-            self.logger.info(f"Attempting to match {len(target_sequences)} target sequences against {len(sequences)} input sequences")
-            matched_hash_ids = self._find_matching_targets_by_content(target_sequences, target_headers, sequences, hash_ids)
-
-            if not matched_hash_ids:
-                self.logger.error("No target sequences found matching sequences in input file")
-                self.logger.error("Target headers preview:")
-                for i, header in enumerate(target_headers[:3]):
-                    self.logger.error(f"  Target {i+1}: {header}")
-                self.logger.error("Input hash_ids preview:")
-                for i, hash_id in enumerate(hash_ids[:3]):
-                    self.logger.error(f"  Input {i+1}: {hash_id}")
-                raise ValueError("No target sequences found matching sequences in input file")
-
-            self.logger.info(f"Found {len(matched_hash_ids)} target sequences matching input sequences")
-
-            # Target selector now works with hash_ids directly
-            target_selector = TargetSelector(matched_hash_ids)
-        elif mode == "undirected":
-            # Create nearby target selector with all sequence headers
-            target_selector = NearbyTargetSelector(
-                all_headers=headers,
-                max_clusters=max_clusters,
-                max_sequences=max_sequences
-            )
-            self.logger.info(f"Initialized undirected mode with nearby target selection: "
-                           f"max_clusters={max_clusters}, max_sequences={max_sequences}")
-        else:
-            raise ValueError(f"Unknown mode '{mode}'")
-        
-        # Initialize progress tracking based on mode and stopping criteria
-        if mode == "directed":
-            # Directed mode: track target completion
-            progress_mode = "targets"
-            progress_total = len(matched_hash_ids)
-            progress_unit = " targets"
-            progress_desc = "Processing targets"
-        elif mode == "undirected":
-            if max_clusters:
-                # Cluster count mode: track cluster creation
-                progress_mode = "clusters"
-                progress_total = max_clusters
-                progress_unit = " clusters"
-                progress_desc = "Creating clusters"
-            elif max_sequences:
-                # Sequence count mode: track sequence assignment
-                progress_mode = "sequences"
-                progress_total = max_sequences
-                progress_unit = " sequences"
-                progress_desc = "Assigning sequences"
+        def handle_interruption(signum, frame):
+            """Handle KeyboardInterrupt gracefully."""
+            if not interruption_requested['flag']:
+                interruption_requested['flag'] = True
+                self.logger.info("\nInterruption received (Ctrl+C). Finishing current iteration and saving checkpoint...")
+                self.logger.info("Press Ctrl+C again to force exit (may lose progress)")
             else:
-                # Exhaustive mode: track sequences until all assigned
-                progress_mode = "sequences_exhaustive"
-                progress_total = len(headers)
-                progress_unit = " sequences"
-                progress_desc = "Assigning sequences"
-        else:
-            # Fallback
-            progress_mode = "targets"
-            progress_total = float('inf')
-            progress_unit = " targets"
-            progress_desc = "Processing"
-        
-        # Statistics tracking for progress bar
-        cluster_sizes = []
-        gap_sizes = []
-        
-        # Create overall progress bar
-        from tqdm import tqdm
-        pbar = tqdm(total=progress_total, desc=progress_desc, unit=progress_unit,
-                   bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}")
-        
-        # Main decomposition loop
-        iteration = 0
-        results = DecomposeResults()
-        
+                self.logger.warning("Force exit requested. Progress may be lost.")
+                # Restore original handler and re-raise
+                signal.signal(signal.SIGINT, original_handler)
+                raise KeyboardInterrupt
+
+        # Install signal handler
+        original_handler = signal.signal(signal.SIGINT, handle_interruption)
+
         try:
-            while target_selector.has_more_targets(assignment_tracker):
-                iteration += 1
-                # All iteration start messages now at debug level - progress bar shows the info
-                self.logger.debug(f"Starting iteration {iteration}")
-                # Get next target(s)
-                target_headers_for_iteration = target_selector.get_next_target(assignment_tracker)
-                if not target_headers_for_iteration:
-                    break
-                
-                self.logger.debug(f"Iteration {iteration}: targeting sequences {target_headers_for_iteration}")
-                
-                # Find BLAST neighborhood
-                neighborhood_headers = blast_finder.find_neighborhood(target_headers_for_iteration,
-                                                                      max_hits=self.blast_max_hits,
-                                                                      e_value_threshold=self.blast_evalue,
-                                                                      min_identity=self.min_identity)
+            # Auto-detect mode based on targets
+            if targets_fasta:
+                mode = "directed"
+                self.logger.info("Starting decomposition clustering in directed mode (targets provided)")
+            else:
+                mode = "undirected"
+                self.logger.info("Starting decomposition clustering in undirected mode")
 
-                
-                self.logger.debug(f"Found neighborhood of {len(neighborhood_headers)} sequences")
-                
-                # Store BLAST neighborhood in memory for nearby target selection (before pruning)
-                if target_headers_for_iteration:
-                    target_selector.add_blast_neighborhood(target_headers_for_iteration[0], neighborhood_headers)
-                
-                # Use all sequences in neighborhood (overlaps allowed)
-                sequences_for_clustering = neighborhood_headers
-                self.logger.debug(f"Using all {len(sequences_for_clustering)} sequences in neighborhood")
-                
-                # Get target indices in the neighborhood subset
-                neighborhood_to_full_idx = {h: headers.index(h) for h in sequences_for_clustering}
-                target_indices_in_neighborhood = []
-                
-                for target_header in target_headers_for_iteration:
-                    if target_header in sequences_for_clustering:
-                        neighborhood_idx = sequences_for_clustering.index(target_header)
-                        target_indices_in_neighborhood.append(neighborhood_idx)
-                
-                if not target_indices_in_neighborhood:
-                    self.logger.debug("No targets found in neighborhood subset - skipping iteration")
-                    continue
-                
-                # Extract sequences for neighborhood
-                neighborhood_sequences = [sequences[headers.index(h)] for h in sequences_for_clustering]
+            # Load input sequences with deduplication
+            sequences, hash_ids, hash_to_headers = load_sequences_with_deduplication(input_fasta)
+            self.logger.info(f"Loaded {len(sequences)} unique sequences from {input_fasta}")
 
-                short_count = 0
-                long_count = 0
-                for sequence in neighborhood_sequences:
-                    if len(sequence) < 400:
-                        short_count += 1
-                    else:
-                        long_count += 1
+            # For backward compatibility, create headers list using hash_ids
+            headers = hash_ids
 
-                self.logger.debug(f"Found {short_count} short and {long_count} long sequences")
+            # Sequence overlaps are always allowed
+            self.logger.info("Sequence overlaps: allowed")
 
-                # OPTIMIZATION: Prune neighborhood based on distance to targets
-                # This reduces computational cost of target clustering by focusing on closest candidates
-                pruned_sequences, pruned_headers, pruned_target_indices = self._prune_neighborhood_by_distance(
-                    neighborhood_sequences, sequences_for_clustering, target_indices_in_neighborhood, sequences, headers
-                )
-                
-                # Use global distance provider with subset mapping for pruned neighborhood
-                self.logger.debug(f"Using global distance provider for {len(pruned_sequences)} pruned neighborhood sequences")
-                global_distance_provider = self._get_or_create_distance_provider(sequences)
+            # Convert output_dir to Path if provided
+            output_dir_path = Path(output_dir) if output_dir else None
 
-                # Map pruned headers back to global indices
-                pruned_global_indices = [headers.index(h) for h in pruned_headers]
+            # Initialize state management if output_dir provided
+            state_manager = None
+            state = None
+            if output_dir_path:
+                import sys
+                state_manager = StateManager(output_dir_path)
 
-                # Create subset provider that maps pruned indices to global indices
-                subset_distance_provider = SubsetDistanceProvider(global_distance_provider, pruned_global_indices)
-
-                # Perform target clustering on pruned neighborhood
-                target_cluster_indices, remaining_indices, clustering_metrics = self.target_clustering.cluster(
-                    subset_distance_provider, pruned_target_indices, pruned_sequences
-                )
-                
-                # Log distance computation statistics
-                if hasattr(global_distance_provider, 'get_cache_stats'):
-                    stats = global_distance_provider.get_cache_stats()
-                    if stats['theoretical_max'] > 0:
-                        coverage_pct = 100.0 * stats['cached_distances'] / stats['theoretical_max']
-                        self.logger.debug(f"Distance computation stats: {stats['cached_distances']} computed "
-                                       f"out of {stats['theoretical_max']} possible "
-                                       f"({coverage_pct:.1f}% coverage)")
-                    else:
-                        self.logger.debug(f"Distance computation stats: {stats['cached_distances']} computed "
-                                       f"(no pairwise distances needed for single sequence)")
-                
-                # Convert indices back to sequence headers
-                target_cluster_headers = [pruned_headers[i] for i in target_cluster_indices]
-                remaining_headers = [pruned_headers[i] for i in remaining_indices]
-                
-                # Generate unique cluster ID
-                cluster_id = f"initial_{iteration:03d}"
-                
-                # Assign sequences to cluster
-                assignment_tracker.assign_sequences(target_cluster_headers, cluster_id, iteration)
-                
-                # Update BLAST memory for nearby target selection
-                target_selector.mark_sequences_processed(target_cluster_headers)
-                
-                # Record iteration summary
-                iteration_summary = {
-                    'iteration': iteration,
-                    'target_headers': target_headers_for_iteration,
-                    'neighborhood_size': len(neighborhood_headers),
-                    'sequences_for_clustering': len(sequences_for_clustering),
-                    'pruned_size': len(pruned_sequences),
-                    'cluster_size': len(target_cluster_headers),
-                    'remaining_size': len(remaining_headers),
-                    'cluster_id': cluster_id,
-                    'gap_size': clustering_metrics['best_config'].get('gap_size', 0.0)
-                }
-                
-                results.iteration_summaries.append(iteration_summary)
-                
-                # Update statistics for progress bar
-                cluster_sizes.append(len(target_cluster_headers))
-                gap_sizes.append(clustering_metrics['best_config'].get('gap_size', 0.0))
-                
-                # Calculate statistics for progress bar
-                median_cluster_size = sorted(cluster_sizes)[len(cluster_sizes)//2] if cluster_sizes else 0
-                median_gap_size = sorted(gap_sizes)[len(gap_sizes)//2] if gap_sizes else 0
-                assigned_total = len(assignment_tracker.assigned_sequences)
-                clusters_created = iteration
-                
-                # Update progress based on mode
-                if progress_mode == "targets":
-                    # Directed mode: increment by 1 target processed
-                    progress_increment = 1
-                    postfix = f"med_clust={median_cluster_size}, med_gap={median_gap_size:.3f}, assigned={assigned_total}"
-                elif progress_mode == "clusters":
-                    # Cluster count mode: increment by 1 cluster created
-                    progress_increment = 1
-                    postfix = f"med_clust={median_cluster_size}, med_gap={median_gap_size:.3f}, assigned={assigned_total}"
-                elif progress_mode in ["sequences", "sequences_exhaustive"]:
-                    # Sequence count mode: count unique sequences assigned (deduplicate)
-                    unique_assigned_count = len(assignment_tracker.assigned_sequences)
-                    progress_increment = unique_assigned_count - pbar.n  # Only increment by new unique assignments
-
-                    postfix = f"clusters={clusters_created}, med_clust={median_cluster_size}, med_gap={median_gap_size:.3f}"
+                if resume_from_state:
+                    # Resume from existing state
+                    state = resume_from_state
+                    self.logger.info(f"Resuming from checkpoint: iteration {state.initial_clustering.total_iterations}")
                 else:
-                    # Fallback
-                    progress_increment = 1
-                    postfix = f"med_clust={median_cluster_size}, med_gap={median_gap_size:.3f}, assigned={assigned_total}"
-                
-                # Update progress bar
-                pbar.set_postfix_str(postfix)
-                pbar.update(progress_increment)
-                
-                # All iteration completion messages at debug level - progress bar shows the main info
-                gap_size = clustering_metrics['best_config'].get('gap_size', 0.0)
-                self.logger.debug(f"Iteration {iteration} complete: "
-                                f"clustered {len(target_cluster_headers)} sequences, "
-                                f"gap size: {gap_size:.4f}")
+                    # Build parameters dict
+                    parameters = {
+                        "min_split": self.min_split,
+                        "max_lump": self.max_lump,
+                        "target_percentile": self.target_percentile,
+                        "blast_max_hits": self.blast_max_hits,
+                        "blast_evalue": self.blast_evalue,
+                        "min_identity": self.min_identity,
+                        "max_clusters": max_clusters,
+                        "max_sequences": max_sequences,
+                        "resolve_conflicts": self.resolve_conflicts,
+                        "refine_close_clusters": self.refine_close_clusters,
+                        "close_cluster_threshold": self.close_cluster_threshold
+                    }
 
-                # Save checkpoint every 10 iterations if state management enabled
-                if state_manager and state and iteration % 10 == 0:
+                    # Create initial state
+                    command = ' '.join(sys.argv) if hasattr(sys, 'argv') else "gaphack-decompose"
+                    from . import __version__
+                    state = create_initial_state(
+                        input_fasta=input_fasta,
+                        parameters=parameters,
+                        command=command,
+                        version=__version__
+                    )
+                    self.logger.info(f"State management initialized in {output_dir_path}")
+
+            # Initialize BLAST neighborhood finder with output directory
+            blast_finder = BlastNeighborhoodFinder(sequences, headers, output_dir=output_dir_path)
+
+            # Initialize or load assignment tracker and clusters
+            assignment_tracker = AssignmentTracker()
+            cluster_id_generator = ClusterIDGenerator(prefix="initial")
+            existing_clusters = {}
+
+            if resume_from_state and state_manager:
+                # Load existing clusters from FASTA files
+                current_pattern = state.get_current_stage_pattern()
+                existing_clusters = state_manager.load_clusters_from_pattern(current_pattern)
+                self.logger.info(f"Loaded {len(existing_clusters)} existing clusters from checkpoint")
+
+                # Rebuild assignment tracker from existing clusters
+                assignment_tracker = state_manager.rebuild_assignment_tracker(existing_clusters, headers)
+
+                # Update cluster ID generator to continue from where we left off
+                cluster_id_generator.counter = len(existing_clusters) + 1
+                self.logger.info(f"Resuming cluster generation from cluster #{cluster_id_generator.counter}")
+
+            # Initialize target selector based on mode
+            if mode == "directed":
+                target_sequences, target_headers, _ = load_sequences_from_fasta(targets_fasta)
+                self.logger.info(f"Loaded {len(target_headers)} target sequences from targets file")
+
+                # Find matching sequences in input based on sequence content
+                self.logger.info(f"Attempting to match {len(target_sequences)} target sequences against {len(sequences)} input sequences")
+                matched_hash_ids = self._find_matching_targets_by_content(target_sequences, target_headers, sequences, hash_ids)
+
+                if not matched_hash_ids:
+                    self.logger.error("No target sequences found matching sequences in input file")
+                    self.logger.error("Target headers preview:")
+                    for i, header in enumerate(target_headers[:3]):
+                        self.logger.error(f"  Target {i+1}: {header}")
+                    self.logger.error("Input hash_ids preview:")
+                    for i, hash_id in enumerate(hash_ids[:3]):
+                        self.logger.error(f"  Input {i+1}: {hash_id}")
+                    raise ValueError("No target sequences found matching sequences in input file")
+
+                self.logger.info(f"Found {len(matched_hash_ids)} target sequences matching input sequences")
+
+                # Target selector now works with hash_ids directly
+                target_selector = TargetSelector(matched_hash_ids)
+            elif mode == "undirected":
+                # Create nearby target selector with all sequence headers
+                target_selector = NearbyTargetSelector(
+                    all_headers=headers,
+                    max_clusters=max_clusters,
+                    max_sequences=max_sequences
+                )
+                self.logger.info(f"Initialized undirected mode with nearby target selection: "
+                               f"max_clusters={max_clusters}, max_sequences={max_sequences}")
+            else:
+                raise ValueError(f"Unknown mode '{mode}'")
+
+            # Initialize progress tracking based on mode and stopping criteria
+            if mode == "directed":
+                # Directed mode: track target completion
+                progress_mode = "targets"
+                progress_total = len(matched_hash_ids)
+                progress_unit = " targets"
+                progress_desc = "Processing targets"
+            elif mode == "undirected":
+                if max_clusters:
+                    # Cluster count mode: track cluster creation
+                    progress_mode = "clusters"
+                    progress_total = max_clusters
+                    progress_unit = " clusters"
+                    progress_desc = "Creating clusters"
+                elif max_sequences:
+                    # Sequence count mode: track sequence assignment
+                    progress_mode = "sequences"
+                    progress_total = max_sequences
+                    progress_unit = " sequences"
+                    progress_desc = "Assigning sequences"
+                else:
+                    # Exhaustive mode: track sequences until all assigned
+                    progress_mode = "sequences_exhaustive"
+                    progress_total = len(headers)
+                    progress_unit = " sequences"
+                    progress_desc = "Assigning sequences"
+            else:
+                # Fallback
+                progress_mode = "targets"
+                progress_total = float('inf')
+                progress_unit = " targets"
+                progress_desc = "Processing"
+
+            # Statistics tracking for progress bar
+            cluster_sizes = []
+            gap_sizes = []
+
+            # Create overall progress bar
+            from tqdm import tqdm
+            pbar = tqdm(total=progress_total, desc=progress_desc, unit=progress_unit,
+                       bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}")
+
+            # Main decomposition loop
+            if resume_from_state:
+                iteration = state.initial_clustering.total_iterations
+                self.logger.info(f"Resuming from iteration {iteration}")
+            else:
+                iteration = 0
+            results = DecomposeResults()
+
+            # Load existing clusters into results if resuming
+            if existing_clusters:
+                results.all_clusters = existing_clusters.copy()
+
+            try:
+                while target_selector.has_more_targets(assignment_tracker):
+                    iteration += 1
+                    # All iteration start messages now at debug level - progress bar shows the info
+                    self.logger.debug(f"Starting iteration {iteration}")
+                    # Get next target(s)
+                    target_headers_for_iteration = target_selector.get_next_target(assignment_tracker)
+                    if not target_headers_for_iteration:
+                        break
+                    
+                    self.logger.debug(f"Iteration {iteration}: targeting sequences {target_headers_for_iteration}")
+                    
+                    # Find BLAST neighborhood
+                    neighborhood_headers = blast_finder.find_neighborhood(target_headers_for_iteration,
+                                                                          max_hits=self.blast_max_hits,
+                                                                          e_value_threshold=self.blast_evalue,
+                                                                          min_identity=self.min_identity)
+    
+                    
+                    self.logger.debug(f"Found neighborhood of {len(neighborhood_headers)} sequences")
+                    
+                    # Store BLAST neighborhood in memory for nearby target selection (before pruning)
+                    if target_headers_for_iteration:
+                        target_selector.add_blast_neighborhood(target_headers_for_iteration[0], neighborhood_headers)
+                    
+                    # Use all sequences in neighborhood (overlaps allowed)
+                    sequences_for_clustering = neighborhood_headers
+                    self.logger.debug(f"Using all {len(sequences_for_clustering)} sequences in neighborhood")
+                    
+                    # Get target indices in the neighborhood subset
+                    neighborhood_to_full_idx = {h: headers.index(h) for h in sequences_for_clustering}
+                    target_indices_in_neighborhood = []
+                    
+                    for target_header in target_headers_for_iteration:
+                        if target_header in sequences_for_clustering:
+                            neighborhood_idx = sequences_for_clustering.index(target_header)
+                            target_indices_in_neighborhood.append(neighborhood_idx)
+                    
+                    if not target_indices_in_neighborhood:
+                        self.logger.debug("No targets found in neighborhood subset - skipping iteration")
+                        continue
+                    
+                    # Extract sequences for neighborhood
+                    neighborhood_sequences = [sequences[headers.index(h)] for h in sequences_for_clustering]
+    
+                    short_count = 0
+                    long_count = 0
+                    for sequence in neighborhood_sequences:
+                        if len(sequence) < 400:
+                            short_count += 1
+                        else:
+                            long_count += 1
+    
+                    self.logger.debug(f"Found {short_count} short and {long_count} long sequences")
+    
+                    # OPTIMIZATION: Prune neighborhood based on distance to targets
+                    # This reduces computational cost of target clustering by focusing on closest candidates
+                    pruned_sequences, pruned_headers, pruned_target_indices = self._prune_neighborhood_by_distance(
+                        neighborhood_sequences, sequences_for_clustering, target_indices_in_neighborhood, sequences, headers
+                    )
+                    
+                    # Use global distance provider with subset mapping for pruned neighborhood
+                    self.logger.debug(f"Using global distance provider for {len(pruned_sequences)} pruned neighborhood sequences")
+                    global_distance_provider = self._get_or_create_distance_provider(sequences)
+    
+                    # Map pruned headers back to global indices
+                    pruned_global_indices = [headers.index(h) for h in pruned_headers]
+    
+                    # Create subset provider that maps pruned indices to global indices
+                    subset_distance_provider = SubsetDistanceProvider(global_distance_provider, pruned_global_indices)
+    
+                    # Perform target clustering on pruned neighborhood
+                    target_cluster_indices, remaining_indices, clustering_metrics = self.target_clustering.cluster(
+                        subset_distance_provider, pruned_target_indices, pruned_sequences
+                    )
+                    
+                    # Log distance computation statistics
+                    if hasattr(global_distance_provider, 'get_cache_stats'):
+                        stats = global_distance_provider.get_cache_stats()
+                        if stats['theoretical_max'] > 0:
+                            coverage_pct = 100.0 * stats['cached_distances'] / stats['theoretical_max']
+                            self.logger.debug(f"Distance computation stats: {stats['cached_distances']} computed "
+                                           f"out of {stats['theoretical_max']} possible "
+                                           f"({coverage_pct:.1f}% coverage)")
+                        else:
+                            self.logger.debug(f"Distance computation stats: {stats['cached_distances']} computed "
+                                           f"(no pairwise distances needed for single sequence)")
+                    
+                    # Convert indices back to sequence headers
+                    target_cluster_headers = [pruned_headers[i] for i in target_cluster_indices]
+                    remaining_headers = [pruned_headers[i] for i in remaining_indices]
+                    
+                    # Generate unique cluster ID
+                    cluster_id = f"initial_{iteration:03d}"
+                    
+                    # Assign sequences to cluster
+                    assignment_tracker.assign_sequences(target_cluster_headers, cluster_id, iteration)
+                    
+                    # Update BLAST memory for nearby target selection
+                    target_selector.mark_sequences_processed(target_cluster_headers)
+                    
+                    # Record iteration summary
+                    iteration_summary = {
+                        'iteration': iteration,
+                        'target_headers': target_headers_for_iteration,
+                        'neighborhood_size': len(neighborhood_headers),
+                        'sequences_for_clustering': len(sequences_for_clustering),
+                        'pruned_size': len(pruned_sequences),
+                        'cluster_size': len(target_cluster_headers),
+                        'remaining_size': len(remaining_headers),
+                        'cluster_id': cluster_id,
+                        'gap_size': clustering_metrics['best_config'].get('gap_size', 0.0)
+                    }
+                    
+                    results.iteration_summaries.append(iteration_summary)
+                    
+                    # Update statistics for progress bar
+                    cluster_sizes.append(len(target_cluster_headers))
+                    gap_sizes.append(clustering_metrics['best_config'].get('gap_size', 0.0))
+                    
+                    # Calculate statistics for progress bar
+                    median_cluster_size = sorted(cluster_sizes)[len(cluster_sizes)//2] if cluster_sizes else 0
+                    median_gap_size = sorted(gap_sizes)[len(gap_sizes)//2] if gap_sizes else 0
+                    assigned_total = len(assignment_tracker.assigned_sequences)
+                    clusters_created = iteration
+                    
+                    # Update progress based on mode
+                    if progress_mode == "targets":
+                        # Directed mode: increment by 1 target processed
+                        progress_increment = 1
+                        postfix = f"med_clust={median_cluster_size}, med_gap={median_gap_size:.3f}, assigned={assigned_total}"
+                    elif progress_mode == "clusters":
+                        # Cluster count mode: increment by 1 cluster created
+                        progress_increment = 1
+                        postfix = f"med_clust={median_cluster_size}, med_gap={median_gap_size:.3f}, assigned={assigned_total}"
+                    elif progress_mode in ["sequences", "sequences_exhaustive"]:
+                        # Sequence count mode: count unique sequences assigned (deduplicate)
+                        unique_assigned_count = len(assignment_tracker.assigned_sequences)
+                        progress_increment = unique_assigned_count - pbar.n  # Only increment by new unique assignments
+    
+                        postfix = f"clusters={clusters_created}, med_clust={median_cluster_size}, med_gap={median_gap_size:.3f}"
+                    else:
+                        # Fallback
+                        progress_increment = 1
+                        postfix = f"med_clust={median_cluster_size}, med_gap={median_gap_size:.3f}, assigned={assigned_total}"
+                    
+                    # Update progress bar
+                    pbar.set_postfix_str(postfix)
+                    pbar.update(progress_increment)
+                    
+                    # All iteration completion messages at debug level - progress bar shows the main info
+                    gap_size = clustering_metrics['best_config'].get('gap_size', 0.0)
+                    self.logger.debug(f"Iteration {iteration} complete: "
+                                    f"clustered {len(target_cluster_headers)} sequences, "
+                                    f"gap size: {gap_size:.4f}")
+    
+                    # Save checkpoint every N iterations if state management enabled
+                    if state_manager and state and iteration % checkpoint_interval == 0:
+                        try:
+                            # Get current clusters from assignment tracker
+                            current_clusters = {}
+                            all_assignments = assignment_tracker.get_all_assignments()
+                            for seq_id, assignments in all_assignments.items():
+                                for cluster_id, _ in assignments:
+                                    if cluster_id not in current_clusters:
+                                        current_clusters[cluster_id] = []
+                                    current_clusters[cluster_id].append(seq_id)
+    
+                            # Save checkpoint
+                            state_manager.save_stage_fasta(current_clusters, sequences, headers, "initial")
+                            state.initial_clustering.total_clusters = len(current_clusters)
+                            state.initial_clustering.total_sequences = len(assignment_tracker.assigned_sequences)
+                            state.initial_clustering.total_iterations = iteration
+                            state.save(output_dir_path)
+                            self.logger.debug(f"Checkpoint saved at iteration {iteration}")
+                        except Exception as e:
+                            self.logger.warning(f"Failed to save checkpoint at iteration {iteration}: {e}")
+    
+                    # Check for interruption request
+                    if interruption_requested['flag']:
+                        self.logger.info(f"Interruption requested. Saving checkpoint at iteration {iteration}...")
+                        # Save final checkpoint before exit
+                        if state_manager and state:
+                            try:
+                                # Get current clusters from assignment tracker
+                                current_clusters = {}
+                                all_assignments = assignment_tracker.get_all_assignments()
+                                for seq_id, assignments in all_assignments.items():
+                                    for cluster_id, _ in assignments:
+                                        if cluster_id not in current_clusters:
+                                            current_clusters[cluster_id] = []
+                                        current_clusters[cluster_id].append(seq_id)
+    
+                                # Save checkpoint
+                                state_manager.save_stage_fasta(current_clusters, sequences, headers, "initial")
+                                state.initial_clustering.total_clusters = len(current_clusters)
+                                state.initial_clustering.total_sequences = len(assignment_tracker.assigned_sequences)
+                                state.initial_clustering.total_iterations = iteration
+                                state.save(output_dir_path)
+                                self.logger.info(f"Checkpoint saved successfully. You can resume with --resume {output_dir_path}")
+                            except Exception as e:
+                                self.logger.error(f"Failed to save checkpoint on interruption: {e}")
+                        break
+    
+                    # Check stopping criteria for undirected mode
+                    if max_clusters and iteration >= max_clusters:
+                        self.logger.info(f"Reached maximum clusters ({max_clusters}) - stopping")
+                        break
+    
+                    if max_sequences:
+                        assigned_count = len(assignment_tracker.assigned_sequences)
+                        if assigned_count >= max_sequences:
+                            self.logger.info(f"Reached maximum sequences ({max_sequences}) - stopping")
+                            break
+
+            finally:
+                # Close progress bar
+                pbar.close()
+                # Clean up BLAST database
+                blast_finder.cleanup()
+
+                # Process final results
+                results.total_iterations = iteration
+                results.total_sequences_processed = len(assignment_tracker.assigned_sequences)
+                results.coverage_percentage = (len(assignment_tracker.assigned_sequences) / len(headers)) * 100.0
+            
+                # Save final checkpoint after initial clustering if state management enabled
+                if state_manager and state:
                     try:
                         # Get current clusters from assignment tracker
                         current_clusters = {}
@@ -639,182 +763,157 @@ class DecomposeClustering:
                                 if cluster_id not in current_clusters:
                                     current_clusters[cluster_id] = []
                                 current_clusters[cluster_id].append(seq_id)
-
-                        # Save checkpoint
+            
+                        # Save final initial clustering state
                         state_manager.save_stage_fasta(current_clusters, sequences, headers, "initial")
                         state.initial_clustering.total_clusters = len(current_clusters)
-                        state.initial_clustering.total_sequences_assigned = len(assignment_tracker.assigned_sequences)
-                        state.initial_clustering.iterations_completed = iteration
+                        state.initial_clustering.total_sequences = len(assignment_tracker.assigned_sequences)
+                        state.initial_clustering.total_iterations = iteration
+                        state.initial_clustering.coverage_percentage = (len(assignment_tracker.assigned_sequences) / len(headers)) * 100.0
+                        state.stage = "initial_clustering"
+            
+                        # Only mark as completed if we reached natural exhaustion (not stopped by limits)
+                        stopped_by_limit = False
+                        if max_clusters and iteration >= max_clusters:
+                            stopped_by_limit = True
+                        if max_sequences and len(assignment_tracker.assigned_sequences) >= max_sequences:
+                            stopped_by_limit = True
+            
+                        state.initial_clustering.completed = not stopped_by_limit
+                        if stopped_by_limit:
+                            self.logger.info(f"Initial clustering paused at limit (can be resumed)")
+                        else:
+                            self.logger.info(f"Initial clustering completed (exhausted all sequences)")
+            
                         state.save(output_dir_path)
-                        self.logger.debug(f"Checkpoint saved at iteration {iteration}")
+                        self.logger.info(f"Final checkpoint saved after {iteration} iterations")
                     except Exception as e:
-                        self.logger.warning(f"Failed to save checkpoint at iteration {iteration}: {e}")
-
-                # Check stopping criteria for undirected mode
-                if max_clusters and iteration >= max_clusters:
-                    self.logger.info(f"Reached maximum clusters ({max_clusters}) - stopping")
-                    break
+                        self.logger.warning(f"Failed to save final checkpoint: {e}")
                 
-                if max_sequences:
-                    assigned_count = len(assignment_tracker.assigned_sequences)
-                    if assigned_count >= max_sequences:
-                        self.logger.info(f"Reached maximum sequences ({max_sequences}) - stopping")
-                        break
-        
-        finally:
-            # Close progress bar
-            pbar.close()
-            # Clean up BLAST database
-            blast_finder.cleanup()
-
-        # Process final results
-        results.total_iterations = iteration
-        results.total_sequences_processed = len(assignment_tracker.assigned_sequences)
-        results.coverage_percentage = (len(assignment_tracker.assigned_sequences) / len(headers)) * 100.0
-
-        # Save final checkpoint after initial clustering if state management enabled
-        if state_manager and state:
-            try:
-                # Get current clusters from assignment tracker
-                current_clusters = {}
+                # Get single assignments (no conflicts) for summary reporting
+                single_assignments = assignment_tracker.get_single_assignments()
+                
+                # Group non-conflicted sequences by cluster
+                results.clusters = {}
+                for seq_id, cluster_id in single_assignments.items():
+                    if cluster_id not in results.clusters:
+                        results.clusters[cluster_id] = []
+                    results.clusters[cluster_id].append(seq_id)
+                
+                # Group ALL sequences by cluster (including conflicts) for FASTA generation
+                results.all_clusters = {}
                 all_assignments = assignment_tracker.get_all_assignments()
                 for seq_id, assignments in all_assignments.items():
-                    for cluster_id, _ in assignments:
-                        if cluster_id not in current_clusters:
-                            current_clusters[cluster_id] = []
-                        current_clusters[cluster_id].append(seq_id)
+                    for cluster_id, iteration in assignments:
+                        if cluster_id not in results.all_clusters:
+                            results.all_clusters[cluster_id] = []
+                        results.all_clusters[cluster_id].append(seq_id)
+                
+                # Get unassigned sequences
+                results.unassigned = assignment_tracker.get_unassigned(headers)
+                
+                # Get conflicts
+                results.conflicts = assignment_tracker.get_conflicts()
+                
+                # Enhanced final summary with aggregate statistics
+                total_clustered_seqs = sum(len(cluster) for cluster in results.clusters.values())
+                avg_cluster_size = total_clustered_seqs / len(results.clusters) if results.clusters else 0
+                large_clusters = sum(1 for cluster in results.clusters.values() if len(cluster) > 10)
+                
+                self.logger.info(f"Decomposition complete: {len(results.clusters)} clusters created "
+                                f"({large_clusters} with >10 sequences), "
+                                f"{results.total_sequences_processed} sequences assigned ({results.coverage_percentage:.1f}% coverage), "
+                                f"average cluster size: {avg_cluster_size:.1f}")
+                
+                if results.conflicts:
+                    self.logger.info(f"Conflicts detected: {len(results.conflicts)}")
+            
+                # Perform initial conflict verification after decomposition
+                initial_verification = self._verify_no_conflicts(results.all_clusters, results.conflicts, "after_decomposition")
+            
+                # Store original conflicts for tracking resolution progress
+                original_conflicts = results.conflicts.copy() if results.conflicts else {}
+            
+                # Apply cluster refinement for conflict resolution if enabled
+                if getattr(self, 'resolve_conflicts', False) and results.conflicts:
+                    self.logger.info(f"Starting cluster refinement for {len(results.conflicts)} conflicts")
+                    results = self._resolve_conflicts(results, sequences, headers)
+            
+                    # Verify conflict resolution effectiveness
+                    if original_conflicts:
+                        post_resolution_verification = self._verify_no_conflicts(
+                            results.all_clusters, original_conflicts, "after_conflict_resolution"
+                        )
+            
+                # Apply cluster refinement for close cluster refinement if enabled
+                if getattr(self, 'refine_close_clusters', False):
+                    self.logger.info("Starting cluster refinement for close cluster refinement")
+                    results = self._refine_close_clusters_via_refinement(results, sequences, headers)
+            
+                # Expand hash IDs back to original headers
+                results = self._expand_hash_ids_to_headers(results, hash_to_headers)
+            
+                # CRITICAL: Always perform final comprehensive conflict verification
+                # This runs regardless of whether initial conflicts were detected or resolved
+                # to catch any conflicts that may have been missed or introduced during processing
+                self.logger.info("Performing final comprehensive conflict verification (always runs regardless of initial conflict status)")
+                final_verification = self._verify_no_conflicts(results.all_clusters, original_conflicts, "final_comprehensive")
+            
+                # Store verification results in the results object for external access
+                results.verification_results = {
+                    'initial': initial_verification,
+                    'final': final_verification
+                }
+            
+                # Add post-resolution verification if conflict resolution was performed
+                if getattr(self, 'resolve_conflicts', False) and original_conflicts and 'post_resolution_verification' in locals():
+                    results.verification_results['post_resolution'] = post_resolution_verification
+            
+                # Update final results based on comprehensive verification findings
+                # The final verification is the authoritative source of truth for conflicts
+                if final_verification.get('critical_failure', False):
+                    # Override the conflicts field with what final verification actually found
+                    results.conflicts = final_verification['conflicts']
+                    self.logger.warning(f"Final verification detected {len(final_verification['conflicts'])} conflicts that were missed by initial detection!")
+            
+                # Always update the conflicts field with the final verification results for accuracy
+                # This ensures the output reflects the true state regardless of intermediate processing
+                results.conflicts = final_verification['conflicts']
+            
+                # Log final status
+                if final_verification['no_conflicts']:
+                    self.logger.info("🎉 Final verification confirms conflict-free clustering achieved")
+                else:
+                    self.logger.error(f"❌ Final verification reveals {len(final_verification['conflicts'])} conflicts in output")
+            
+                # Final renumbering: internal names (initial_xxx, deconflicted_xxx, refined_xxx) -> cluster_xxx
+                # This is the only renumbering, creating a clean 1:1 mapping for output
+                self.logger.info("Applying final cluster renumbering for output")
+                final_clusters, final_mapping = self._renumber_clusters_sequentially(results.all_clusters)
+            
+                results.all_clusters = final_clusters
+                # For results.clusters, we need to rebuild from non-conflicted sequences
+                # since the cluster IDs have changed
+                if results.conflicts:
+                    # Rebuild clusters dict excluding conflicted sequences
+                    results.clusters = {}
+                    for cluster_id, headers in final_clusters.items():
+                        non_conflicted_headers = [h for h in headers if h not in results.conflicts]
+                        if non_conflicted_headers:
+                            results.clusters[cluster_id] = non_conflicted_headers
+                else:
+                    results.clusters = final_clusters.copy()
+            
+                results.active_to_final_mapping = final_mapping
+            
+                self.logger.debug(f"Final renumbering: {len(final_mapping)} internal clusters -> {len(final_clusters)} output clusters")
+            
+                return results
 
-                # Save final initial clustering state
-                state_manager.save_stage_fasta(current_clusters, sequences, headers, "initial")
-                state.initial_clustering.total_clusters = len(current_clusters)
-                state.initial_clustering.total_sequences_assigned = len(assignment_tracker.assigned_sequences)
-                state.initial_clustering.iterations_completed = iteration
-                state.initial_clustering.completion_time = datetime.datetime.now().isoformat()
-                state.stage = "initial_clustering_complete"
-                state.save(output_dir_path)
-                self.logger.info(f"Final checkpoint saved after {iteration} iterations")
-            except Exception as e:
-                self.logger.warning(f"Failed to save final checkpoint: {e}")
-        
-        # Get single assignments (no conflicts) for summary reporting
-        single_assignments = assignment_tracker.get_single_assignments()
-        
-        # Group non-conflicted sequences by cluster
-        results.clusters = {}
-        for seq_id, cluster_id in single_assignments.items():
-            if cluster_id not in results.clusters:
-                results.clusters[cluster_id] = []
-            results.clusters[cluster_id].append(seq_id)
-        
-        # Group ALL sequences by cluster (including conflicts) for FASTA generation
-        results.all_clusters = {}
-        all_assignments = assignment_tracker.get_all_assignments()
-        for seq_id, assignments in all_assignments.items():
-            for cluster_id, iteration in assignments:
-                if cluster_id not in results.all_clusters:
-                    results.all_clusters[cluster_id] = []
-                results.all_clusters[cluster_id].append(seq_id)
-        
-        # Get unassigned sequences
-        results.unassigned = assignment_tracker.get_unassigned(headers)
-        
-        # Get conflicts
-        results.conflicts = assignment_tracker.get_conflicts()
-        
-        # Enhanced final summary with aggregate statistics
-        total_clustered_seqs = sum(len(cluster) for cluster in results.clusters.values())
-        avg_cluster_size = total_clustered_seqs / len(results.clusters) if results.clusters else 0
-        large_clusters = sum(1 for cluster in results.clusters.values() if len(cluster) > 10)
-        
-        self.logger.info(f"Decomposition complete: {len(results.clusters)} clusters created "
-                        f"({large_clusters} with >10 sequences), "
-                        f"{results.total_sequences_processed} sequences assigned ({results.coverage_percentage:.1f}% coverage), "
-                        f"average cluster size: {avg_cluster_size:.1f}")
-        
-        if results.conflicts:
-            self.logger.info(f"Conflicts detected: {len(results.conflicts)}")
-
-        # Perform initial conflict verification after decomposition
-        initial_verification = self._verify_no_conflicts(results.all_clusters, results.conflicts, "after_decomposition")
-
-        # Store original conflicts for tracking resolution progress
-        original_conflicts = results.conflicts.copy() if results.conflicts else {}
-
-        # Apply cluster refinement for conflict resolution if enabled
-        if getattr(self, 'resolve_conflicts', False) and results.conflicts:
-            self.logger.info(f"Starting cluster refinement for {len(results.conflicts)} conflicts")
-            results = self._resolve_conflicts(results, sequences, headers)
-
-            # Verify conflict resolution effectiveness
-            if original_conflicts:
-                post_resolution_verification = self._verify_no_conflicts(
-                    results.all_clusters, original_conflicts, "after_conflict_resolution"
-                )
-
-        # Apply cluster refinement for close cluster refinement if enabled
-        if getattr(self, 'refine_close_clusters', False):
-            self.logger.info("Starting cluster refinement for close cluster refinement")
-            results = self._refine_close_clusters_via_refinement(results, sequences, headers)
-
-        # Expand hash IDs back to original headers
-        results = self._expand_hash_ids_to_headers(results, hash_to_headers)
-
-        # CRITICAL: Always perform final comprehensive conflict verification
-        # This runs regardless of whether initial conflicts were detected or resolved
-        # to catch any conflicts that may have been missed or introduced during processing
-        self.logger.info("Performing final comprehensive conflict verification (always runs regardless of initial conflict status)")
-        final_verification = self._verify_no_conflicts(results.all_clusters, original_conflicts, "final_comprehensive")
-
-        # Store verification results in the results object for external access
-        results.verification_results = {
-            'initial': initial_verification,
-            'final': final_verification
-        }
-
-        # Add post-resolution verification if conflict resolution was performed
-        if getattr(self, 'resolve_conflicts', False) and original_conflicts and 'post_resolution_verification' in locals():
-            results.verification_results['post_resolution'] = post_resolution_verification
-
-        # Update final results based on comprehensive verification findings
-        # The final verification is the authoritative source of truth for conflicts
-        if final_verification.get('critical_failure', False):
-            # Override the conflicts field with what final verification actually found
-            results.conflicts = final_verification['conflicts']
-            self.logger.warning(f"Final verification detected {len(final_verification['conflicts'])} conflicts that were missed by initial detection!")
-
-        # Always update the conflicts field with the final verification results for accuracy
-        # This ensures the output reflects the true state regardless of intermediate processing
-        results.conflicts = final_verification['conflicts']
-
-        # Log final status
-        if final_verification['no_conflicts']:
-            self.logger.info("🎉 Final verification confirms conflict-free clustering achieved")
-        else:
-            self.logger.error(f"❌ Final verification reveals {len(final_verification['conflicts'])} conflicts in output")
-
-        # Final renumbering: internal names (initial_xxx, deconflicted_xxx, refined_xxx) -> cluster_xxx
-        # This is the only renumbering, creating a clean 1:1 mapping for output
-        self.logger.info("Applying final cluster renumbering for output")
-        final_clusters, final_mapping = self._renumber_clusters_sequentially(results.all_clusters)
-
-        results.all_clusters = final_clusters
-        # For results.clusters, we need to rebuild from non-conflicted sequences
-        # since the cluster IDs have changed
-        if results.conflicts:
-            # Rebuild clusters dict excluding conflicted sequences
-            results.clusters = {}
-            for cluster_id, headers in final_clusters.items():
-                non_conflicted_headers = [h for h in headers if h not in results.conflicts]
-                if non_conflicted_headers:
-                    results.clusters[cluster_id] = non_conflicted_headers
-        else:
-            results.clusters = final_clusters.copy()
-
-        results.active_to_final_mapping = final_mapping
-
-        self.logger.debug(f"Final renumbering: {len(final_mapping)} internal clusters -> {len(final_clusters)} output clusters")
-
-        return results
+        finally:
+            # Restore original signal handler
+            if original_handler is not None:
+                signal.signal(signal.SIGINT, original_handler)
     
     def _prune_neighborhood_by_distance(self, neighborhood_sequences: List[str],
                                        neighborhood_headers: List[str],
@@ -1282,3 +1381,189 @@ class DecomposeClustering:
             original_conflicts=original_conflicts,
             context=context
         )
+
+
+def resume_decompose(output_dir: Path,
+                     max_clusters: Optional[int] = None,
+                     max_sequences: Optional[int] = None,
+                     resolve_conflicts: bool = False,
+                     refine_close_clusters: float = 0.0,
+                     force_input_change: bool = False,
+                     checkpoint_interval: int = 10,
+                     **kwargs) -> DecomposeResults:
+    """Resume decompose clustering from saved state.
+
+    Determines current stage and continues appropriately:
+    - If in initial_clustering: continue adding clusters
+    - If refinement requested: apply refinement stage
+    - If all complete: report completion status
+
+    Args:
+        output_dir: Output directory containing state.json
+        max_clusters: New maximum cluster count (absolute, not incremental)
+        max_sequences: New maximum sequence count (absolute, not incremental)
+        resolve_conflicts: Whether to apply conflict resolution
+        refine_close_clusters: Distance threshold for close cluster refinement (0.0 = disabled)
+        force_input_change: Allow resuming with modified input FASTA
+        checkpoint_interval: Save checkpoint every N iterations (default: 10)
+        **kwargs: Additional parameters passed to DecomposeClustering
+
+    Returns:
+        DecomposeResults with updated clustering
+
+    Raises:
+        FileNotFoundError: If output directory or state file doesn't exist
+        ValueError: If input FASTA has changed without force flag
+    """
+    logger.info(f"Resuming decompose from: {output_dir}")
+
+    # Load state
+    state = DecomposeState.load(output_dir)
+    logger.info(f"Loaded state: stage={state.stage}, status={state.status}")
+
+    # Validate input
+    input_fasta = state.input.fasta_path
+    if not Path(input_fasta).exists():
+        raise FileNotFoundError(f"Input FASTA not found: {input_fasta}")
+
+    state.validate_input_hash(input_fasta, force=force_input_change)
+
+    # Load current clusters from FASTA files
+    state_manager = StateManager(output_dir)
+    current_pattern = state.get_current_stage_pattern()
+    current_clusters = state_manager.load_clusters_from_pattern(current_pattern)
+    logger.info(f"Loaded {len(current_clusters)} clusters from pattern '{current_pattern}'")
+
+    # Load unassigned sequences
+    unassigned_file = state.initial_clustering.unassigned_file
+    unassigned_headers = state_manager.load_unassigned_sequences(unassigned_file)
+
+    # Load all sequences and headers
+    sequences, hash_ids, hash_to_headers = load_sequences_with_deduplication(input_fasta)
+    all_headers = []
+    for headers_list in hash_to_headers.values():
+        all_headers.extend(headers_list)
+
+    # Rebuild assignment tracker
+    assignment_tracker = state_manager.rebuild_assignment_tracker(current_clusters, all_headers)
+    logger.info(f"Rebuilt assignment tracker: {len(assignment_tracker.assigned_sequences)} assigned")
+
+    # Determine action based on stage and parameters
+    if not state.initial_clustering.completed:
+        # Continue initial clustering
+        logger.info("Continuing initial clustering from checkpoint")
+        return _continue_initial_clustering(
+            state=state,
+            state_manager=state_manager,
+            input_fasta=input_fasta,
+            assignment_tracker=assignment_tracker,
+            current_clusters=current_clusters,
+            max_clusters=max_clusters,
+            max_sequences=max_sequences,
+            resolve_conflicts=resolve_conflicts,
+            refine_close_clusters=refine_close_clusters,
+            checkpoint_interval=checkpoint_interval,
+            **kwargs
+        )
+    elif resolve_conflicts and not state.conflict_resolution.completed:
+        # Apply conflict resolution
+        logger.info("Applying conflict resolution stage")
+        # TODO: Implement in Phase 4
+        raise NotImplementedError("Conflict resolution resume not yet implemented (Phase 4)")
+    elif refine_close_clusters > 0:
+        # Apply close cluster refinement
+        logger.info(f"Applying close cluster refinement with threshold={refine_close_clusters}")
+        # TODO: Implement in Phase 4
+        raise NotImplementedError("Close cluster refinement resume not yet implemented (Phase 4)")
+    else:
+        # Nothing to do
+        logger.info("Clustering already complete. No action requested.")
+        logger.info(f"  Total clusters: {len(current_clusters)}")
+        logger.info(f"  Unassigned sequences: {len(unassigned_headers)}")
+        logger.info("Use --resolve-conflicts or --refine-close-clusters to apply refinement.")
+
+        # Return results object from current state
+        results = DecomposeResults()
+        results.clusters = current_clusters
+        results.all_clusters = current_clusters.copy()
+        results.unassigned = unassigned_headers
+        results.conflicts = assignment_tracker.get_conflicts()
+        results.total_iterations = state.initial_clustering.total_iterations
+        results.total_sequences_processed = state.initial_clustering.total_sequences
+        results.coverage_percentage = state.initial_clustering.coverage_percentage
+
+        return results
+
+
+def _continue_initial_clustering(state: DecomposeState,
+                                 state_manager: StateManager,
+                                 input_fasta: str,
+                                 assignment_tracker: AssignmentTracker,
+                                 current_clusters: Dict[str, List[str]],
+                                 max_clusters: Optional[int] = None,
+                                 max_sequences: Optional[int] = None,
+                                 resolve_conflicts: bool = False,
+                                 refine_close_clusters: float = 0.0,
+                                 checkpoint_interval: int = 10,
+                                 **kwargs) -> DecomposeResults:
+    """Continue initial clustering from checkpoint.
+
+    Args:
+        state: Current decompose state
+        state_manager: State manager for saving checkpoints
+        input_fasta: Input FASTA path
+        assignment_tracker: Reconstructed assignment tracker
+        current_clusters: Currently assigned clusters
+        max_clusters: New maximum cluster count (absolute)
+        max_sequences: New maximum sequence count (absolute)
+        resolve_conflicts: Whether to apply conflict resolution after clustering
+        refine_close_clusters: Distance threshold for close cluster refinement
+        checkpoint_interval: Save checkpoint every N iterations (default: 10)
+        **kwargs: Additional parameters
+
+    Returns:
+        DecomposeResults with continued clustering
+    """
+    logger.info("Continuing initial clustering from checkpoint")
+
+    # Update limits if provided
+    if max_clusters is not None:
+        state.initial_clustering.max_clusters_limit = max_clusters
+        logger.info(f"Updated max_clusters limit to: {max_clusters} (absolute)")
+
+    if max_sequences is not None:
+        state.initial_clustering.max_sequences_limit = max_sequences
+        logger.info(f"Updated max_sequences limit to: {max_sequences} (absolute)")
+
+    # Extract clustering parameters from state
+    params = state.parameters
+
+    # Initialize decomposition clustering with same parameters
+    decomposer = DecomposeClustering(
+        min_split=params['min_split'],
+        max_lump=params['max_lump'],
+        target_percentile=params['target_percentile'],
+        blast_max_hits=params['blast_max_hits'],
+        blast_threads=params.get('blast_threads'),
+        blast_evalue=params['blast_evalue'],
+        min_identity=params.get('min_identity'),
+        resolve_conflicts=resolve_conflicts,
+        refine_close_clusters=refine_close_clusters > 0.0,
+        close_cluster_threshold=refine_close_clusters,
+        show_progress=kwargs.get('show_progress', True),
+        logger=logger
+    )
+
+    # Run decompose with continuation state
+    # The decomposer will check output_dir for existing state and continue from there
+    results = decomposer.decompose(
+        input_fasta=input_fasta,
+        targets_fasta=kwargs.get('targets_fasta'),
+        max_clusters=max_clusters,
+        max_sequences=max_sequences,
+        output_dir=str(state_manager.output_dir),
+        resume_from_state=state,  # Pass state to indicate continuation
+        checkpoint_interval=checkpoint_interval
+    )
+
+    return results
