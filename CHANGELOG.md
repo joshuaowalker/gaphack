@@ -5,6 +5,70 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2025-01-29
+
+### Added
+- **Comprehensive testing infrastructure**: 317 passing tests with 18,958 lines of test code
+- **Real biological validation**: 1,429 Russula fungal ITS sequences with ground truth annotations
+- **Test subsets for development**: Multiple Russula subsets (50, 100, 200, 300, 500 sequences)
+- **Performance baselines**: Established thresholds for regression detection across dataset sizes
+- **Quality metrics validation**: Empirically validated ARI (>0.85), homogeneity (>0.90), completeness (>0.85)
+- **Custom pytest markers**: integration, performance, memory, scalability, quality test categorization
+- **Phase 4 testing documentation**: Comprehensive `tests/PHASE4_SUMMARY.md` with testing strategy
+- **Contributor documentation**: Enhanced `CLAUDE.md` with architectural details and implementation notes
+
+### Changed
+- **Gap-based greedy algorithm**: Removed beam search in favor of simpler gap-based heuristic with completion tracking
+- **Neighborhood pruning**: Replaced arbitrary thresholds with principled N+N approach (N within max_lump + N beyond for context)
+- **Triangle inequality filtering**: Unified implementation across all clustering modes with 5% tolerance
+- **Cluster naming**: Eliminated redundant intermediate renumbering for clean 1:1 lineage traceability
+- **Overlap handling**: Simplified by removing `--no-overlaps` mode and `jaccard_overlap_threshold` parameter
+- **Close cluster refinement**: Removed significant difference check, added iterative context expansion
+- **Conflict resolution**: Separated from close cluster refinement for clearer responsibilities
+- **BLAST parameters**: Optimized for biological accuracy (removed aggressive pruning)
+- **Post-processing verification**: Added comprehensive MECE (Mutually Exclusive, Collectively Exhaustive) verification
+
+### Fixed
+- **CLI bugs**: Fixed multiple command-line interface issues discovered during testing
+- **Decompose report bugs**:
+  - Fixed missing component details for close cluster refinement (incorrect indentation)
+  - Fixed incomplete active-to-final cluster mapping (eliminated redundant renumbering)
+- **Distance calculation consistency**: Fixed discrepancy between clustering loop and K-NN proximity graph
+- **Cluster naming collisions**: Fixed conflicts in processing stage cluster IDs
+- **Test failures**: Integrated demo tests into main test suite and fixed failures
+
+### Improved
+- **Decompose orchestration**: Enhanced processing stage tracking with `ProcessingStageInfo`
+- **Cluster refinement**: Iterative context expansion for proper gap calculation in close clusters
+- **Distance providers**: Three-tier architecture (global cache, scoped providers, precomputed)
+- **Cluster graph**: BLAST K-NN graph for O(K) proximity queries instead of O(C)
+- **Memory efficiency**: Hash-based sequence deduplication system
+- **Medoid caching**: Optimized cluster medoid calculations with persistent caching
+- **Conflict synchronization**: Improved tracking through iterative cluster merging
+- **Code organization**: Major terminology cleanup and consistent naming throughout
+
+### Removed
+- **Beam search algorithm**: Replaced with simpler gap-based greedy approach
+- **`--no-overlaps` mode**: Simplified overlap handling
+- **`jaccard_overlap_threshold` parameter**: No longer needed with new approach
+- **Significant difference check**: Removed from cluster refinement
+- **Legacy overlap merging**: Replaced with principled reclustering
+- **Arbitrary neighborhood thresholds**: Replaced with N+N approach
+- **Proximity graph dependency**: Removed from conflict resolution (unnecessary)
+
+### Documentation
+- Enhanced `CLAUDE.md` with:
+  - Quick reference section with architecture overview
+  - Three-tier distance provider architecture details
+  - Post-processing and refinement implementation details
+  - Cluster graph infrastructure documentation
+  - Testing infrastructure and performance baselines
+  - Future work and experimental features
+- Added comprehensive design documents for gapHACk improvements
+- Documented N+N neighborhood pruning strategy
+- Documented iterative context expansion for close cluster refinement
+- Added algorithm development history and evolution notes
+
 ## [0.3.0] - 2025-01-06
 
 ### Added
