@@ -831,6 +831,8 @@ class DecomposeClustering:
                 # Check for interruption before post-processing
                 if interruption_requested['flag']:
                     self.logger.info("Skipping post-processing stages due to interruption")
+                    # Expand hash IDs before returning (otherwise CLI gets hash IDs not original headers)
+                    results = self._expand_hash_ids_to_headers(results, hash_to_headers)
                     # Return results immediately without refinement
                     return results
 

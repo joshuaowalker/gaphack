@@ -115,5 +115,45 @@ class TestResumeHashExpansion:
             f"Expected {expected_headers}, got {all_headers}"
 
 
+    def test_interruption_returns_expanded_headers(self, small_test_fasta, tmp_path):
+        """Test that interruption (Ctrl+C) returns expanded headers, not hash IDs.
+
+        Bug: When user pressed Ctrl+C during initial clustering, the code
+        returned results immediately before hash ID expansion, causing
+        warnings in CLI output about hash IDs not being found.
+
+        Fix: Added hash ID expansion before early return on interruption.
+        """
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+
+        # Run with max_clusters limit (simulates interruption behavior)
+        decomposer = DecomposeClustering(
+            min_split=0.005,
+            max_lump=0.02,
+            target_percentile=95,
+            show_progress=False
+        )
+
+        results = decomposer.decompose(
+            input_fasta=small_test_fasta,
+            max_clusters=3,
+            output_dir=str(output_dir),
+            checkpoint_interval=1
+        )
+
+        # Verify results have expanded headers, not hash IDs
+        # Check unassigned sequences
+        for header in results.unassigned[:5]:
+            assert not header.startswith("seq_"), \
+                f"Unassigned should have original headers, not hash IDs: {header}"
+
+        # Check clusters
+        for cluster_id, members in results.clusters.items():
+            for header in members[:3]:
+                assert not header.startswith("seq_"), \
+                    f"Cluster {cluster_id} should have original headers, not hash IDs: {header}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
