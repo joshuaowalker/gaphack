@@ -2,6 +2,7 @@
 
 import logging
 import copy
+import datetime
 from typing import List, Optional, Dict, Set, Tuple
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,6 +11,7 @@ from .blast_neighborhood import BlastNeighborhoodFinder
 from .target_clustering import TargetModeClustering
 from .utils import load_sequences_from_fasta, load_sequences_with_deduplication, calculate_distance_matrix
 from .lazy_distances import DistanceProviderFactory, SubsetDistanceProvider, DistanceProvider
+from .state import DecomposeState, StateManager, create_initial_state
 
 logger = logging.getLogger(__name__)
 
@@ -315,7 +317,8 @@ class DecomposeClustering:
     def decompose(self, input_fasta: str,
                  targets_fasta: Optional[str] = None,
                  max_clusters: Optional[int] = None,
-                 max_sequences: Optional[int] = None) -> DecomposeResults:
+                 max_sequences: Optional[int] = None,
+                 output_dir: Optional[str] = None) -> DecomposeResults:
         """Perform decomposition clustering.
 
         Args:
@@ -323,7 +326,8 @@ class DecomposeClustering:
             targets_fasta: Path to FASTA file with target sequences (directed mode)
             max_clusters: Maximum clusters to create (undirected mode)
             max_sequences: Maximum sequences to assign (undirected mode)
-            
+            output_dir: Output directory for results and BLAST database (optional)
+
         Returns:
             DecomposeResults with clustering results
         """
@@ -344,10 +348,46 @@ class DecomposeClustering:
         
         # Sequence overlaps are always allowed
         self.logger.info("Sequence overlaps: allowed")
-        
-        # Initialize BLAST neighborhood finder
-        blast_finder = BlastNeighborhoodFinder(sequences, headers)
-        
+
+        # Convert output_dir to Path if provided
+        output_dir_path = Path(output_dir) if output_dir else None
+
+        # Initialize state management if output_dir provided
+        state_manager = None
+        state = None
+        if output_dir_path:
+            import sys
+            state_manager = StateManager(output_dir_path)
+
+            # Build parameters dict
+            parameters = {
+                "min_split": self.min_split,
+                "max_lump": self.max_lump,
+                "target_percentile": self.target_percentile,
+                "blast_max_hits": self.blast_max_hits,
+                "blast_evalue": self.blast_evalue,
+                "min_identity": self.min_identity,
+                "max_clusters": max_clusters,
+                "max_sequences": max_sequences,
+                "resolve_conflicts": self.resolve_conflicts,
+                "refine_close_clusters": self.refine_close_clusters,
+                "close_cluster_threshold": self.close_cluster_threshold
+            }
+
+            # Create initial state
+            command = ' '.join(sys.argv) if hasattr(sys, 'argv') else "gaphack-decompose"
+            from . import __version__
+            state = create_initial_state(
+                input_fasta=input_fasta,
+                parameters=parameters,
+                command=command,
+                version=__version__
+            )
+            self.logger.info(f"State management initialized in {output_dir_path}")
+
+        # Initialize BLAST neighborhood finder with output directory
+        blast_finder = BlastNeighborhoodFinder(sequences, headers, output_dir=output_dir_path)
+
         # Initialize assignment tracker
         assignment_tracker = AssignmentTracker()
         
@@ -587,7 +627,29 @@ class DecomposeClustering:
                 self.logger.debug(f"Iteration {iteration} complete: "
                                 f"clustered {len(target_cluster_headers)} sequences, "
                                 f"gap size: {gap_size:.4f}")
-                
+
+                # Save checkpoint every 10 iterations if state management enabled
+                if state_manager and state and iteration % 10 == 0:
+                    try:
+                        # Get current clusters from assignment tracker
+                        current_clusters = {}
+                        all_assignments = assignment_tracker.get_all_assignments()
+                        for seq_id, assignments in all_assignments.items():
+                            for cluster_id, _ in assignments:
+                                if cluster_id not in current_clusters:
+                                    current_clusters[cluster_id] = []
+                                current_clusters[cluster_id].append(seq_id)
+
+                        # Save checkpoint
+                        state_manager.save_stage_fasta(current_clusters, sequences, headers, "initial")
+                        state.initial_clustering.total_clusters = len(current_clusters)
+                        state.initial_clustering.total_sequences_assigned = len(assignment_tracker.assigned_sequences)
+                        state.initial_clustering.iterations_completed = iteration
+                        state.save(output_dir_path)
+                        self.logger.debug(f"Checkpoint saved at iteration {iteration}")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to save checkpoint at iteration {iteration}: {e}")
+
                 # Check stopping criteria for undirected mode
                 if max_clusters and iteration >= max_clusters:
                     self.logger.info(f"Reached maximum clusters ({max_clusters}) - stopping")
@@ -604,11 +666,35 @@ class DecomposeClustering:
             pbar.close()
             # Clean up BLAST database
             blast_finder.cleanup()
-        
+
         # Process final results
         results.total_iterations = iteration
         results.total_sequences_processed = len(assignment_tracker.assigned_sequences)
         results.coverage_percentage = (len(assignment_tracker.assigned_sequences) / len(headers)) * 100.0
+
+        # Save final checkpoint after initial clustering if state management enabled
+        if state_manager and state:
+            try:
+                # Get current clusters from assignment tracker
+                current_clusters = {}
+                all_assignments = assignment_tracker.get_all_assignments()
+                for seq_id, assignments in all_assignments.items():
+                    for cluster_id, _ in assignments:
+                        if cluster_id not in current_clusters:
+                            current_clusters[cluster_id] = []
+                        current_clusters[cluster_id].append(seq_id)
+
+                # Save final initial clustering state
+                state_manager.save_stage_fasta(current_clusters, sequences, headers, "initial")
+                state.initial_clustering.total_clusters = len(current_clusters)
+                state.initial_clustering.total_sequences_assigned = len(assignment_tracker.assigned_sequences)
+                state.initial_clustering.iterations_completed = iteration
+                state.initial_clustering.completion_time = datetime.datetime.now().isoformat()
+                state.stage = "initial_clustering_complete"
+                state.save(output_dir_path)
+                self.logger.info(f"Final checkpoint saved after {iteration} iterations")
+            except Exception as e:
+                self.logger.warning(f"Failed to save final checkpoint: {e}")
         
         # Get single assignments (no conflicts) for summary reporting
         single_assignments = assignment_tracker.get_single_assignments()

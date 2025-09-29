@@ -339,10 +339,10 @@ Examples:
     )
     
     # Input/output arguments
-    parser.add_argument('input_fasta', 
+    parser.add_argument('input_fasta',
                        help='Input FASTA file containing all sequences to cluster')
     parser.add_argument('-o', '--output', required=True,
-                       help='Output base path for result files')
+                       help='Output directory for result files')
     
     # Target selection arguments
     parser.add_argument('--targets',
@@ -392,7 +392,12 @@ Examples:
     if not Path(args.input_fasta).exists():
         logger.error(f"Input FASTA file not found: {args.input_fasta}")
         sys.exit(1)
-    
+
+    # Create output directory
+    output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Output directory: {output_dir}")
+
     # Auto-detect mode based on targets
     if args.targets:
         # Directed mode - validate targets file exists
@@ -437,15 +442,17 @@ Examples:
             input_fasta=args.input_fasta,
             targets_fasta=args.targets,
             max_clusters=args.max_clusters,
-            max_sequences=args.max_sequences
+            max_sequences=args.max_sequences,
+            output_dir=str(output_dir)
         )
 
         # Add metadata to results for reporting
         results.command_line = command_line
         results.start_time = start_time
-        
-        # Save results
-        save_decompose_results(results, args.output, args.input_fasta)
+
+        # Save results using output directory base name
+        output_base = str(output_dir / "decompose")
+        save_decompose_results(results, output_base, args.input_fasta)
         
         logger.info("Decomposition clustering completed successfully")
         
