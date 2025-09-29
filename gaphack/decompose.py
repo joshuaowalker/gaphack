@@ -1498,6 +1498,50 @@ def resume_decompose(output_dir: Path,
         results.total_sequences_processed = state.initial_clustering.total_sequences
         results.coverage_percentage = state.initial_clustering.coverage_percentage
 
+        # Expand hash IDs back to original headers for output compatibility
+        # The clusters and unassigned contain hash IDs, but CLI expects expanded headers
+        # Note: hash_to_headers was already loaded at line 1448
+
+        # Expand clusters
+        expanded_clusters = {}
+        for cluster_id, hash_ids in results.clusters.items():
+            expanded_clusters[cluster_id] = []
+            for hash_id in hash_ids:
+                if hash_id in hash_to_headers:
+                    expanded_clusters[cluster_id].extend(hash_to_headers[hash_id])
+                else:
+                    expanded_clusters[cluster_id].append(hash_id)
+        results.clusters = expanded_clusters
+
+        expanded_all_clusters = {}
+        for cluster_id, hash_ids in results.all_clusters.items():
+            expanded_all_clusters[cluster_id] = []
+            for hash_id in hash_ids:
+                if hash_id in hash_to_headers:
+                    expanded_all_clusters[cluster_id].extend(hash_to_headers[hash_id])
+                else:
+                    expanded_all_clusters[cluster_id].append(hash_id)
+        results.all_clusters = expanded_all_clusters
+
+        # Expand unassigned
+        expanded_unassigned = []
+        for hash_id in results.unassigned:
+            if hash_id in hash_to_headers:
+                expanded_unassigned.extend(hash_to_headers[hash_id])
+            else:
+                expanded_unassigned.append(hash_id)
+        results.unassigned = expanded_unassigned
+
+        # Expand conflicts
+        expanded_conflicts = {}
+        for hash_id, cluster_ids in results.conflicts.items():
+            if hash_id in hash_to_headers:
+                for original_header in hash_to_headers[hash_id]:
+                    expanded_conflicts[original_header] = cluster_ids
+            else:
+                expanded_conflicts[hash_id] = cluster_ids
+        results.conflicts = expanded_conflicts
+
         return results
 
 
