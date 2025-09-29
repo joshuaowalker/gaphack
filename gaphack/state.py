@@ -88,7 +88,10 @@ class CloseClusterRefinementStage(StageInfo):
 @dataclass
 class FinalizedStage(StageInfo):
     """Finalization stage information."""
-    pass
+    total_clusters: int = 0  # Number of final numbered clusters
+    total_sequences: int = 0  # Total sequences in final clusters
+    unassigned_sequences: int = 0  # Sequences left unassigned
+    source_stage: str = ""  # Stage that was finalized (initial/deconflicted/refined)
 
 
 @dataclass

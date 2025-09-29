@@ -1892,3 +1892,159 @@ def _apply_close_cluster_refinement_stage(state: DecomposeState,
     logger.info(f"Close cluster refinement stage complete and saved")
 
     return results
+
+
+def finalize_decompose(output_dir: str, cleanup: bool = False) -> None:
+    """Create final numbered cluster output and optionally cleanup intermediate files.
+
+    Args:
+        output_dir: Output directory containing decompose state and cluster files
+        cleanup: If True, remove intermediate stage files (initial.*, deconflicted.*, refined.*)
+
+    This function:
+    1. Determines the most recent refinement stage
+    2. Loads clusters from that stage
+    3. Renumbers clusters by size (cluster_001.fasta = largest)
+    4. Writes final cluster_*.fasta and unassigned.fasta files
+    5. Marks state as finalized
+    6. Optionally removes intermediate stage files
+    """
+    import logging
+    from pathlib import Path
+    from collections import Counter
+
+    logger = logging.getLogger(__name__)
+    output_path = Path(output_dir)
+
+    # Load state
+    state = DecomposeState.load(output_path)
+    state_manager = StateManager(output_path)
+
+    # Check if already finalized
+    if state.finalized.completed:
+        logger.warning("Output directory already finalized")
+        return
+
+    # Determine the most recent stage to finalize from
+    if state.close_cluster_refinement.completed:
+        source_stage = "refined"
+        source_pattern = state.close_cluster_refinement.cluster_file_pattern
+    elif state.conflict_resolution.completed:
+        source_stage = "deconflicted"
+        source_pattern = state.conflict_resolution.cluster_file_pattern
+    elif state.initial_clustering.completed:
+        source_stage = "initial"
+        source_pattern = state.initial_clustering.cluster_file_pattern
+    else:
+        raise ValueError("Cannot finalize: initial clustering is not complete")
+
+    logger.info(f"Finalizing from {source_stage} stage (pattern: {source_pattern})")
+
+    # Load input sequences and setup
+    input_fasta = state.input.fasta_path
+    sequences, hash_ids, hash_to_headers = load_sequences_with_deduplication(input_fasta)
+
+    # Load clusters from most recent stage
+    current_clusters = state_manager.load_clusters_from_pattern(source_pattern)
+
+    # Also check for unassigned file from source stage
+    unassigned_headers = []
+    unassigned_file = output_path / f"{source_stage}.unassigned.fasta"
+    if unassigned_file.exists():
+        from Bio import SeqIO
+        for record in SeqIO.parse(unassigned_file, "fasta"):
+            unassigned_headers.append(record.id)
+        logger.info(f"Loaded {len(unassigned_headers)} unassigned sequences from {unassigned_file.name}")
+
+    # Sort clusters by size (largest first)
+    cluster_sizes = [(cluster_id, len(seqs)) for cluster_id, seqs in current_clusters.items()]
+    cluster_sizes.sort(key=lambda x: x[1], reverse=True)
+
+    logger.info(f"Renumbering {len(cluster_sizes)} clusters by size")
+
+    # Create header-to-index mapping for sequence lookup (hash_id -> index)
+    header_to_idx = {hash_id: i for i, hash_id in enumerate(hash_ids)}
+
+    # Write final numbered cluster files
+    from Bio.Seq import Seq
+    from Bio.SeqRecord import SeqRecord
+    from Bio import SeqIO
+
+    for final_num, (old_cluster_id, size) in enumerate(cluster_sizes, start=1):
+        cluster_headers = current_clusters[old_cluster_id]
+        final_filename = output_path / f"cluster_{final_num:03d}.fasta"
+
+        records = []
+        for header in cluster_headers:
+            # Expand hash IDs to original headers (handles duplicates)
+            if header in hash_to_headers:
+                original_headers = hash_to_headers[header]
+            else:
+                original_headers = [header]
+
+            for orig_header in original_headers:
+                seq_idx = header_to_idx[header if header in header_to_idx else orig_header]
+                record = SeqRecord(Seq(sequences[seq_idx]), id=orig_header, description="")
+                records.append(record)
+
+        with open(final_filename, 'w') as f:
+            SeqIO.write(records, f, "fasta-2line")
+
+        logger.info(f"Wrote {final_filename.name} with {len(records)} sequences")
+
+    # Write final unassigned file if any unassigned sequences exist
+    if unassigned_headers:
+        final_unassigned = output_path / "unassigned.fasta"
+        records = []
+        for header in unassigned_headers:
+            # Expand hash IDs
+            if header in hash_to_headers:
+                original_headers = hash_to_headers[header]
+            else:
+                original_headers = [header]
+
+            for orig_header in original_headers:
+                seq_idx = header_to_idx[header if header in header_to_idx else orig_header]
+                record = SeqRecord(Seq(sequences[seq_idx]), id=orig_header, description="")
+                records.append(record)
+
+        with open(final_unassigned, 'w') as f:
+            SeqIO.write(records, f, "fasta-2line")
+
+        logger.info(f"Wrote {final_unassigned.name} with {len(records)} sequences")
+
+    # Update state to mark as finalized
+    state.finalized.completed = True
+    state.finalized.source_stage = source_stage
+    state.finalized.total_clusters = len(cluster_sizes)
+    state.finalized.total_sequences = sum(size for _, size in cluster_sizes)
+    state.finalized.unassigned_sequences = len(unassigned_headers)
+    state.stage = "finalized"
+    state_manager.checkpoint(state)
+
+    logger.info(f"Finalization complete: {len(cluster_sizes)} clusters, {state.finalized.total_sequences} sequences, {len(unassigned_headers)} unassigned")
+
+    # Optional cleanup of intermediate files
+    if cleanup:
+        logger.info("Cleaning up intermediate stage files")
+
+        stage_prefixes = []
+        if source_stage != "initial":
+            stage_prefixes.append("initial")
+        if source_stage == "refined":
+            stage_prefixes.extend(["deconflicted"])
+
+        removed_count = 0
+        for prefix in stage_prefixes:
+            # Remove cluster files
+            for cluster_file in output_path.glob(f"{prefix}.cluster_*.fasta"):
+                cluster_file.unlink()
+                removed_count += 1
+            # Remove unassigned files
+            unassigned_file = output_path / f"{prefix}.unassigned.fasta"
+            if unassigned_file.exists():
+                unassigned_file.unlink()
+                removed_count += 1
+
+        logger.info(f"Removed {removed_count} intermediate files")
+        logger.info("Note: Source stage files retained for traceability")

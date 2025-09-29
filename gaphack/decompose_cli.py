@@ -385,6 +385,12 @@ Examples:
     parser.add_argument('--refine-close-clusters', type=float, default=0.0, metavar='DISTANCE',
                        help='Enable close cluster refinement with distance threshold (0.0 = disabled, e.g. 0.02 for 2%% distance)')
 
+    # Finalization arguments
+    parser.add_argument('--finalize', action='store_true',
+                       help='Create final numbered cluster output (cluster_001.fasta, etc.) and mark run as complete')
+    parser.add_argument('--cleanup', action='store_true',
+                       help='When finalizing, remove intermediate stage files (initial.*, deconflicted.*) - requires --finalize')
+
     # Control arguments
     parser.add_argument('-v', '--verbose', action='store_true',
                        help='Enable verbose logging')
@@ -396,6 +402,15 @@ Examples:
     # Set up logging
     setup_logging(args.verbose)
     logger = logging.getLogger(__name__)
+
+    # Validate flags
+    if args.cleanup and not args.finalize:
+        logger.error("--cleanup requires --finalize flag")
+        sys.exit(1)
+
+    if args.finalize and not args.resume:
+        logger.error("--finalize requires --resume flag (must operate on existing output directory)")
+        sys.exit(1)
 
     # Handle resume mode
     if args.resume:
@@ -410,6 +425,20 @@ Examples:
             sys.exit(1)
 
         logger.info(f"Resuming from output directory: {output_dir}")
+
+        # Check if finalize-only mode
+        if args.finalize:
+            from .decompose import finalize_decompose
+            try:
+                finalize_decompose(output_dir=str(output_dir), cleanup=args.cleanup)
+                logger.info("Finalization completed successfully")
+                sys.exit(0)
+            except Exception as e:
+                logger.error(f"Finalization failed: {e}")
+                if args.verbose:
+                    import traceback
+                    traceback.print_exc()
+                sys.exit(1)
 
         # Import resume function
         from .decompose import resume_decompose
