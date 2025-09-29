@@ -536,6 +536,92 @@ class StateManager:
                     SeqIO.write(records, f, "fasta-2line")
                 logger.debug(f"Wrote {len(records)} sequences to {cluster_file}")
 
+    def save_stage_results(self,
+                          results: 'DecomposeResults',
+                          stage: str,
+                          sequences: List[str],
+                          headers: List[str],
+                          hash_to_headers: Dict[str, List[str]]) -> None:
+        """Save results from a processing stage to FASTA files.
+
+        Args:
+            results: DecomposeResults object with clusters
+            stage: Stage name for file prefix (e.g., "deconflicted", "refined")
+            sequences: Full sequence list
+            headers: Hash IDs corresponding to sequences
+            hash_to_headers: Mapping from hash IDs to original headers
+        """
+        from Bio.Seq import Seq
+        from Bio.SeqRecord import SeqRecord
+        from Bio import SeqIO
+
+        # Create header to index mapping (using hash IDs)
+        header_to_idx = {header: i for i, header in enumerate(headers)}
+
+        # Save each cluster to a separate FASTA file
+        for cluster_id, cluster_headers in results.clusters.items():
+            # Generate filename: {stage}.cluster_{num}.fasta
+            # Extract numeric part from cluster_id
+            # Example: "deconflicted_0001" -> "0001"
+            if '_' in cluster_id:
+                num_part = cluster_id.split('_')[-1]
+            else:
+                num_part = cluster_id
+            filename = f"{stage}.cluster_{num_part}.fasta"
+            cluster_file = self.output_dir / filename
+
+            records = []
+            for header in cluster_headers:
+                if header in header_to_idx:
+                    seq_idx = header_to_idx[header]
+                    # Expand hash ID to all original headers
+                    if header in hash_to_headers:
+                        original_headers = hash_to_headers[header]
+                    else:
+                        original_headers = [header]
+
+                    # Write a record for each original header (handles duplicates)
+                    for orig_header in original_headers:
+                        record = SeqRecord(
+                            Seq(sequences[seq_idx]),
+                            id=orig_header,
+                            description=""
+                        )
+                        records.append(record)
+
+            if records:
+                with open(cluster_file, 'w') as f:
+                    SeqIO.write(records, f, "fasta-2line")
+                logger.debug(f"Wrote {len(records)} sequences to {cluster_file}")
+
+        logger.info(f"Saved {len(results.clusters)} cluster files with prefix '{stage}'")
+
+        # Save unassigned sequences if any
+        if results.unassigned:
+            unassigned_file = self.output_dir / f"{stage}.unassigned.fasta"
+            records = []
+            for header in results.unassigned:
+                if header in header_to_idx:
+                    seq_idx = header_to_idx[header]
+                    # Expand hash ID to all original headers
+                    if header in hash_to_headers:
+                        original_headers = hash_to_headers[header]
+                    else:
+                        original_headers = [header]
+
+                    for orig_header in original_headers:
+                        record = SeqRecord(
+                            Seq(sequences[seq_idx]),
+                            id=orig_header,
+                            description=""
+                        )
+                        records.append(record)
+
+            if records:
+                with open(unassigned_file, 'w') as f:
+                    SeqIO.write(records, f, "fasta-2line")
+                logger.info(f"Wrote {len(records)} unassigned sequences to {unassigned_file}")
+
 
 def create_initial_state(input_fasta: str,
                         parameters: Dict[str, Any],

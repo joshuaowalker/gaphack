@@ -342,7 +342,8 @@ Examples:
     parser.add_argument('input_fasta', nargs='?',
                        help='Input FASTA file containing all sequences to cluster')
     parser.add_argument('-o', '--output',
-                       help='Output directory for result files')
+                       default='decompose_output',
+                       help='Output directory for result files (default: decompose_output/)')
 
     # Resume arguments
     parser.add_argument('--resume', action='store_true',
@@ -398,10 +399,7 @@ Examples:
 
     # Handle resume mode
     if args.resume:
-        if not args.output:
-            logger.error("--resume requires -o/--output to specify output directory")
-            sys.exit(1)
-
+        # args.output has a default value, so it's always set
         output_dir = Path(args.output)
         if not output_dir.exists():
             logger.error(f"Output directory not found: {output_dir}")
@@ -450,11 +448,8 @@ Examples:
         logger.error("input_fasta is required (unless using --resume)")
         sys.exit(1)
 
-    if not args.output:
-        logger.error("-o/--output is required")
-        sys.exit(1)
-
     # Validate inputs
+    # Note: args.output has a default value of 'decompose_output'
     if not Path(args.input_fasta).exists():
         logger.error(f"Input FASTA file not found: {args.input_fasta}")
         sys.exit(1)
@@ -489,7 +484,10 @@ Examples:
                 if existing_state.status == "in_progress":
                     logger.error(f"Output directory contains partial state from interrupted run")
                     logger.error(f"Use --resume to continue from checkpoint:")
-                    logger.error(f"  {sys.argv[0]} --resume {output_dir}")
+                    if str(output_dir) == "decompose_output":
+                        logger.error(f"  {sys.argv[0]} --resume")
+                    else:
+                        logger.error(f"  {sys.argv[0]} --resume -o {output_dir}")
                     sys.exit(1)
                 elif existing_state.status == "completed":
                     logger.error(f"Output directory contains completed run")

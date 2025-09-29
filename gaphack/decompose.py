@@ -509,9 +509,19 @@ class DecomposeClustering:
             cluster_sizes = []
             gap_sizes = []
 
+            # Calculate initial progress value when resuming
+            initial_progress = 0
+            if resume_from_state:
+                if progress_mode == "clusters":
+                    initial_progress = state.initial_clustering.total_clusters
+                elif progress_mode in ("sequences", "sequences_exhaustive"):
+                    initial_progress = state.initial_clustering.total_sequences
+                elif progress_mode == "targets":
+                    initial_progress = len(existing_clusters)  # Number of clusters created
+
             # Create overall progress bar
             from tqdm import tqdm
-            pbar = tqdm(total=progress_total, desc=progress_desc, unit=progress_unit,
+            pbar = tqdm(total=progress_total, desc=progress_desc, unit=progress_unit, initial=initial_progress,
                        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}")
 
             # Main decomposition loop
@@ -772,15 +782,20 @@ class DecomposeClustering:
                         state.initial_clustering.coverage_percentage = (len(assignment_tracker.assigned_sequences) / len(headers)) * 100.0
                         state.stage = "initial_clustering"
             
-                        # Only mark as completed if we reached natural exhaustion (not stopped by limits)
+                        # Only mark as completed if we reached natural exhaustion (not stopped by limits or interruption)
                         stopped_by_limit = False
                         if max_clusters and iteration >= max_clusters:
                             stopped_by_limit = True
                         if max_sequences and len(assignment_tracker.assigned_sequences) >= max_sequences:
                             stopped_by_limit = True
-            
-                        state.initial_clustering.completed = not stopped_by_limit
-                        if stopped_by_limit:
+
+                        # Don't mark as completed if interrupted
+                        interrupted = interruption_requested['flag']
+                        state.initial_clustering.completed = not stopped_by_limit and not interrupted
+
+                        if interrupted:
+                            self.logger.info(f"Initial clustering interrupted (can be resumed)")
+                        elif stopped_by_limit:
                             self.logger.info(f"Initial clustering paused at limit (can be resumed)")
                         else:
                             self.logger.info(f"Initial clustering completed (exhausted all sequences)")
@@ -1476,13 +1491,25 @@ def resume_decompose(output_dir: Path,
     elif resolve_conflicts and not state.conflict_resolution.completed:
         # Apply conflict resolution
         logger.info("Applying conflict resolution stage")
-        # TODO: Implement in Phase 4
-        raise NotImplementedError("Conflict resolution resume not yet implemented (Phase 4)")
+        return _apply_conflict_resolution_stage(
+            state=state,
+            state_manager=state_manager,
+            input_fasta=input_fasta,
+            current_clusters=current_clusters,
+            assignment_tracker=assignment_tracker,
+            **kwargs
+        )
     elif refine_close_clusters > 0:
         # Apply close cluster refinement
         logger.info(f"Applying close cluster refinement with threshold={refine_close_clusters}")
-        # TODO: Implement in Phase 4
-        raise NotImplementedError("Close cluster refinement resume not yet implemented (Phase 4)")
+        return _apply_close_cluster_refinement_stage(
+            state=state,
+            state_manager=state_manager,
+            input_fasta=input_fasta,
+            current_clusters=current_clusters,
+            close_threshold=refine_close_clusters,
+            **kwargs
+        )
     else:
         # Nothing to do
         logger.info("Clustering already complete. No action requested.")
@@ -1617,5 +1644,251 @@ def _continue_initial_clustering(state: DecomposeState,
         resume_from_state=state,  # Pass state to indicate continuation
         checkpoint_interval=checkpoint_interval
     )
+
+    return results
+
+
+def _apply_conflict_resolution_stage(state: DecomposeState,
+                                      state_manager: StateManager,
+                                      input_fasta: str,
+                                      current_clusters: Dict[str, List[str]],
+                                      assignment_tracker: AssignmentTracker,
+                                      **kwargs) -> DecomposeResults:
+    """Apply conflict resolution stage to loaded clusters.
+
+    Args:
+        state: Current decompose state
+        state_manager: State manager for saving results
+        input_fasta: Input FASTA path
+        current_clusters: Current cluster assignments (from FASTA files)
+        assignment_tracker: Reconstructed assignment tracker
+        **kwargs: Additional parameters
+
+    Returns:
+        DecomposeResults with conflicts resolved
+    """
+    from .cluster_refinement import resolve_conflicts, RefinementConfig
+
+    logger.info(f"Applying conflict resolution to {len(current_clusters)} clusters")
+
+    # Get conflicts from assignment tracker
+    conflicts = assignment_tracker.get_conflicts()
+    logger.info(f"Found {len(conflicts)} sequences with conflicts")
+
+    if len(conflicts) == 0:
+        logger.info("No conflicts to resolve - marking stage complete")
+        # Update state to mark conflict resolution as complete even if no work needed
+        state.conflict_resolution.completed = True
+        state.conflict_resolution.conflicts_before = 0
+        state.conflict_resolution.conflicts_after = 0
+        state.conflict_resolution.clusters_before = len(current_clusters)
+        state.conflict_resolution.clusters_after = len(current_clusters)
+        state.conflict_resolution.total_clusters = len(current_clusters)
+        # Keep using initial clustering pattern since no new files created
+        state.conflict_resolution.cluster_file_pattern = state.get_current_stage_pattern()
+        state.stage = "conflict_resolution"
+
+        # Don't create new files - just update state
+        state_manager.checkpoint(state)
+
+        # Return current state as results
+        results = DecomposeResults()
+        results.clusters = current_clusters
+        results.all_clusters = current_clusters.copy()
+        results.conflicts = {}
+        results.unassigned = []  # Load from state if needed
+        return results
+
+    # Load sequences and headers
+    sequences, hash_ids, hash_to_headers = load_sequences_with_deduplication(input_fasta)
+
+    # Create distance provider using default parameters
+    # Note: We don't store alignment parameters in state, so use defaults
+    from .lazy_distances import LazyDistanceProvider
+    distance_provider = LazyDistanceProvider(
+        sequences=sequences,
+        alignment_method="adjusted",
+        end_skip_distance=20,
+        normalize_homopolymers=True,
+        handle_iupac_overlap=True,
+        normalize_indels=True,
+        max_repeat_motif_length=2
+    )
+
+    # Create refinement configuration
+    config = RefinementConfig(
+        max_full_gaphack_size=300  # Conservative limit for performance
+    )
+
+    # Apply conflict resolution
+    params = state.parameters
+    conflict_id_generator = ClusterIDGenerator(prefix="deconflicted")
+    resolved_clusters, conflict_tracking = resolve_conflicts(
+        conflicts=conflicts,
+        all_clusters=current_clusters,
+        sequences=sequences,
+        headers=hash_ids,
+        distance_provider=distance_provider,
+        config=config,
+        min_split=params['min_split'],
+        max_lump=params['max_lump'],
+        target_percentile=params['target_percentile'],
+        cluster_id_generator=conflict_id_generator
+    )
+
+    logger.info(f"Conflict resolution complete: {len(current_clusters)} -> {len(resolved_clusters)} clusters")
+
+    # Build results object
+    results = DecomposeResults()
+    results.clusters = resolved_clusters
+    results.all_clusters = resolved_clusters.copy()
+    results.conflicts = {}  # All conflicts resolved
+    results.unassigned = []  # Preserve from state if needed
+    results.total_iterations = state.initial_clustering.total_iterations
+    results.total_sequences_processed = state.initial_clustering.total_sequences
+    results.coverage_percentage = state.initial_clustering.coverage_percentage
+    results.processing_stages = [conflict_tracking]
+
+    # Save results to FASTA files with "deconflicted" prefix
+    state_manager.save_stage_results(
+        results=results,
+        stage="deconflicted",
+        sequences=sequences,
+        headers=hash_ids,
+        hash_to_headers=hash_to_headers
+    )
+
+    # Update state
+    state.conflict_resolution.completed = True
+    state.conflict_resolution.conflicts_before = len(conflicts)
+    state.conflict_resolution.conflicts_after = 0
+    state.conflict_resolution.clusters_before = len(current_clusters)
+    state.conflict_resolution.clusters_after = len(resolved_clusters)
+    state.conflict_resolution.total_clusters = len(resolved_clusters)
+    state.conflict_resolution.cluster_file_pattern = "deconflicted.cluster_*.fasta"
+    state.stage = "conflict_resolution"
+    state_manager.checkpoint(state)
+
+    logger.info(f"Conflict resolution stage complete and saved")
+
+    return results
+
+
+def _apply_close_cluster_refinement_stage(state: DecomposeState,
+                                          state_manager: StateManager,
+                                          input_fasta: str,
+                                          current_clusters: Dict[str, List[str]],
+                                          close_threshold: float,
+                                          **kwargs) -> DecomposeResults:
+    """Apply close cluster refinement stage to loaded clusters.
+
+    Args:
+        state: Current decompose state
+        state_manager: State manager for saving results
+        input_fasta: Input FASTA path
+        current_clusters: Current cluster assignments (from FASTA files)
+        close_threshold: Distance threshold for close cluster refinement
+        **kwargs: Additional parameters
+
+    Returns:
+        DecomposeResults with close clusters refined
+    """
+    from .cluster_refinement import refine_close_clusters, RefinementConfig
+    from .cluster_graph import ClusterGraph
+
+    logger.info(f"Applying close cluster refinement to {len(current_clusters)} clusters")
+    logger.info(f"Close threshold: {close_threshold}")
+
+    # Load sequences and headers
+    sequences, hash_ids, hash_to_headers = load_sequences_with_deduplication(input_fasta)
+
+    # Create distance provider using default parameters
+    # Note: We don't store alignment parameters in state, so use defaults
+    from .lazy_distances import LazyDistanceProvider
+    distance_provider = LazyDistanceProvider(
+        sequences=sequences,
+        alignment_method="adjusted",
+        end_skip_distance=20,
+        normalize_homopolymers=True,
+        handle_iupac_overlap=True,
+        normalize_indels=True,
+        max_repeat_motif_length=2
+    )
+
+    # Create proximity graph for cluster proximity queries
+    proximity_graph = ClusterGraph(
+        clusters=current_clusters,
+        sequences=sequences,
+        headers=hash_ids,
+        distance_provider=distance_provider,
+        k_neighbors=20
+    )
+
+    # Create refinement configuration
+    config = RefinementConfig(
+        max_full_gaphack_size=300,
+        close_cluster_expansion_threshold=close_threshold
+    )
+
+    # Apply close cluster refinement
+    params = state.parameters
+    refinement_id_generator = ClusterIDGenerator(prefix="refined")
+    refined_clusters, refinement_tracking = refine_close_clusters(
+        all_clusters=current_clusters,
+        sequences=sequences,
+        headers=hash_ids,
+        distance_provider=distance_provider,
+        proximity_graph=proximity_graph,
+        config=config,
+        min_split=params['min_split'],
+        max_lump=params['max_lump'],
+        target_percentile=params['target_percentile'],
+        close_threshold=params['max_lump'],  # Use max_lump as base threshold
+        cluster_id_generator=refinement_id_generator
+    )
+
+    logger.info(f"Close cluster refinement complete: {len(current_clusters)} -> {len(refined_clusters)} clusters")
+
+    # Build results object
+    results = DecomposeResults()
+    results.clusters = refined_clusters
+    results.all_clusters = refined_clusters.copy()
+    results.conflicts = {}
+    results.unassigned = []  # Preserve from state if needed
+    results.total_iterations = state.initial_clustering.total_iterations
+    results.total_sequences_processed = state.initial_clustering.total_sequences
+    results.coverage_percentage = state.initial_clustering.coverage_percentage
+    results.processing_stages = [refinement_tracking]
+
+    # Save results to FASTA files with "refined" prefix
+    state_manager.save_stage_results(
+        results=results,
+        stage="refined",
+        sequences=sequences,
+        headers=hash_ids,
+        hash_to_headers=hash_to_headers
+    )
+
+    # Update state - note that close cluster refinement can be chained
+    state.close_cluster_refinement.completed = True
+    state.close_cluster_refinement.threshold = close_threshold
+    state.close_cluster_refinement.clusters_before = len(current_clusters)
+    state.close_cluster_refinement.clusters_after = len(refined_clusters)
+    state.close_cluster_refinement.total_clusters = len(refined_clusters)
+    state.close_cluster_refinement.cluster_file_pattern = "refined.cluster_*.fasta"
+    state.stage = "close_cluster_refinement"
+
+    # Add to refinement history
+    history_entry = {
+        'threshold': close_threshold,
+        'timestamp': datetime.datetime.now().isoformat(),
+        'clusters_before': len(current_clusters),
+        'clusters_after': len(refined_clusters)
+    }
+    state.close_cluster_refinement.refinement_history.append(history_entry)
+
+    state_manager.checkpoint(state)
+
+    logger.info(f"Close cluster refinement stage complete and saved")
 
     return results
