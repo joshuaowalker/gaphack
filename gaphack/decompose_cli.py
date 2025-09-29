@@ -478,9 +478,32 @@ Examples:
         else:
             logger.info("Running in undirected mode with stopping criteria")
     
+    # Check for existing state if not resuming
+    if not args.resume:
+        state_file = output_dir / "state.json"
+        if state_file.exists():
+            # Load existing state to check status
+            from gaphack.state import DecomposeState
+            try:
+                existing_state = DecomposeState.load(output_dir)
+                if existing_state.status == "in_progress":
+                    logger.error(f"Output directory contains partial state from interrupted run")
+                    logger.error(f"Use --resume to continue from checkpoint:")
+                    logger.error(f"  {sys.argv[0]} --resume {output_dir}")
+                    sys.exit(1)
+                elif existing_state.status == "completed":
+                    logger.error(f"Output directory contains completed run")
+                    logger.error(f"Use a different output directory or delete {output_dir}")
+                    sys.exit(1)
+            except Exception as e:
+                logger.warning(f"Could not load existing state: {e}")
+                logger.error(f"Output directory {output_dir} contains state.json but cannot be loaded")
+                logger.error(f"Delete {output_dir} or use different output path")
+                sys.exit(1)
+
     # Initialize decomposition clustering
     logger.info("Initializing gaphack-decompose")
-    
+
     decomposer = DecomposeClustering(
         min_split=args.min_split,
         max_lump=args.max_lump,

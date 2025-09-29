@@ -827,7 +827,13 @@ class DecomposeClustering:
                 
                 if results.conflicts:
                     self.logger.info(f"Conflicts detected: {len(results.conflicts)}")
-            
+
+                # Check for interruption before post-processing
+                if interruption_requested['flag']:
+                    self.logger.info("Skipping post-processing stages due to interruption")
+                    # Return results immediately without refinement
+                    return results
+
                 # Perform initial conflict verification after decomposition
                 initial_verification = self._verify_no_conflicts(results.all_clusters, results.conflicts, "after_decomposition")
             
