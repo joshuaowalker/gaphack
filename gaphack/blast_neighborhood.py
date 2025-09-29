@@ -29,21 +29,33 @@ class SequenceCandidate:
 
 class BlastNeighborhoodFinder:
     """BLAST-based neighborhood finder for sequence clustering decomposition."""
-    
-    def __init__(self, sequences: List[str], headers: List[str], cache_dir: Optional[Path] = None):
+
+    def __init__(self, sequences: List[str], headers: List[str],
+                 output_dir: Optional[Path] = None,
+                 cache_dir: Optional[Path] = None):
         """Initialize BLAST database from all sequences.
-        
+
         Args:
             sequences: List of DNA sequences as strings
             headers: List of sequence headers/identifiers
-            cache_dir: Directory for caching BLAST databases (default: temp directory)
+            output_dir: Output directory for decompose run (BLAST DB goes in {output_dir}/.blast/)
+            cache_dir: DEPRECATED - use output_dir instead
         """
         if len(sequences) != len(headers):
             raise ValueError("Number of sequences and headers must match")
-        
+
         self.sequences = sequences
         self.headers = headers
-        self.cache_dir = cache_dir or Path(tempfile.gettempdir()) / "gaphack_decompose_blast_cache"
+
+        # Use output_dir/.blast/ if provided, otherwise fall back to temp directory
+        if output_dir:
+            self.cache_dir = Path(output_dir) / ".blast"
+        elif cache_dir:
+            logger.warning("cache_dir parameter is deprecated, use output_dir instead")
+            self.cache_dir = cache_dir
+        else:
+            self.cache_dir = Path(tempfile.gettempdir()) / "gaphack_decompose_blast_cache"
+
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         
         # Create sequence lookup: hash -> (sequence, header) for fast lookup
