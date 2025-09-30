@@ -256,8 +256,8 @@ class TestPipelineIntegration:
             # Should complete very quickly (<30 seconds for 50 diverse sequences)
             assert result['execution_time'] < 30, f"Execution time {result['execution_time']:.1f}s exceeds 30 seconds"
 
-            # Should produce output files
-            tsv_files = list(output_base.parent.glob(f"{output_base.name}*.tsv"))
+            # Should produce output files (inside the output directory)
+            tsv_files = list(output_base.glob("*.tsv"))
             assert len(tsv_files) > 0, "No TSV output files produced"
 
     def test_decompose_medium_dataset_functionality(self):
@@ -300,8 +300,8 @@ class TestPipelineIntegration:
             # Should complete successfully
             assert result['returncode'] == 0, f"CLI test failed: {result['stderr']}"
 
-            # Should produce output files
-            tsv_files = list(output_base.parent.glob(f"{output_base.name}*.tsv"))
+            # Should produce output files (inside the output directory)
+            tsv_files = list(output_base.glob("*.tsv"))
             assert len(tsv_files) > 0, "No TSV output files produced"
 
             # Parse and validate results
