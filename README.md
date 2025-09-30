@@ -31,6 +31,7 @@ The algorithm focuses on maximizing the "barcode gap" - the separation between i
 ### Large-Scale Clustering (`gaphack-decompose`)
 - **BLAST-based Neighborhoods**: Efficiently handles datasets with 100K+ sequences
 - **Iterative Target Clustering**: Processes data in manageable chunks using target mode
+- **Incremental Restart**: Checkpoint-based resumption with graceful interruption handling
 - **Conflict Resolution**: Ensures mutually exclusive clustering (MECE) through full gapHACk refinement
 - **Close Cluster Refinement**: Optimizes cluster boundaries for closely related groups
 - **Flexible Stopping Criteria**: Control by cluster count, sequence coverage, or exhaustive processing
@@ -206,6 +207,64 @@ gaphack-decompose large_dataset.fasta \
 - **BLAST neighborhoods**: Efficiently finds similar sequences for clustering
 - **Conflict resolution**: `--resolve-conflicts` ensures each sequence appears in only one cluster
 - **Close cluster refinement**: `--refine-close-clusters DISTANCE` optimizes boundaries between similar clusters
+- **Incremental restart**: Gracefully handles interruptions with checkpoint-based resumption
+
+#### Incremental Restart and Checkpointing
+
+The `gaphack-decompose` tool supports graceful interruption handling and checkpoint-based resumption for long-running clustering jobs:
+
+**Interruption Handling:**
+```bash
+# Start a long-running decompose job
+gaphack-decompose large_dataset.fasta -o results
+
+# Interrupt at any time with Ctrl+C - state is automatically saved
+# The tool captures interruption signals and saves checkpoint before exiting
+```
+
+**Resume from Checkpoint:**
+```bash
+# Resume from the last checkpoint
+gaphack-decompose --resume -o results
+
+# Continue with modified stopping criteria
+gaphack-decompose --resume -o results --max-clusters 100
+
+# Resume and enable additional refinement
+gaphack-decompose --resume -o results \
+    --resolve-conflicts \
+    --refine-close-clusters 0.02
+```
+
+**Checkpoint Management:**
+- **Automatic checkpointing**: State saved every 10 iterations by default
+- **Configurable interval**: Use `--checkpoint-interval N` to adjust frequency
+- **Signal handling**: Ctrl+C (SIGINT) and SIGTERM trigger graceful shutdown with state save
+- **State file**: All progress stored in `output_dir/state.json`
+- **BLAST database caching**: Reuses BLAST database across resume operations
+
+**Finalization:**
+```bash
+# After clustering is complete, create final numbered output
+gaphack-decompose --resume -o results --finalize
+
+# Finalize and remove intermediate files
+gaphack-decompose --resume -o results --finalize --cleanup
+```
+
+**Resume Workflow:**
+1. Run `gaphack-decompose` with desired parameters and output directory
+2. Interrupt at any time (Ctrl+C) or let it complete initial clustering
+3. Use `--resume` to continue clustering from checkpoint
+4. Use `--resume --finalize` to create final numbered clusters (cluster_001.fasta, etc.)
+5. Optionally use `--cleanup` with `--finalize` to remove intermediate stage files
+
+**Key Features:**
+- **No data loss**: Checkpoints saved at regular intervals and on interruption
+- **Flexible resumption**: Change stopping criteria or refinement settings when resuming
+- **Efficient restart**: Reuses BLAST database and completed work
+- **Safe by default**: Prevents accidental overwrites of existing state
+- **Input validation**: Warns if input FASTA has changed since original run
 
 ### Analysis Tool (gaphack-analyze)
 
