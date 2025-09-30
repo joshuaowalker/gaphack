@@ -428,7 +428,7 @@ Examples:
 
         # Check if finalize-only mode
         if args.finalize:
-            from .decompose import finalize_decompose
+            from .resume import finalize_decompose
             try:
                 finalize_decompose(output_dir=str(output_dir), cleanup=args.cleanup)
                 logger.info("Finalization completed successfully")
@@ -441,7 +441,7 @@ Examples:
                 sys.exit(1)
 
         # Import resume function
-        from .decompose import resume_decompose
+        from .resume import resume_decompose
 
         try:
             results = resume_decompose(

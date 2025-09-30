@@ -3,7 +3,8 @@
 import pytest
 import tempfile
 from pathlib import Path
-from gaphack.decompose import DecomposeClustering, resume_decompose
+from gaphack.decompose import DecomposeClustering
+from gaphack.resume import resume_decompose
 from gaphack.state import DecomposeState, StateManager
 from gaphack.utils import load_sequences_with_deduplication
 

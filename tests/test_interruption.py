@@ -98,7 +98,7 @@ class TestGracefulInterruption:
         assert initial_iterations >= 3
 
         # Resume from checkpoint
-        from gaphack.decompose import resume_decompose
+        from gaphack.resume import resume_decompose
         results2 = resume_decompose(
             output_dir=output_dir,
             max_clusters=7,
@@ -157,7 +157,7 @@ class TestInterruptionResumeWorkflow:
         assert len(results1.clusters) >= 2
 
         # Second run: add more clusters (simulating resume after interrupt)
-        from gaphack.decompose import resume_decompose
+        from gaphack.resume import resume_decompose
         results2 = resume_decompose(
             output_dir=output_dir,
             max_clusters=4,
@@ -215,7 +215,7 @@ class TestInterruptionResumeWorkflow:
             assert len(sequences) == len(headers)
 
         # Resume and verify data integrity maintained
-        from gaphack.decompose import resume_decompose
+        from gaphack.resume import resume_decompose
         results2 = resume_decompose(
             output_dir=output_dir,
             max_clusters=5,

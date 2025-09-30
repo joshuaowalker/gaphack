@@ -13,7 +13,9 @@ This file contains development notes and future considerations for the gapHACk p
 ### Key Files by Functionality
 - **Core clustering**: `core.py` (main algorithm + DistanceCache)
 - **Target mode**: `target_clustering.py`
-- **Decompose orchestration**: `decompose.py` (includes BlastResultMemory, AssignmentTracker)
+- **Decompose orchestration**: `decompose.py` (main DecomposeClustering class, AssignmentTracker)
+- **Target selection**: `target_selection.py` (TargetSelector, NearbyTargetSelector, BlastResultMemory)
+- **Resume and finalization**: `resume.py` (resume_decompose, finalize_decompose, refinement stages)
 - **Post-processing**: `cluster_refinement.py` (conflict resolution, close cluster refinement)
 - **Distance computation**: `lazy_distances.py` (LazyDistanceProvider, PrecomputedDistanceProvider)
 - **Scoped operations**: `scoped_distances.py` (ScopedDistanceProvider for refinement)

@@ -16,7 +16,8 @@ from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
-from gaphack.decompose import DecomposeClustering, resume_decompose
+from gaphack.decompose import DecomposeClustering
+from gaphack.resume import resume_decompose
 from gaphack.state import DecomposeState
 
 

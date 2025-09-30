@@ -2,7 +2,8 @@
 
 import pytest
 from pathlib import Path
-from gaphack.decompose import DecomposeClustering, resume_decompose
+from gaphack.decompose import DecomposeClustering
+from gaphack.resume import resume_decompose
 
 
 @pytest.fixture
