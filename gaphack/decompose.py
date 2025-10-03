@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .blast_neighborhood import BlastNeighborhoodFinder
+from .vsearch_neighborhood import VsearchNeighborhoodFinder
+from .neighborhood_finder import NeighborhoodFinder
 from .target_clustering import TargetModeClustering
 from .utils import load_sequences_from_fasta, load_sequences_with_deduplication, calculate_distance_matrix
 from .lazy_distances import DistanceProviderFactory, SubsetDistanceProvider, DistanceProvider
@@ -132,6 +134,7 @@ class DecomposeClustering:
                  resolve_conflicts: bool = False,
                  refine_close_clusters: bool = False,
                  close_cluster_threshold: float = 0.0,
+                 search_method: str = "blast",
                  show_progress: bool = True,
                  logger: Optional[logging.Logger] = None):
         """Initialize decomposition clustering.
@@ -140,13 +143,14 @@ class DecomposeClustering:
             min_split: Minimum distance to split clusters in target clustering
             max_lump: Maximum distance to lump clusters in target clustering
             target_percentile: Percentile for gap optimization
-            blast_max_hits: Maximum BLAST hits per query (default: 1000)
-            blast_threads: BLAST thread count (auto if None)
-            blast_evalue: BLAST e-value threshold
-            min_identity: BLAST identity threshold (auto if None)
+            blast_max_hits: Maximum BLAST/vsearch hits per query (default: 1000)
+            blast_threads: BLAST/vsearch thread count (auto if None)
+            blast_evalue: BLAST e-value threshold (vsearch uses min_identity only)
+            min_identity: BLAST/vsearch identity threshold (auto if None)
             resolve_conflicts: Enable cluster refinement for conflict resolution with minimal scope (default: False)
             refine_close_clusters: Enable cluster refinement for close cluster refinement (default: False)
             close_cluster_threshold: Distance threshold for close cluster refinement and scope expansion (default: 0.0)
+            search_method: Search method for neighborhood discovery: 'blast' or 'vsearch' (default: 'blast')
             show_progress: Show progress bars
             logger: Logger instance
         """
@@ -160,7 +164,8 @@ class DecomposeClustering:
         self.resolve_conflicts = resolve_conflicts
         self.refine_close_clusters = refine_close_clusters
         self.close_cluster_threshold = close_cluster_threshold
-        self.knn_neighbors = 20  # Hardcoded for BLAST K-NN cluster graph
+        self.search_method = search_method
+        self.knn_neighbors = 20  # Hardcoded for K-NN cluster graph
         self.show_progress = show_progress
         self.logger = logger or logging.getLogger(__name__)
 
@@ -175,6 +180,28 @@ class DecomposeClustering:
             show_progress=False,  # Disable individual progress bars
             logger=self.logger
         )
+
+    def _create_neighborhood_finder(self, sequences: List[str], headers: List[str],
+                                     output_dir: Optional[Path]) -> NeighborhoodFinder:
+        """Factory method to create neighborhood finder based on search method.
+
+        Args:
+            sequences: List of DNA sequences
+            headers: List of sequence headers
+            output_dir: Output directory for database files
+
+        Returns:
+            NeighborhoodFinder instance (BLAST or vsearch)
+
+        Raises:
+            ValueError: If search_method is not recognized
+        """
+        if self.search_method == "blast":
+            return BlastNeighborhoodFinder(sequences, headers, output_dir=output_dir)
+        elif self.search_method == "vsearch":
+            return VsearchNeighborhoodFinder(sequences, headers, output_dir=output_dir)
+        else:
+            raise ValueError(f"Unknown search method: {self.search_method}. Choose 'blast' or 'vsearch'.")
     
     def decompose(self, input_fasta: str,
                  targets_fasta: Optional[str] = None,
@@ -278,8 +305,8 @@ class DecomposeClustering:
                     )
                     self.logger.info(f"State management initialized in {output_dir_path}")
 
-            # Initialize BLAST neighborhood finder with output directory
-            blast_finder = BlastNeighborhoodFinder(sequences, headers, output_dir=output_dir_path)
+            # Initialize neighborhood finder (BLAST or vsearch) with output directory
+            neighborhood_finder = self._create_neighborhood_finder(sequences, headers, output_dir=output_dir_path)
 
             # Initialize or load assignment tracker and clusters
             assignment_tracker = AssignmentTracker()
@@ -411,7 +438,7 @@ class DecomposeClustering:
                     self.logger.debug(f"Iteration {iteration}: targeting sequences {target_headers_for_iteration}")
                     
                     # Find BLAST neighborhood
-                    neighborhood_headers = blast_finder.find_neighborhood(target_headers_for_iteration,
+                    neighborhood_headers = neighborhood_finder.find_neighborhood(target_headers_for_iteration,
                                                                           max_hits=self.blast_max_hits,
                                                                           e_value_threshold=self.blast_evalue,
                                                                           min_identity=self.min_identity)
@@ -616,8 +643,8 @@ class DecomposeClustering:
             finally:
                 # Close progress bar
                 pbar.close()
-                # Clean up BLAST database
-                blast_finder.cleanup()
+                # Clean up neighborhood finder database
+                neighborhood_finder.cleanup()
 
                 # Process final results
                 results.total_iterations = iteration
@@ -1207,7 +1234,7 @@ class DecomposeClustering:
         """
         from .cluster_graph import ClusterGraph
 
-        self.logger.info(f"Creating BLAST K-NN cluster graph with K={self.knn_neighbors}")
+        self.logger.info(f"Creating {self.search_method.upper()} K-NN cluster graph with K={self.knn_neighbors}")
         return ClusterGraph(
             clusters=clusters,
             sequences=sequences,
@@ -1215,7 +1242,8 @@ class DecomposeClustering:
             distance_provider=distance_provider,
             k_neighbors=self.knn_neighbors,
             blast_evalue=self.blast_evalue,  # Use user-specified e-value
-            blast_identity=self.min_identity or 90.0  # Use user-specified identity or default
+            blast_identity=self.min_identity or 90.0,  # Use user-specified identity or default
+            search_method=self.search_method  # Use user-specified search method
         )
 
     def _renumber_clusters_sequentially(self, clusters: Dict[str, List[str]]) -> Tuple[Dict[str, List[str]], Dict[str, str]]:

@@ -361,15 +361,17 @@ Examples:
     parser.add_argument('--max-sequences', type=int,
                        help='Maximum sequences to assign (undirected mode, optional)')
     
-    # BLAST parameters
+    # Search method and parameters
+    parser.add_argument('--search-method', choices=['blast', 'vsearch'], default='blast',
+                       help='Search method for neighborhood discovery: blast or vsearch (default: blast)')
     parser.add_argument('--blast-max-hits', type=int, default=1000,
-                       help='Maximum BLAST hits per query (default: 1000)')
+                       help='Maximum BLAST/vsearch hits per query (default: 1000)')
     parser.add_argument('--blast-threads', type=int,
-                       help='Number of BLAST threads (default: auto)')
+                       help='Number of BLAST/vsearch threads (default: auto)')
     parser.add_argument('--blast-evalue', type=float, default=1e-5,
-                       help='BLAST e-value threshold (default: 1e-5)')
+                       help='BLAST e-value threshold (vsearch uses --min-identity only, default: 1e-5)')
     parser.add_argument('--min-identity', type=float,
-                       help='Minimum BLAST identity percentage (default: auto-calculated)')
+                       help='Minimum BLAST/vsearch identity percentage (default: auto-calculated)')
     
     # Clustering parameters (from existing gapHACk)
     parser.add_argument('--min-split', type=float, default=0.005,
@@ -542,6 +544,7 @@ Examples:
         resolve_conflicts=args.resolve_conflicts,
         refine_close_clusters=args.refine_close_clusters > 0.0,
         close_cluster_threshold=args.refine_close_clusters,
+        search_method=args.search_method,
         show_progress=not args.no_progress,
         logger=logger
     )

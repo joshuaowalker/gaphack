@@ -13,6 +13,8 @@ import numpy as np
 
 from .lazy_distances import DistanceProvider
 from .blast_neighborhood import BlastNeighborhoodFinder
+from .vsearch_neighborhood import VsearchNeighborhoodFinder
+from .neighborhood_finder import NeighborhoodFinder
 
 
 logger = logging.getLogger(__name__)
@@ -28,8 +30,9 @@ class ClusterGraph:
     def __init__(self, clusters: Dict[str, List[str]], sequences: List[str],
                  headers: List[str], distance_provider: DistanceProvider,
                  k_neighbors: int = 20, blast_evalue: float = 1e-5,
-                 blast_identity: float = 90.0, cache_dir: Optional[Path] = None):
-        """Initialize BLAST K-NN proximity graph.
+                 blast_identity: float = 90.0, cache_dir: Optional[Path] = None,
+                 search_method: str = "blast"):
+        """Initialize K-NN proximity graph.
 
         Args:
             clusters: Dictionary mapping cluster_id -> list of sequence headers
@@ -38,8 +41,9 @@ class ClusterGraph:
             distance_provider: Provider for accurate distance calculations
             k_neighbors: Number of nearest neighbors to maintain per cluster
             blast_evalue: BLAST e-value threshold for similarity detection
-            blast_identity: Minimum BLAST identity percentage (0-100)
-            cache_dir: Directory for BLAST database caching
+            blast_identity: Minimum BLAST/vsearch identity percentage (0-100)
+            cache_dir: Directory for database caching
+            search_method: Search method for K-NN: 'blast' or 'vsearch' (default: 'blast')
         """
         self.clusters = clusters
         self.sequences = sequences
@@ -49,16 +53,17 @@ class ClusterGraph:
         self.blast_evalue = blast_evalue
         self.blast_identity = blast_identity
         self.cache_dir = cache_dir or Path(tempfile.gettempdir()) / "gaphack_knn_cache"
+        self.search_method = search_method
 
         # Initialize data structures
         self.medoid_cache: Dict[str, int] = {}
         self.knn_graph: Dict[str, List[Tuple[str, float]]] = {}
-        self.blast_finder: Optional[BlastNeighborhoodFinder] = None
+        self.neighborhood_finder: Optional[NeighborhoodFinder] = None
 
         # Build the K-NN graph
         self._build_knn_graph()
 
-        logger.info(f"Initialized BlastKNNProximityGraph with {len(clusters)} clusters, K={k_neighbors}")
+        logger.info(f"Initialized {search_method.upper()} K-NN ProximityGraph with {len(clusters)} clusters, K={k_neighbors}")
 
     def _compute_all_medoids(self) -> None:
         """Compute medoids for all clusters and cache them."""
@@ -149,54 +154,63 @@ class ClusterGraph:
             logger.debug(f"Unique medoid {i}: {header} -> clusters {clusters}, "
                         f"sequence: {sequence[:50]}...{sequence[-20:] if len(sequence) > 70 else ''}")
 
-        # Step 3: Create BLAST database from unique medoid sequences
-        self.blast_finder = BlastNeighborhoodFinder(
-            sequences=unique_sequences,
-            headers=unique_headers,
-            cache_dir=self.cache_dir
-        )
+        # Step 3: Create neighborhood finder database from unique medoid sequences
+        if self.search_method == "blast":
+            self.neighborhood_finder = BlastNeighborhoodFinder(
+                sequences=unique_sequences,
+                headers=unique_headers,
+                output_dir=self.cache_dir
+            )
+        elif self.search_method == "vsearch":
+            self.neighborhood_finder = VsearchNeighborhoodFinder(
+                sequences=unique_sequences,
+                headers=unique_headers,
+                output_dir=self.cache_dir
+            )
+        else:
+            raise ValueError(f"Unknown search method: {self.search_method}. Choose 'blast' or 'vsearch'.")
 
         # Step 4: Batch query all unique medoid sequences against the database
         # Each unique sequence represents one or more clusters
         batch_queries = [(header, sequence) for header, sequence in zip(unique_headers, unique_sequences)]
 
-        logger.debug(f"Running batch BLAST queries for {len(batch_queries)} unique medoid sequences")
+        logger.debug(f"Running batch {self.search_method.upper()} queries for {len(batch_queries)} unique medoid sequences")
 
-        # Run batched BLAST search
-        blast_results = self.blast_finder._get_candidates_for_sequences(
+        # Run batched search
+        search_results = self.neighborhood_finder._get_candidates_for_sequences(
             query_sequences=batch_queries,
             max_targets=self.k_neighbors + 10,  # Get extra hits to account for filtering
             e_value_threshold=self.blast_evalue,
             min_identity=self.blast_identity
         )
 
-        # Step 5: Convert BLAST results to K-NN graph by expanding results to all clusters
+        # Step 5: Convert search results to K-NN graph by expanding results to all clusters
         # Initialize empty neighbor lists for all clusters
         for cluster_id in self.medoid_cache.keys():
             self.knn_graph[cluster_id] = []
 
-        # Process BLAST results for each unique medoid sequence
-        for query_header in blast_results:
+        # Process search results for each unique medoid sequence
+        for query_header in search_results:
             # Extract unique sequence index from header (format: "medoid_N")
             query_idx = int(query_header.split("_")[1])
             query_sequence = unique_sequences[query_idx]
             query_clusters = sequence_to_clusters[query_sequence]
 
-            logger.debug(f"Processing BLAST results for {query_header}: {len(blast_results[query_header])} hits, "
+            logger.debug(f"Processing search results for {query_header}: {len(search_results[query_header])} hits, "
                         f"represents clusters {query_clusters}")
 
             # Process all hits for this query
             subject_distances = []
-            for hit in blast_results[query_header]:
-                # hit.sequence_hash contains the BLAST subject sequence hash
+            for hit in search_results[query_header]:
+                # hit.sequence_hash contains the subject sequence hash
                 subject_sequence_hash = hit.sequence_hash
 
-                # Look up the subject header from the BLAST finder's sequence_lookup
-                if subject_sequence_hash in self.blast_finder.sequence_lookup:
+                # Look up the subject header from the finder's sequence_lookup
+                if subject_sequence_hash in self.neighborhood_finder.sequence_lookup:
                     # Get the first match (there could be multiple due to hash collisions)
-                    subject_sequence, subject_original_header, subject_blast_idx = self.blast_finder.sequence_lookup[subject_sequence_hash][0]
+                    subject_sequence, subject_original_header, subject_idx = self.neighborhood_finder.sequence_lookup[subject_sequence_hash][0]
 
-                    # The subject_original_header is the header we used in our BLAST database (e.g., "medoid_0")
+                    # The subject_original_header is the header we used in our search database (e.g., "medoid_0")
                     # Extract the index to map back to our unique sequences
                     try:
                         subject_idx = int(subject_original_header.split("_")[1])
