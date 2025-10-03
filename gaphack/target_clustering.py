@@ -101,7 +101,7 @@ class TargetModeClustering:
         remaining = set(range(n)) - target_cluster
         
         if not remaining:
-            self.logger.warning("All sequences are in target set - no clustering needed")
+            self.logger.debug("All sequences are in target set - no clustering needed")
             return list(target_cluster), [], {'best_config': {}, 'gap_history': []}
         
         # Note: we don't need to ensure all pairwise distances in target cluster are precomputed

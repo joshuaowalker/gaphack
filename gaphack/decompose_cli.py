@@ -94,11 +94,26 @@ def setup_logging(verbose: bool = False) -> None:
     )
 
 
-def save_decompose_results(results: DecomposeResults, output_base: str, 
+def save_decompose_results(results: DecomposeResults, output_dir,
                           input_fasta: str = None) -> None:
-    """Save decomposition clustering results to files."""
-    output_base_path = Path(output_base)
-    
+    """Save decomposition clustering results to files in timestamp-based directory.
+
+    Creates:
+        output_dir/clusters/{timestamp}/cluster_00001.fasta, cluster_00002.fasta, ...
+        output_dir/clusters/latest -> {timestamp}/ (symlink)
+
+    Args:
+        results: DecomposeResults object with clusters
+        output_dir: Output directory (Path object or string)
+        input_fasta: Path to input FASTA file (for loading sequences)
+    """
+    import datetime
+    import sys
+    from pathlib import Path
+
+    # Convert output_dir to Path if it's a string
+    output_dir = Path(output_dir)
+
     # Load sequences from input FASTA if provided (for FASTA output)
     sequences = None
     all_headers = None
@@ -134,36 +149,85 @@ def save_decompose_results(results: DecomposeResults, output_base: str,
         # Create header_mapping for backward compatibility (use header as both key and value)
         header_mapping = {header: header for header in all_headers}
 
-    # Create a mapping of headers to indices for the loaded sequences
+    # Create timestamp-based output directory
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    clusters_dir = output_dir / "clusters"
+    timestamp_dir = clusters_dir / timestamp
+    timestamp_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create 'latest' symlink
+    latest_symlink = clusters_dir / "latest"
+    if latest_symlink.exists() or latest_symlink.is_symlink():
+        latest_symlink.unlink()
+    latest_symlink.symlink_to(timestamp, target_is_directory=True)
+
+    # Save FASTA files with sequential numbering
     if all_headers:
+        from Bio.Seq import Seq
+        from Bio.SeqRecord import SeqRecord
+        from Bio import SeqIO
+
         header_to_idx = {header: i for i, header in enumerate(all_headers)}
-        
-        # Convert clusters to index-based format (use all_clusters to include conflicts in FASTA files)
-        cluster_list = []
-        for cluster_id, cluster_headers in results.all_clusters.items():
-            cluster_indices = []
+
+        # Sort clusters by size (largest first) for consistent numbering
+        sorted_clusters = sorted(results.all_clusters.items(), key=lambda x: len(x[1]), reverse=True)
+
+        for cluster_num, (cluster_id, cluster_headers) in enumerate(sorted_clusters, start=1):
+            cluster_file = timestamp_dir / f"cluster_{cluster_num:05d}.fasta"
+
+            records = []
             for header in cluster_headers:
                 if header in header_to_idx:
-                    cluster_indices.append(header_to_idx[header])
-                else:
-                    logging.warning(f"Header '{header}' not found in input sequences")
-            if cluster_indices:  # Only add non-empty clusters
-                cluster_list.append(cluster_indices)
-        
-        # Convert unassigned to index-based format
-        unassigned_indices = []
-        for header in results.unassigned:
-            if header in header_to_idx:
-                unassigned_indices.append(header_to_idx[header])
-            else:
-                logging.warning(f"Unassigned header '{header}' not found in input sequences")
-        
-        # Save FASTA files with preserved cluster IDs
-        _save_decompose_fasta_files(results.all_clusters, results.unassigned, output_base, 
-                                   all_headers, sequences, header_mapping)
+                    seq_idx = header_to_idx[header]
+                    full_header = header_mapping.get(header, header)
+                    original_desc = full_header.split(' ', 1)[1] if ' ' in full_header else ""
+
+                    if original_desc:
+                        full_description = f"{original_desc} {cluster_id}"
+                    else:
+                        full_description = cluster_id
+
+                    record = SeqRecord(
+                        Seq(sequences[seq_idx]),
+                        id=header,
+                        description=full_description
+                    )
+                    records.append(record)
+
+            if records:
+                with open(cluster_file, 'w') as f:
+                    SeqIO.write(records, f, "fasta-2line")
+                logging.debug(f"Wrote {len(records)} sequences to {cluster_file}")
+
+        # Save unassigned sequences
+        if results.unassigned:
+            unassigned_file = timestamp_dir / "unassigned.fasta"
+            records = []
+            for header in results.unassigned:
+                if header in header_to_idx:
+                    seq_idx = header_to_idx[header]
+                    full_header = header_mapping.get(header, header)
+                    original_desc = full_header.split(' ', 1)[1] if ' ' in full_header else ""
+
+                    if original_desc:
+                        full_description = f"{original_desc} unassigned"
+                    else:
+                        full_description = "unassigned"
+
+                    record = SeqRecord(
+                        Seq(sequences[seq_idx]),
+                        id=header,
+                        description=full_description
+                    )
+                    records.append(record)
+
+            if records:
+                with open(unassigned_file, 'w') as f:
+                    SeqIO.write(records, f, "fasta-2line")
+                logging.debug(f"Wrote {len(records)} unassigned sequences to {unassigned_file}")
     
     # Save main TSV assignment file
-    tsv_file = f"{output_base}.decompose_assignments.tsv"
+    tsv_file = timestamp_dir / "decompose_assignments.tsv"
     with open(tsv_file, 'w') as f:
         f.write("sequence_id\tcluster_id\n")
         
@@ -178,14 +242,14 @@ def save_decompose_results(results: DecomposeResults, output_base: str,
     
     # Save conflicts if any
     if results.conflicts:
-        conflicts_file = f"{output_base}.decompose_conflicts.tsv"
+        conflicts_file = timestamp_dir / "decompose_conflicts.tsv"
         with open(conflicts_file, 'w') as f:
             f.write("sequence_id\tcluster_ids\n")
             for seq_id, cluster_ids in results.conflicts.items():
                 f.write(f"{seq_id}\t{','.join(cluster_ids)}\n")
     
     # Save enhanced summary report
-    report_file = f"{output_base}.decompose_report.txt"
+    report_file = timestamp_dir / "decompose_report.txt"
     with open(report_file, 'w') as f:
         f.write("Gaphack-Decompose Clustering Report\n")
         f.write("=" * 40 + "\n\n")
@@ -301,15 +365,16 @@ def save_decompose_results(results: DecomposeResults, output_base: str,
                 f.write(f"{seq_id}: assigned to {', '.join(cluster_ids)}\n")
             f.write("\n")
     
-    print(f"Results saved:")
+    print(f"Results saved to: {timestamp_dir}")
+    print(f"  Symlink: {latest_symlink} -> {timestamp}/")
     if sequences:
-        print(f"  FASTA clusters: {output_base}.cluster_*.fasta")
+        print(f"  FASTA clusters: cluster_00001.fasta, cluster_00002.fasta, ...")
         if results.unassigned:
-            print(f"  FASTA unassigned: {output_base}.unassigneds.fasta")
-    print(f"  Assignments: {tsv_file}")
-    print(f"  Report: {report_file}")
+            print(f"  FASTA unassigned: unassigned.fasta")
+    print(f"  Assignments: decompose_assignments.tsv")
+    print(f"  Report: decompose_report.txt")
     if results.conflicts:
-        print(f"  Conflicts: {conflicts_file}")
+        print(f"  Conflicts: decompose_conflicts.tsv")
 
 
 def main():
@@ -458,11 +523,10 @@ Examples:
             )
 
             # Save results
-            output_base = str(output_dir / "decompose")
             # Get input_fasta from state for saving results
             from .state import DecomposeState
             state = DecomposeState.load(output_dir)
-            save_decompose_results(results, output_base, state.input.fasta_path)
+            save_decompose_results(results, output_dir, state.input.fasta_path)
 
             logger.info("Resume completed successfully")
             sys.exit(0)
@@ -569,9 +633,8 @@ Examples:
         results.command_line = command_line
         results.start_time = start_time
 
-        # Save results using output directory base name
-        output_base = str(output_dir / "decompose")
-        save_decompose_results(results, output_base, args.input_fasta)
+        # Save results to timestamp-based directory
+        save_decompose_results(results, output_dir, args.input_fasta)
         
         logger.info("Decomposition clustering completed successfully")
         

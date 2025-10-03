@@ -18,6 +18,12 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 
+from .cluster_id_utils import (
+    get_stage_suffix, format_cluster_id, parse_cluster_id,
+    get_next_cluster_number, get_stage_directory, format_cluster_filename,
+    load_all_stage_clusters, get_latest_stage_directory
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -50,8 +56,8 @@ class InputInfo:
 class StageInfo:
     """Information about a processing stage."""
     completed: bool = False
-    cluster_file_pattern: str = ""
-    unassigned_file: str = ""
+    stage_directory: str = ""  # Relative path to stage directory (e.g., "work/initial")
+    unassigned_file: str = ""  # Relative path to unassigned file
 
     # Statistics (for reporting only, not used for logic)
     total_clusters: int = 0
@@ -254,20 +260,23 @@ class DecomposeState:
             f"Use --force-input-change to override (may cause inconsistencies)."
         )
 
-    def get_current_stage_pattern(self) -> str:
-        """Get cluster file pattern for current stage.
+    def get_current_stage_directory(self, output_dir: Path) -> Path:
+        """Get stage directory for current stage.
+
+        Args:
+            output_dir: Output directory for decompose run
 
         Returns:
-            Glob pattern for current stage cluster files
+            Path to current stage directory
         """
         if self.stage == "initial_clustering":
-            return self.initial_clustering.cluster_file_pattern
+            return output_dir / self.initial_clustering.stage_directory
         elif self.stage == "conflict_resolution":
-            return self.conflict_resolution.cluster_file_pattern
+            return output_dir / self.conflict_resolution.stage_directory
         elif self.stage == "close_cluster_refinement":
-            return self.close_cluster_refinement.cluster_file_pattern
+            return output_dir / self.close_cluster_refinement.stage_directory
         elif self.stage == "finalized":
-            return "cluster_*.fasta"
+            return output_dir / "clusters" / "latest"
         else:
             raise ValueError(f"Unknown stage: {self.stage}")
 
@@ -367,39 +376,33 @@ class StateManager:
         """
         state.save(self.output_dir)
 
-    def load_clusters_from_pattern(self, pattern: str) -> Dict[str, List[str]]:
-        """Rebuild cluster dict by reading FASTA files matching pattern.
+    def load_clusters_from_stage_directory(self, stage_dir: Path) -> Dict[str, List[str]]:
+        """Rebuild cluster dict by reading FASTA files from stage directory.
 
         Args:
-            pattern: Glob pattern for cluster files (e.g., "initial.cluster_*.fasta")
+            stage_dir: Path to stage directory (e.g., output_dir/work/initial)
 
         Returns:
             Dict mapping cluster_id -> list of sequence headers
 
         Note:
             This reconstructs cluster membership from FASTA files (source of truth).
-            Cluster IDs are extracted from filenames.
+            Cluster IDs are extracted from filenames (e.g., cluster_00001I.fasta).
         """
         from Bio import SeqIO
 
         clusters = {}
 
-        # Find all matching cluster files
-        cluster_files = sorted(self.output_dir.glob(pattern))
+        if not stage_dir.exists():
+            logger.warning(f"Stage directory does not exist: {stage_dir}")
+            return clusters
+
+        # Find all cluster FASTA files in stage directory
+        cluster_files = sorted(stage_dir.glob("cluster_*.fasta"))
 
         for cluster_file in cluster_files:
-            # Extract cluster ID from filename
-            # Examples: "initial.cluster_0001.fasta" -> "initial_0001"
-            #           "deconflicted.cluster_0002.fasta" -> "deconflicted_0002"
-            #           "cluster_003.fasta" -> "cluster_003"
-            filename = cluster_file.stem  # Remove .fasta
-            if ".cluster_" in filename:
-                # Stage prefix exists
-                parts = filename.split(".cluster_")
-                cluster_id = f"{parts[0]}_{parts[1]}"
-            else:
-                # No stage prefix (final output)
-                cluster_id = filename
+            # Extract cluster ID from filename (e.g., "cluster_00001I.fasta" -> "cluster_00001I")
+            cluster_id = cluster_file.stem
 
             # Read sequence headers from FASTA
             headers = []
@@ -410,7 +413,7 @@ class StateManager:
                 clusters[cluster_id] = headers
                 logger.debug(f"Loaded cluster {cluster_id}: {len(headers)} sequences")
 
-        logger.info(f"Loaded {len(clusters)} clusters from pattern '{pattern}'")
+        logger.info(f"Loaded {len(clusters)} clusters from {stage_dir}")
         return clusters
 
     def load_unassigned_sequences(self, unassigned_file: str) -> List[str]:
@@ -500,28 +503,30 @@ class StateManager:
                         clusters: Dict[str, List[str]],
                         sequences: List[str],
                         headers: List[str],
-                        stage_prefix: str) -> None:
+                        stage_dir: Path) -> None:
         """Save cluster FASTA files for a stage.
 
         Args:
             clusters: Dict mapping cluster_id -> list of sequence headers
             sequences: Full sequence list
             headers: Full header list (sequence IDs)
-            stage_prefix: Stage prefix for filenames (e.g., "initial", "deconflicted")
+            stage_dir: Path to stage directory where clusters will be saved
         """
         from Bio.Seq import Seq
         from Bio.SeqRecord import SeqRecord
         from Bio import SeqIO
+
+        # Create stage directory if it doesn't exist
+        stage_dir.mkdir(parents=True, exist_ok=True)
 
         # Create header to index mapping
         header_to_idx = {header: i for i, header in enumerate(headers)}
 
         # Save each cluster to a separate FASTA file
         for cluster_id, cluster_headers in clusters.items():
-            # Generate filename: {stage_prefix}.cluster_{id}.fasta
-            # Example: initial.cluster_0001.fasta
-            filename = f"{stage_prefix}.cluster_{cluster_id.split('_')[-1]}.fasta"
-            cluster_file = self.output_dir / filename
+            # Filename is just cluster_id.fasta (e.g., cluster_00001I.fasta)
+            filename = f"{cluster_id}.fasta"
+            cluster_file = stage_dir / filename
 
             records = []
             for header in cluster_headers:
@@ -539,9 +544,11 @@ class StateManager:
                     SeqIO.write(records, f, "fasta-2line")
                 logger.debug(f"Wrote {len(records)} sequences to {cluster_file}")
 
+        logger.debug(f"Saved {len(clusters)} cluster files to {stage_dir}")
+
     def save_stage_results(self,
                           results: 'DecomposeResults',
-                          stage: str,
+                          stage_dir: Path,
                           sequences: List[str],
                           headers: List[str],
                           hash_to_headers: Dict[str, List[str]]) -> None:
@@ -549,7 +556,7 @@ class StateManager:
 
         Args:
             results: DecomposeResults object with clusters
-            stage: Stage name for file prefix (e.g., "deconflicted", "refined")
+            stage_dir: Path to stage directory where clusters will be saved
             sequences: Full sequence list
             headers: Hash IDs corresponding to sequences
             hash_to_headers: Mapping from hash IDs to original headers
@@ -558,20 +565,17 @@ class StateManager:
         from Bio.SeqRecord import SeqRecord
         from Bio import SeqIO
 
+        # Create stage directory if it doesn't exist
+        stage_dir.mkdir(parents=True, exist_ok=True)
+
         # Create header to index mapping (using hash IDs)
         header_to_idx = {header: i for i, header in enumerate(headers)}
 
         # Save each cluster to a separate FASTA file
         for cluster_id, cluster_headers in results.clusters.items():
-            # Generate filename: {stage}.cluster_{num}.fasta
-            # Extract numeric part from cluster_id
-            # Example: "deconflicted_0001" -> "0001"
-            if '_' in cluster_id:
-                num_part = cluster_id.split('_')[-1]
-            else:
-                num_part = cluster_id
-            filename = f"{stage}.cluster_{num_part}.fasta"
-            cluster_file = self.output_dir / filename
+            # Filename is just cluster_id.fasta (e.g., cluster_00001C.fasta)
+            filename = f"{cluster_id}.fasta"
+            cluster_file = stage_dir / filename
 
             records = []
             for header in cluster_headers:
@@ -597,11 +601,11 @@ class StateManager:
                     SeqIO.write(records, f, "fasta-2line")
                 logger.debug(f"Wrote {len(records)} sequences to {cluster_file}")
 
-        logger.info(f"Saved {len(results.clusters)} cluster files with prefix '{stage}'")
+        logger.debug(f"Saved {len(results.clusters)} cluster files to {stage_dir}")
 
         # Save unassigned sequences if any
         if results.unassigned:
-            unassigned_file = self.output_dir / f"{stage}.unassigned.fasta"
+            unassigned_file = stage_dir / "unassigned.fasta"
             records = []
             for header in results.unassigned:
                 if header in header_to_idx:
@@ -658,16 +662,16 @@ def create_initial_state(input_fasta: str,
         deduplicated_sequences=len(sequences)
     )
 
-    # Create empty stage info
+    # Create empty stage info with new directory structure
     initial = InitialClusteringStage(
-        cluster_file_pattern="initial.cluster_*.fasta",
-        unassigned_file="initial.unassigned.fasta"
+        stage_directory="work/initial",
+        unassigned_file="work/initial/unassigned.fasta"
     )
     conflict = ConflictResolutionStage(
-        cluster_file_pattern="deconflicted.cluster_*.fasta"
+        stage_directory="work/deconflicted"
     )
     refinement = CloseClusterRefinementStage(
-        cluster_file_pattern="refined.cluster_*.fasta"
+        stage_directory="work/refined_1"
     )
     finalized_stage = FinalizedStage()
 

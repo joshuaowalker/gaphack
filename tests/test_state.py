@@ -292,21 +292,24 @@ class TestStateManager:
             "cluster_002": ["seq3", "seq4"]
         }
 
+        # Create stage directory
+        stage_dir = output_dir / "work/initial"
+
         # Save clusters
-        state_manager.save_stage_fasta(clusters, sequences, headers, "initial")
+        state_manager.save_stage_fasta(clusters, sequences, headers, stage_dir)
 
         # Verify files exist
-        assert (output_dir / "initial.cluster_001.fasta").exists()
-        assert (output_dir / "initial.cluster_002.fasta").exists()
+        assert (stage_dir / "cluster_001.fasta").exists()
+        assert (stage_dir / "cluster_002.fasta").exists()
 
         # Load clusters back
-        loaded_clusters = state_manager.load_clusters_from_pattern("initial.cluster_*.fasta")
+        loaded_clusters = state_manager.load_clusters_from_stage_directory(stage_dir)
 
         # Verify loaded clusters match original
-        # Note: cluster IDs are transformed by save/load (cluster_001 -> initial_001)
+        # Note: cluster IDs are loaded as-is from filenames
         assert len(loaded_clusters) == 2
-        assert set(loaded_clusters["initial_001"]) == set(clusters["cluster_001"])
-        assert set(loaded_clusters["initial_002"]) == set(clusters["cluster_002"])
+        assert set(loaded_clusters["cluster_001"]) == set(clusters["cluster_001"])
+        assert set(loaded_clusters["cluster_002"]) == set(clusters["cluster_002"])
 
     def test_rebuild_assignment_tracker(self, tmp_path):
         """Test rebuilding AssignmentTracker from clusters."""

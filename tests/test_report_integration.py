@@ -70,8 +70,8 @@ def test_enhanced_report():
         output_base = tmpdir / "test_results"
         save_decompose_results(results, str(output_base), str(input_fasta))
 
-        # Read and display the report
-        report_file = f"{output_base}.decompose_report.txt"
+        # Read and display the report (now in clusters/latest/)
+        report_file = output_base / "clusters" / "latest" / "decompose_report.txt"
         print(f"\n=== Generated Report ===")
         with open(report_file, 'r') as f:
             report_content = f.read()

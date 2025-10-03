@@ -204,7 +204,7 @@ class TestInterruptionResumeWorkflow:
         )
 
         # Verify cluster files exist
-        cluster_files = list(output_dir.glob("initial.cluster_*.fasta"))
+        cluster_files = list((output_dir / "work/initial").glob("*.fasta"))
         assert len(cluster_files) >= 3
 
         # Verify each cluster file is valid FASTA
@@ -224,7 +224,7 @@ class TestInterruptionResumeWorkflow:
         )
 
         # Should have more clusters now
-        cluster_files_after = list(output_dir.glob("initial.cluster_*.fasta"))
+        cluster_files_after = list((output_dir / "work/initial").glob("*.fasta"))
         assert len(cluster_files_after) >= 5
 
         # All cluster files should still be valid

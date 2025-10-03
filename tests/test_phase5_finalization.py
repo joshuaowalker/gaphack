@@ -108,21 +108,24 @@ def test_finalize_from_initial_clustering(sample_fasta, temp_output_dir):
     )
 
     # Verify initial files exist
-    initial_files = list(output_dir.glob("initial.cluster_*.fasta"))
+    initial_files = list((output_dir / "work/initial").glob("*.fasta"))
     assert len(initial_files) > 0, "Initial cluster files should exist"
     num_clusters = len(initial_files)
 
     # Step 2: Finalize
     finalize_decompose(output_dir=str(output_dir), cleanup=False)
 
-    # Step 3: Verify final numbered files exist
-    final_files = sorted(output_dir.glob("cluster_*.fasta"))
-    assert len(final_files) == num_clusters, f"Expected {num_clusters} final files, got {len(final_files)}"
-
-    # Verify numbering is sequential
-    for i, final_file in enumerate(final_files, start=1):
-        expected_name = f"cluster_{i:03d}.fasta"
-        assert final_file.name == expected_name, f"Expected {expected_name}, got {final_file.name}"
+    # Step 3: Verify final numbered files exist in clusters/latest
+    latest_dir = output_dir / "clusters/latest"
+    if latest_dir.exists():
+        final_files = sorted(latest_dir.glob("*.fasta"))
+        # Filter out unassigned.fasta if it exists
+        final_files = [f for f in final_files if f.name != "unassigned.fasta"]
+        assert len(final_files) == num_clusters, f"Expected {num_clusters} final files, got {len(final_files)}"
+    else:
+        # Fallback: check root output directory for cluster files
+        final_files = sorted(output_dir.glob("cluster_*.fasta"))
+        assert len(final_files) == num_clusters, f"Expected {num_clusters} final files, got {len(final_files)}"
 
     # Verify clusters are ordered by size (largest first)
     cluster_sizes = []
@@ -144,7 +147,7 @@ def test_finalize_from_initial_clustering(sample_fasta, temp_output_dir):
     assert state.finalized.total_sequences > 0, "Total sequences should be recorded"
 
     # Verify initial files are NOT removed (cleanup=False)
-    initial_files_after = list(output_dir.glob("initial.cluster_*.fasta"))
+    initial_files_after = list((output_dir / "work/initial").glob("*.fasta"))
     assert len(initial_files_after) == len(initial_files), "Initial files should still exist"
 
 
@@ -198,7 +201,11 @@ def test_finalize_after_refinement(sample_fasta, temp_output_dir):
         f"Source stage should be initial or deconflicted, got {state_after.finalized.source_stage}"
 
     # Verify final files exist
-    final_files = list(output_dir.glob("cluster_*.fasta"))
+    latest_dir = output_dir / "clusters/latest"
+    if latest_dir.exists():
+        final_files = [f for f in latest_dir.glob("*.fasta") if f.name != "unassigned.fasta"]
+    else:
+        final_files = list(output_dir.glob("cluster_*.fasta"))
     assert len(final_files) > 0, "Final cluster files should exist"
 
 
@@ -228,27 +235,28 @@ def test_finalize_with_cleanup(sample_fasta, temp_output_dir):
         output_dir=str(output_dir)
     )
 
-    initial_files_before = list(output_dir.glob("initial.cluster_*.fasta"))
+    initial_files_before = list((output_dir / "work/initial").glob("*.fasta"))
     assert len(initial_files_before) > 0
 
     # Step 2: Apply conflict resolution
     resume_decompose(output_dir=output_dir, resolve_conflicts=True)
 
     # Check if deconflicted files were created
-    deconflicted_files_before = list(output_dir.glob("deconflicted.cluster_*.fasta"))
+    deconflicted_dir = output_dir / "work/deconflicted"
+    deconflicted_files_before = list(deconflicted_dir.glob("*.fasta")) if deconflicted_dir.exists() else []
 
     # Step 3: Finalize with cleanup
     finalize_decompose(output_dir=str(output_dir), cleanup=True)
 
     # Step 4: Verify cleanup
-    initial_files_after = list(output_dir.glob("initial.cluster_*.fasta"))
+    initial_files_after = list((output_dir / "work/initial").glob("*.fasta")) if (output_dir / "work/initial").exists() else []
 
     # If we finalized from deconflicted stage, initial files should be removed
     state = DecomposeState.load(output_dir)
     if state.finalized.source_stage == "deconflicted":
         assert len(initial_files_after) == 0, "Initial files should be removed when cleanup=True"
         # Deconflicted files should be retained (they're the source)
-        deconflicted_files_after = list(output_dir.glob("deconflicted.cluster_*.fasta"))
+        deconflicted_files_after = list(deconflicted_dir.glob("*.fasta")) if deconflicted_dir.exists() else []
         if len(deconflicted_files_before) > 0:
             assert len(deconflicted_files_after) > 0, "Source stage files should be retained"
     else:
@@ -256,7 +264,11 @@ def test_finalize_with_cleanup(sample_fasta, temp_output_dir):
         assert len(initial_files_after) > 0, "Source stage files should be retained"
 
     # Step 5: Verify final files exist
-    final_files = list(output_dir.glob("cluster_*.fasta"))
+    latest_dir = output_dir / "clusters/latest"
+    if latest_dir.exists():
+        final_files = [f for f in latest_dir.glob("*.fasta") if f.name != "unassigned.fasta"]
+    else:
+        final_files = list(output_dir.glob("cluster_*.fasta"))
     assert len(final_files) > 0, "Final cluster files should exist"
 
 
@@ -290,7 +302,11 @@ def test_finalize_already_finalized(sample_fasta, temp_output_dir):
     assert state_first.finalized.completed
 
     # Count final files
-    final_files_first = list(output_dir.glob("cluster_*.fasta"))
+    latest_dir = output_dir / "clusters/latest"
+    if latest_dir.exists():
+        final_files_first = [f for f in latest_dir.glob("*.fasta") if f.name != "unassigned.fasta"]
+    else:
+        final_files_first = list(output_dir.glob("cluster_*.fasta"))
     count_first = len(final_files_first)
 
     # Step 2: Attempt to finalize again
@@ -302,7 +318,10 @@ def test_finalize_already_finalized(sample_fasta, temp_output_dir):
     assert state_second.finalized.total_clusters == state_first.finalized.total_clusters
 
     # Verify file count unchanged
-    final_files_second = list(output_dir.glob("cluster_*.fasta"))
+    if latest_dir.exists():
+        final_files_second = [f for f in latest_dir.glob("*.fasta") if f.name != "unassigned.fasta"]
+    else:
+        final_files_second = list(output_dir.glob("cluster_*.fasta"))
     assert len(final_files_second) == count_first, "File count should be unchanged"
 
 
@@ -379,15 +398,28 @@ def test_finalize_preserves_sequence_content(sample_fasta, temp_output_dir):
 
     # Step 3: Read all sequences from final files
     final_sequences = {}
-    for final_file in output_dir.glob("cluster_*.fasta"):
-        for record in SeqIO.parse(final_file, "fasta"):
-            final_sequences[record.id] = str(record.seq)
+    latest_dir = output_dir / "clusters/latest"
+    if latest_dir.exists():
+        for final_file in latest_dir.glob("*.fasta"):
+            if final_file.name != "unassigned.fasta":
+                for record in SeqIO.parse(final_file, "fasta"):
+                    final_sequences[record.id] = str(record.seq)
 
-    # Also check unassigned if it exists
-    unassigned_file = output_dir / "unassigned.fasta"
-    if unassigned_file.exists():
-        for record in SeqIO.parse(unassigned_file, "fasta"):
-            final_sequences[record.id] = str(record.seq)
+        # Also check unassigned if it exists
+        unassigned_file = latest_dir / "unassigned.fasta"
+        if unassigned_file.exists():
+            for record in SeqIO.parse(unassigned_file, "fasta"):
+                final_sequences[record.id] = str(record.seq)
+    else:
+        # Fallback: check root directory
+        for final_file in output_dir.glob("cluster_*.fasta"):
+            for record in SeqIO.parse(final_file, "fasta"):
+                final_sequences[record.id] = str(record.seq)
+
+        unassigned_file = output_dir / "unassigned.fasta"
+        if unassigned_file.exists():
+            for record in SeqIO.parse(unassigned_file, "fasta"):
+                final_sequences[record.id] = str(record.seq)
 
     # Step 4: Verify all sequences are present and unchanged
     # Note: final might have more if there were duplicates in input

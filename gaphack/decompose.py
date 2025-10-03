@@ -15,20 +15,39 @@ from .utils import load_sequences_from_fasta, load_sequences_with_deduplication,
 from .lazy_distances import DistanceProviderFactory, SubsetDistanceProvider, DistanceProvider
 from .state import DecomposeState, StateManager, create_initial_state
 from .target_selection import TargetSelector, BlastResultMemory, NearbyTargetSelector
+from .cluster_id_utils import (
+    get_stage_suffix, format_cluster_id, parse_cluster_id,
+    get_next_cluster_number, get_stage_directory
+)
 
 logger = logging.getLogger(__name__)
 
 
 class ClusterIDGenerator:
-    """Generates sequential cluster IDs for internal processing."""
+    """Generates globally unique cluster IDs with stage suffixes.
 
-    def __init__(self, prefix: str = "active"):
-        self.prefix = prefix
-        self.counter = 1
+    Format: cluster_{NNNNN}{SUFFIX} where:
+    - NNNNN is a 5-digit number (01-99999)
+    - SUFFIX is I (initial), C (conflict resolution), or R1/R2/R3... (refinements)
+    """
+
+    def __init__(self, stage_name: str = "initial", refinement_count: int = 0,
+                 starting_number: Optional[int] = None):
+        """Initialize cluster ID generator.
+
+        Args:
+            stage_name: Stage name ("initial", "deconflicted", "refined")
+            refinement_count: For refined stages, the refinement number (0-based)
+            starting_number: Starting cluster number (if resuming from existing clusters)
+        """
+        self.stage_name = stage_name
+        self.refinement_count = refinement_count
+        self.stage_suffix = get_stage_suffix(stage_name, refinement_count)
+        self.counter = starting_number if starting_number is not None else 1
 
     def next_id(self) -> str:
-        """Generate next sequential active cluster ID."""
-        cluster_id = f"{self.prefix}_{self.counter:04d}"
+        """Generate next sequential cluster ID with stage suffix."""
+        cluster_id = format_cluster_id(self.counter, self.stage_suffix)
         self.counter += 1
         return cluster_id
 
@@ -310,21 +329,24 @@ class DecomposeClustering:
 
             # Initialize or load assignment tracker and clusters
             assignment_tracker = AssignmentTracker()
-            cluster_id_generator = ClusterIDGenerator(prefix="initial")
             existing_clusters = {}
 
             if resume_from_state and state_manager:
                 # Load existing clusters from FASTA files
-                current_pattern = state.get_current_stage_pattern()
-                existing_clusters = state_manager.load_clusters_from_pattern(current_pattern)
+                stage_dir = state.get_current_stage_directory(output_dir_path)
+                existing_clusters = state_manager.load_clusters_from_stage_directory(stage_dir)
                 self.logger.info(f"Loaded {len(existing_clusters)} existing clusters from checkpoint")
 
                 # Rebuild assignment tracker from existing clusters
                 assignment_tracker = state_manager.rebuild_assignment_tracker(existing_clusters, headers)
 
-                # Update cluster ID generator to continue from where we left off
-                cluster_id_generator.counter = len(existing_clusters) + 1
-                self.logger.info(f"Resuming cluster generation from cluster #{cluster_id_generator.counter}")
+                # Initialize cluster ID generator to continue from max existing number
+                starting_number = get_next_cluster_number(existing_clusters)
+                cluster_id_generator = ClusterIDGenerator(stage_name="initial", starting_number=starting_number)
+                self.logger.info(f"Resuming cluster generation from cluster #{starting_number}")
+            else:
+                # Start fresh with number 1
+                cluster_id_generator = ClusterIDGenerator(stage_name="initial")
 
             # Initialize target selector based on mode
             if mode == "directed":
@@ -516,10 +538,10 @@ class DecomposeClustering:
                     # Convert indices back to sequence headers
                     target_cluster_headers = [pruned_headers[i] for i in target_cluster_indices]
                     remaining_headers = [pruned_headers[i] for i in remaining_indices]
-                    
-                    # Generate unique cluster ID
-                    cluster_id = f"initial_{iteration:03d}"
-                    
+
+                    # Generate unique cluster ID using the configured generator
+                    cluster_id = cluster_id_generator.next_id()
+
                     # Assign sequences to cluster
                     assignment_tracker.assign_sequences(target_cluster_headers, cluster_id, iteration)
                     
@@ -594,7 +616,8 @@ class DecomposeClustering:
                                     current_clusters[cluster_id].append(seq_id)
     
                             # Save checkpoint
-                            state_manager.save_stage_fasta(current_clusters, sequences, headers, "initial")
+                            stage_dir = state.get_current_stage_directory(output_dir_path)
+                            state_manager.save_stage_fasta(current_clusters, sequences, headers, stage_dir)
                             state.initial_clustering.total_clusters = len(current_clusters)
                             state.initial_clustering.total_sequences = len(assignment_tracker.assigned_sequences)
                             state.initial_clustering.total_iterations = iteration
@@ -619,7 +642,8 @@ class DecomposeClustering:
                                         current_clusters[cluster_id].append(seq_id)
     
                                 # Save checkpoint
-                                state_manager.save_stage_fasta(current_clusters, sequences, headers, "initial")
+                                stage_dir = state.get_current_stage_directory(output_dir_path)
+                                state_manager.save_stage_fasta(current_clusters, sequences, headers, stage_dir)
                                 state.initial_clustering.total_clusters = len(current_clusters)
                                 state.initial_clustering.total_sequences = len(assignment_tracker.assigned_sequences)
                                 state.initial_clustering.total_iterations = iteration
@@ -664,7 +688,8 @@ class DecomposeClustering:
                                 current_clusters[cluster_id].append(seq_id)
             
                         # Save final initial clustering state
-                        state_manager.save_stage_fasta(current_clusters, sequences, headers, "initial")
+                        stage_dir = state.get_current_stage_directory(output_dir_path)
+                        state_manager.save_stage_fasta(current_clusters, sequences, headers, stage_dir)
                         state.initial_clustering.total_clusters = len(current_clusters)
                         state.initial_clustering.total_sequences = len(assignment_tracker.assigned_sequences)
                         state.initial_clustering.total_iterations = iteration
@@ -1097,7 +1122,7 @@ class DecomposeClustering:
         )
 
         # Apply conflict resolution (no proximity graph needed - uses minimal scope only)
-        conflict_id_generator = ClusterIDGenerator(prefix="deconflicted")
+        conflict_id_generator = ClusterIDGenerator(stage_name="deconflicted")
         resolved_clusters, conflict_tracking = resolve_conflicts(
             conflicts=results.conflicts,
             all_clusters=results.all_clusters,
@@ -1173,7 +1198,7 @@ class DecomposeClustering:
         )
 
         # Apply close cluster refinement
-        refinement_id_generator = ClusterIDGenerator(prefix="refined")
+        refinement_id_generator = ClusterIDGenerator(stage_name="refined", refinement_count=0)
         refined_clusters, refinement_tracking = refine_close_clusters(
             all_clusters=results.all_clusters,
             sequences=sequences,

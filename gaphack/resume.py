@@ -74,13 +74,17 @@ def resume_decompose(output_dir: Path,
 
     # Load current clusters from FASTA files
     state_manager = StateManager(output_dir)
-    current_pattern = state.get_current_stage_pattern()
-    current_clusters = state_manager.load_clusters_from_pattern(current_pattern)
-    logger.info(f"Loaded {len(current_clusters)} clusters from pattern '{current_pattern}'")
+    current_stage_dir = state.get_current_stage_directory(output_dir)
+    current_clusters = state_manager.load_clusters_from_stage_directory(current_stage_dir)
+    logger.info(f"Loaded {len(current_clusters)} clusters from directory '{current_stage_dir}'")
 
-    # Load unassigned sequences
-    unassigned_file = state.initial_clustering.unassigned_file
-    unassigned_headers = state_manager.load_unassigned_sequences(unassigned_file)
+    # Load unassigned sequences from current stage
+    unassigned_file = current_stage_dir / "unassigned.fasta"
+    if unassigned_file.exists():
+        unassigned_headers = state_manager.load_unassigned_sequences(str(unassigned_file.relative_to(output_dir)))
+    else:
+        unassigned_headers = []
+        logger.debug(f"No unassigned file found in {current_stage_dir}")
 
     # Load all sequences and headers
     sequences, hash_ids, hash_to_headers = load_sequences_with_deduplication(input_fasta)
@@ -192,6 +196,12 @@ def resume_decompose(output_dir: Path,
                 expanded_conflicts[hash_id] = cluster_ids
         results.conflicts = expanded_conflicts
 
+        # Automatically create final output if not already finalized
+        if not state.finalized.completed:
+            from .decompose_cli import save_decompose_results
+            save_decompose_results(results, state_manager.output_dir, input_fasta)
+            logger.info("Final output created in clusters/latest/")
+
         return results
 
 
@@ -266,6 +276,13 @@ def _continue_initial_clustering(state: DecomposeState,
         checkpoint_interval=checkpoint_interval
     )
 
+    # Automatically create final output if clustering completed
+    state_after = DecomposeState.load(state_manager.output_dir)
+    if state_after.initial_clustering.completed and not state_after.finalized.completed:
+        from .decompose_cli import save_decompose_results
+        save_decompose_results(results, state_manager.output_dir, input_fasta)
+        logger.info("Final output created in clusters/latest/")
+
     return results
 
 
@@ -305,8 +322,8 @@ def _apply_conflict_resolution_stage(state: DecomposeState,
         state.conflict_resolution.clusters_before = len(current_clusters)
         state.conflict_resolution.clusters_after = len(current_clusters)
         state.conflict_resolution.total_clusters = len(current_clusters)
-        # Keep using initial clustering pattern since no new files created
-        state.conflict_resolution.cluster_file_pattern = state.get_current_stage_pattern()
+        # Keep using initial clustering directory since no new files created
+        state.conflict_resolution.stage_directory = state.initial_clustering.stage_directory
         state.stage = "conflict_resolution"
 
         # Don't create new files - just update state
@@ -343,7 +360,7 @@ def _apply_conflict_resolution_stage(state: DecomposeState,
 
     # Apply conflict resolution
     params = state.parameters
-    conflict_id_generator = ClusterIDGenerator(prefix="deconflicted")
+    conflict_id_generator = ClusterIDGenerator(stage_name="deconflicted")
     resolved_clusters, conflict_tracking = resolve_conflicts(
         conflicts=conflicts,
         all_clusters=current_clusters,
@@ -370,10 +387,12 @@ def _apply_conflict_resolution_stage(state: DecomposeState,
     results.coverage_percentage = state.initial_clustering.coverage_percentage
     results.processing_stages = [conflict_tracking]
 
-    # Save results to FASTA files with "deconflicted" prefix
+    # Save results to FASTA files in deconflicted stage directory
+    from .cluster_id_utils import get_stage_directory
+    stage_dir = get_stage_directory(state_manager.output_dir, "deconflicted")
     state_manager.save_stage_results(
         results=results,
-        stage="deconflicted",
+        stage_dir=stage_dir,
         sequences=sequences,
         headers=hash_ids,
         hash_to_headers=hash_to_headers
@@ -386,11 +405,16 @@ def _apply_conflict_resolution_stage(state: DecomposeState,
     state.conflict_resolution.clusters_before = len(current_clusters)
     state.conflict_resolution.clusters_after = len(resolved_clusters)
     state.conflict_resolution.total_clusters = len(resolved_clusters)
-    state.conflict_resolution.cluster_file_pattern = "deconflicted.cluster_*.fasta"
+    state.conflict_resolution.stage_directory = "work/deconflicted"
     state.stage = "conflict_resolution"
     state_manager.checkpoint(state)
 
     logger.info(f"Conflict resolution stage complete and saved")
+
+    # Automatically create final output
+    from .decompose_cli import save_decompose_results
+    save_decompose_results(results, state_manager.output_dir, input_fasta)
+    logger.info("Final output created in clusters/latest/")
 
     return results
 
@@ -451,9 +475,13 @@ def _apply_close_cluster_refinement_stage(state: DecomposeState,
         close_cluster_expansion_threshold=close_threshold
     )
 
+    # Determine refinement count (how many refinement stages already exist)
+    from .cluster_id_utils import count_refinement_stages
+    refinement_count = count_refinement_stages(state_manager.output_dir)
+
     # Apply close cluster refinement
     params = state.parameters
-    refinement_id_generator = ClusterIDGenerator(prefix="refined")
+    refinement_id_generator = ClusterIDGenerator(stage_name="refined", refinement_count=refinement_count)
     refined_clusters, refinement_tracking = refine_close_clusters(
         all_clusters=current_clusters,
         sequences=sequences,
@@ -481,10 +509,12 @@ def _apply_close_cluster_refinement_stage(state: DecomposeState,
     results.coverage_percentage = state.initial_clustering.coverage_percentage
     results.processing_stages = [refinement_tracking]
 
-    # Save results to FASTA files with "refined" prefix
+    # Save results to FASTA files in refined stage directory
+    from .cluster_id_utils import get_stage_directory
+    stage_dir = get_stage_directory(state_manager.output_dir, "refined", refinement_count=refinement_count)
     state_manager.save_stage_results(
         results=results,
-        stage="refined",
+        stage_dir=stage_dir,
         sequences=sequences,
         headers=hash_ids,
         hash_to_headers=hash_to_headers
@@ -496,7 +526,7 @@ def _apply_close_cluster_refinement_stage(state: DecomposeState,
     state.close_cluster_refinement.clusters_before = len(current_clusters)
     state.close_cluster_refinement.clusters_after = len(refined_clusters)
     state.close_cluster_refinement.total_clusters = len(refined_clusters)
-    state.close_cluster_refinement.cluster_file_pattern = "refined.cluster_*.fasta"
+    state.close_cluster_refinement.stage_directory = f"work/refined_{refinement_count + 1}"
     state.stage = "close_cluster_refinement"
 
     # Add to refinement history
@@ -511,6 +541,11 @@ def _apply_close_cluster_refinement_stage(state: DecomposeState,
     state_manager.checkpoint(state)
 
     logger.info(f"Close cluster refinement stage complete and saved")
+
+    # Automatically create final output
+    from .decompose_cli import save_decompose_results
+    save_decompose_results(results, state_manager.output_dir, input_fasta)
+    logger.info("Final output created in clusters/latest/")
 
     return results
 
@@ -546,31 +581,41 @@ def finalize_decompose(output_dir: str, cleanup: bool = False) -> None:
         logger.warning("Output directory already finalized")
         return
 
-    # Determine the most recent stage to finalize from
-    if state.close_cluster_refinement.completed:
-        source_stage = "refined"
-        source_pattern = state.close_cluster_refinement.cluster_file_pattern
-    elif state.conflict_resolution.completed:
-        source_stage = "deconflicted"
-        source_pattern = state.conflict_resolution.cluster_file_pattern
-    elif state.initial_clustering.completed:
-        source_stage = "initial"
-        source_pattern = state.initial_clustering.cluster_file_pattern
-    else:
-        raise ValueError("Cannot finalize: initial clustering is not complete")
+    # Verify initial clustering is complete
+    if not state.initial_clustering.completed:
+        raise ValueError("Cannot finalize: initial clustering is not complete. Run decompose or resume first.")
 
-    logger.info(f"Finalizing from {source_stage} stage (pattern: {source_pattern})")
+    # Determine the most recent stage to finalize from
+    from .cluster_id_utils import get_latest_stage_directory
+    work_dir = output_path / "work"
+
+    try:
+        latest_stage_dir = get_latest_stage_directory(work_dir)
+        source_stage = latest_stage_dir.name
+        logger.info(f"Finalizing from {source_stage} stage (directory: {latest_stage_dir})")
+    except FileNotFoundError as e:
+        raise ValueError(f"Cannot finalize: no stage directories found in {work_dir}")
+
+    # Determine clean source stage name for state tracking
+    if source_stage.startswith("refined_"):
+        source_stage_name = "refined"
+    elif source_stage == "deconflicted":
+        source_stage_name = "deconflicted"
+    elif source_stage == "initial":
+        source_stage_name = "initial"
+    else:
+        raise ValueError(f"Unknown source stage: {source_stage}")
 
     # Load input sequences and setup
     input_fasta = state.input.fasta_path
     sequences, hash_ids, hash_to_headers = load_sequences_with_deduplication(input_fasta)
 
-    # Load clusters from most recent stage
-    current_clusters = state_manager.load_clusters_from_pattern(source_pattern)
+    # Load clusters from most recent stage directory
+    current_clusters = state_manager.load_clusters_from_stage_directory(latest_stage_dir)
 
     # Also check for unassigned file from source stage
     unassigned_headers = []
-    unassigned_file = output_path / f"{source_stage}.unassigned.fasta"
+    unassigned_file = latest_stage_dir / "unassigned.fasta"
     if unassigned_file.exists():
         for record in SeqIO.parse(unassigned_file, "fasta"):
             unassigned_headers.append(record.id)
@@ -582,13 +627,26 @@ def finalize_decompose(output_dir: str, cleanup: bool = False) -> None:
 
     logger.info(f"Renumbering {len(cluster_sizes)} clusters by size")
 
+    # Create timestamp-based output directory
+    import datetime
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    clusters_dir = output_path / "clusters"
+    timestamp_dir = clusters_dir / timestamp
+    timestamp_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create 'latest' symlink
+    latest_symlink = clusters_dir / "latest"
+    if latest_symlink.exists() or latest_symlink.is_symlink():
+        latest_symlink.unlink()
+    latest_symlink.symlink_to(timestamp, target_is_directory=True)
+
     # Create header-to-index mapping for sequence lookup (hash_id -> index)
     header_to_idx = {hash_id: i for i, hash_id in enumerate(hash_ids)}
 
     # Write final numbered cluster files
     for final_num, (old_cluster_id, size) in enumerate(cluster_sizes, start=1):
         cluster_headers = current_clusters[old_cluster_id]
-        final_filename = output_path / f"cluster_{final_num:03d}.fasta"
+        final_filename = timestamp_dir / f"cluster_{final_num:05d}.fasta"
 
         records = []
         for header in cluster_headers:
@@ -610,7 +668,7 @@ def finalize_decompose(output_dir: str, cleanup: bool = False) -> None:
 
     # Write final unassigned file if any unassigned sequences exist
     if unassigned_headers:
-        final_unassigned = output_path / "unassigned.fasta"
+        final_unassigned = timestamp_dir / "unassigned.fasta"
         records = []
         for header in unassigned_headers:
             # Expand hash IDs
@@ -631,7 +689,7 @@ def finalize_decompose(output_dir: str, cleanup: bool = False) -> None:
 
     # Update state to mark as finalized
     state.finalized.completed = True
-    state.finalized.source_stage = source_stage
+    state.finalized.source_stage = source_stage_name
     state.finalized.total_clusters = len(cluster_sizes)
     state.finalized.total_sequences = sum(size for _, size in cluster_sizes)
     state.finalized.unassigned_sequences = len(unassigned_headers)
@@ -639,6 +697,8 @@ def finalize_decompose(output_dir: str, cleanup: bool = False) -> None:
     state_manager.checkpoint(state)
 
     logger.info(f"Finalization complete: {len(cluster_sizes)} clusters, {state.finalized.total_sequences} sequences, {len(unassigned_headers)} unassigned")
+    logger.info(f"Results saved to: {timestamp_dir}")
+    logger.info(f"Symlink created: {latest_symlink} -> {timestamp}/")
 
     # Optional cleanup of intermediate files
     if cleanup:
@@ -650,17 +710,25 @@ def finalize_decompose(output_dir: str, cleanup: bool = False) -> None:
         if source_stage == "refined":
             stage_prefixes.extend(["deconflicted"])
 
+        import shutil
         removed_count = 0
+        work_dir = output_path / "work"
+
+        # Map stage names to directory names
         for prefix in stage_prefixes:
-            # Remove cluster files
-            for cluster_file in output_path.glob(f"{prefix}.cluster_*.fasta"):
-                cluster_file.unlink()
-                removed_count += 1
-            # Remove unassigned files
-            unassigned_file = output_path / f"{prefix}.unassigned.fasta"
-            if unassigned_file.exists():
-                unassigned_file.unlink()
-                removed_count += 1
+            if prefix == "initial":
+                stage_cleanup_dir = work_dir / "initial"
+            elif prefix == "deconflicted":
+                stage_cleanup_dir = work_dir / "deconflicted"
+            else:
+                continue  # Skip unknown prefixes
+
+            if stage_cleanup_dir.exists():
+                # Count files before removal
+                file_count = len(list(stage_cleanup_dir.glob("*")))
+                shutil.rmtree(stage_cleanup_dir)
+                removed_count += file_count
+                logger.debug(f"Removed directory {stage_cleanup_dir} with {file_count} files")
 
         logger.info(f"Removed {removed_count} intermediate files")
         logger.info("Note: Source stage files retained for traceability")

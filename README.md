@@ -112,8 +112,8 @@ gaphack collybia_nuda_test.fasta
 # Large-scale decompose clustering (for bigger datasets)
 gaphack-decompose collybia_nuda_test.fasta -o decompose_results
 
-# Analyze pre-clustered results
-gaphack-analyze decompose_results.*.fasta -o analysis_results
+# Analyze pre-clustered results (from the latest output)
+gaphack-analyze decompose_results/clusters/latest/*.fasta -o analysis_results
 
 # With detailed output and custom parameters
 gaphack collybia_nuda_test.fasta \
@@ -202,7 +202,35 @@ gaphack-decompose large_dataset.fasta \
     -o results
 ```
 
+**Output Organization:**
+
+The tool creates a structured output directory with separate working and final results:
+
+```
+results/
+├── work/                           # Working files (intermediate stages)
+│   ├── initial/                    # Initial clustering stage
+│   │   ├── cluster_00001I.fasta
+│   │   ├── cluster_00002I.fasta
+│   │   └── unassigned.fasta
+│   ├── deconflicted/              # After conflict resolution
+│   │   └── cluster_*C.fasta
+│   └── refined_1/                  # After close cluster refinement
+│       └── cluster_*R1.fasta
+├── clusters/                       # Final numbered output
+│   ├── 20251003_141530/           # Timestamp-based directory
+│   │   ├── cluster_00001.fasta    # Final clusters (by size)
+│   │   ├── cluster_00002.fasta
+│   │   ├── decompose_assignments.tsv
+│   │   └── decompose_report.txt
+│   └── latest -> 20251003_141530/ # Symlink to most recent
+└── state.json                      # Checkpoint state
+```
+
 **Key Features:**
+- **Automatic finalization**: Creates numbered output in `clusters/latest/` after each stage
+- **Organized working directory**: Stage-based subdirectories for intermediate files
+- **Timestamp versioning**: Each finalization creates a new timestamped directory
 - **Automatic mode detection**: Uses targets if provided, otherwise selects targets iteratively
 - **BLAST neighborhoods**: Efficiently finds similar sequences for clustering
 - **Conflict resolution**: `--resolve-conflicts` ensures each sequence appears in only one cluster
@@ -243,21 +271,12 @@ gaphack-decompose --resume -o results \
 - **State file**: All progress stored in `output_dir/state.json`
 - **BLAST database caching**: Reuses BLAST database across resume operations
 
-**Finalization:**
-```bash
-# After clustering is complete, create final numbered output
-gaphack-decompose --resume -o results --finalize
-
-# Finalize and remove intermediate files
-gaphack-decompose --resume -o results --finalize --cleanup
-```
-
 **Resume Workflow:**
 1. Run `gaphack-decompose` with desired parameters and output directory
 2. Interrupt at any time (Ctrl+C) or let it complete initial clustering
 3. Use `--resume` to continue clustering from checkpoint
-4. Use `--resume --finalize` to create final numbered clusters (cluster_001.fasta, etc.)
-5. Optionally use `--cleanup` with `--finalize` to remove intermediate stage files
+4. Final output is **automatically created** in `clusters/latest/` after each stage completes
+5. Access results directly from `results/clusters/latest/*.fasta`
 
 **Key Features:**
 - **No data loss**: Checkpoints saved at regular intervals and on interruption

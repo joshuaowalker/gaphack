@@ -210,7 +210,8 @@ def apply_full_gaphack_to_scope_with_metadata(scope_sequences: List[str],
 
     # Use provided generator or create a temporary one
     if cluster_id_generator is None:
-        cluster_id_generator = ClusterIDGenerator(prefix="classic")
+        # For internal refinement, use "refined" stage with no specific count
+        cluster_id_generator = ClusterIDGenerator(stage_name="refined", refinement_count=0)
 
     # Process multi-member clusters (list of lists of indices)
     for cluster_idx, cluster_indices_list in enumerate(final_clusters):
@@ -857,7 +858,8 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
     # Create shared cluster ID generator for all components
     if cluster_id_generator is None:
         from .decompose import ClusterIDGenerator
-        cluster_id_generator = ClusterIDGenerator(prefix="classic")
+        # For internal refinement, use "refined" stage with no specific count
+        cluster_id_generator = ClusterIDGenerator(stage_name="refined", refinement_count=0)
 
     for component_idx, component_clusters in enumerate(close_components):
         component_signature = frozenset(component_clusters)

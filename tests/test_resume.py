@@ -49,7 +49,7 @@ class TestResumeBasics:
         assert state.initial_clustering.total_iterations == 3
 
         # Verify cluster FASTA files were created
-        cluster_files = list(output_dir.glob("initial.cluster_*.fasta"))
+        cluster_files = list((output_dir / "work/initial").glob("*.fasta"))
         assert len(cluster_files) == 3, f"Should have 3 cluster files, got {len(cluster_files)}"
 
     def test_resume_continues_from_checkpoint(self, small_test_fasta, tmp_path):
