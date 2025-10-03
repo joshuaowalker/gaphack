@@ -775,17 +775,33 @@ class DecomposeClustering:
                 if getattr(self, 'resolve_conflicts', False) and results.conflicts:
                     self.logger.info(f"Starting cluster refinement for {len(results.conflicts)} conflicts")
                     results = self._resolve_conflicts(results, sequences, headers)
-            
+
                     # Verify conflict resolution effectiveness
                     if original_conflicts:
                         post_resolution_verification = self._verify_no_conflicts(
                             results.all_clusters, original_conflicts, "after_conflict_resolution"
                         )
-            
+
+                    # Save intermediate output after conflict resolution
+                    if output_dir:
+                        # Expand hash IDs temporarily for saving
+                        expanded_results = self._expand_hash_ids_to_headers(results, hash_to_headers)
+                        from .decompose_cli import save_decompose_results
+                        save_decompose_results(expanded_results, output_dir, input_fasta)
+                        self.logger.info("Intermediate output saved after conflict resolution in clusters/latest/")
+
                 # Apply cluster refinement for close cluster refinement if enabled
                 if getattr(self, 'refine_close_clusters', False):
                     self.logger.info("Starting cluster refinement for close cluster refinement")
                     results = self._refine_close_clusters_via_refinement(results, sequences, headers)
+
+                    # Save intermediate output after close cluster refinement
+                    if output_dir:
+                        # Expand hash IDs temporarily for saving
+                        expanded_results = self._expand_hash_ids_to_headers(results, hash_to_headers)
+                        from .decompose_cli import save_decompose_results
+                        save_decompose_results(expanded_results, output_dir, input_fasta)
+                        self.logger.info("Intermediate output saved after close cluster refinement in clusters/latest/")
             
                 # Expand hash IDs back to original headers
                 results = self._expand_hash_ids_to_headers(results, hash_to_headers)
