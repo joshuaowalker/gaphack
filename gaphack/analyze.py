@@ -93,8 +93,8 @@ def calculate_inter_cluster_distances(cluster_sequences: List[List[str]],
     return np.array(inter_distances)
 
 
-def calculate_percentiles(distances: np.ndarray, 
-                         percentiles: List[float] = [5, 10, 25, 50, 75, 90, 95]) -> Dict[str, float]:
+def calculate_percentiles(distances: np.ndarray,
+                         percentiles: List[float] = [5, 10, 25, 50, 75, 90, 95, 99, 100]) -> Dict[str, float]:
     """
     Calculate key percentile values for a set of distances.
     
