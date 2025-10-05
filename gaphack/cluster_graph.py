@@ -11,7 +11,6 @@ from typing import List, Dict, Tuple, Set, Optional
 from pathlib import Path
 import numpy as np
 
-from .lazy_distances import DistanceProvider
 from .blast_neighborhood import BlastNeighborhoodFinder
 from .vsearch_neighborhood import VsearchNeighborhoodFinder
 from .neighborhood_finder import NeighborhoodFinder
@@ -28,17 +27,15 @@ class ClusterGraph:
     """
 
     def __init__(self, clusters: Dict[str, List[str]], sequences: List[str],
-                 headers: List[str], distance_provider: DistanceProvider,
-                 k_neighbors: int = 20, blast_evalue: float = 1e-5,
-                 blast_identity: float = 90.0, cache_dir: Optional[Path] = None,
-                 search_method: str = "blast"):
+                 headers: List[str], k_neighbors: int = 20,
+                 blast_evalue: float = 1e-5, blast_identity: float = 90.0,
+                 cache_dir: Optional[Path] = None, search_method: str = "blast"):
         """Initialize K-NN proximity graph.
 
         Args:
             clusters: Dictionary mapping cluster_id -> list of sequence headers
             sequences: Full sequence list
             headers: Full header list (indices must match sequences)
-            distance_provider: Provider for accurate distance calculations
             k_neighbors: Number of nearest neighbors to maintain per cluster
             blast_evalue: BLAST e-value threshold for similarity detection
             blast_identity: Minimum BLAST/vsearch identity percentage (0-100)
@@ -48,7 +45,6 @@ class ClusterGraph:
         self.clusters = clusters
         self.sequences = sequences
         self.headers = headers
-        self.distance_provider = distance_provider
         self.k_neighbors = k_neighbors
         self.blast_evalue = blast_evalue
         self.blast_identity = blast_identity
@@ -89,21 +85,29 @@ class ClusterGraph:
 
         cluster_indices = [self.headers.index(h) for h in cluster_headers]
 
+        # For clusters with multiple sequences, use MSA-based distance calculation
+        # This provides more consistent distances by aligning all sequences together
+        from .distance_providers import MSACachedDistanceProvider
+
+        cluster_sequences = [self.sequences[idx] for idx in cluster_indices]
+        msa_provider = MSACachedDistanceProvider(cluster_sequences, cluster_headers)
+
         min_total_distance = float('inf')
         medoid_idx = cluster_indices[0]
 
-        for candidate_idx in cluster_indices:
+        # Use local indices (0, 1, 2, ...) for MSA provider
+        for local_candidate_idx, global_candidate_idx in enumerate(cluster_indices):
             total_distance = 0.0
 
-            for other_idx in cluster_indices:
-                if candidate_idx != other_idx:
-                    # Use the same distance calculation as the rest of gapHACk
-                    distance = self.distance_provider.get_distance(candidate_idx, other_idx)
+            for local_other_idx, global_other_idx in enumerate(cluster_indices):
+                if local_candidate_idx != local_other_idx:
+                    # Use MSA-based distance calculation
+                    distance = msa_provider.get_distance(local_candidate_idx, local_other_idx)
                     total_distance += distance
 
             if total_distance < min_total_distance:
                 min_total_distance = total_distance
-                medoid_idx = candidate_idx
+                medoid_idx = global_candidate_idx
 
         return medoid_idx
 
@@ -199,8 +203,11 @@ class ClusterGraph:
             logger.debug(f"Processing search results for {query_header}: {len(search_results[query_header])} hits, "
                         f"represents clusters {query_clusters}")
 
-            # Process all hits for this query
-            subject_distances = []
+            # Collect all unique sequences in this query's neighborhood for MSA
+            neighborhood_sequences = [query_sequence]
+            neighborhood_headers = [query_header]
+            neighborhood_unique_indices = [query_idx]
+
             for hit in search_results[query_header]:
                 # hit.sequence_hash contains the subject sequence hash
                 subject_sequence_hash = hit.sequence_hash
@@ -215,7 +222,6 @@ class ClusterGraph:
                     try:
                         subject_idx = int(subject_original_header.split("_")[1])
                         subject_sequence = unique_sequences[subject_idx]
-                        subject_clusters = sequence_to_clusters[subject_sequence]
                     except (ValueError, IndexError):
                         logger.warning(f"Could not parse subject header: {subject_original_header}")
                         continue
@@ -228,30 +234,36 @@ class ClusterGraph:
                     logger.debug(f"Skipping self-hit: {query_header} -> {subject_original_header}")
                     continue
 
-                # Calculate proper distance using DistanceProvider between cluster medoids
-                # Get the global indices of the medoids for distance calculation
-                query_medoid_global_idx = None
-                for query_cluster_id in query_clusters:
-                    if query_cluster_id in self.medoid_cache:
-                        query_medoid_global_idx = self.medoid_cache[query_cluster_id]
-                        break
+                # Add to neighborhood for MSA
+                neighborhood_sequences.append(subject_sequence)
+                neighborhood_headers.append(subject_original_header)
+                neighborhood_unique_indices.append(subject_idx)
 
-                if query_medoid_global_idx is None:
-                    logger.warning(f"Could not find medoid for query clusters {query_clusters}")
-                    continue
+            # Create MSA-based distance provider for this query's neighborhood
+            # This provides consistent alignment across all medoids in the BLAST/vsearch neighborhood
+            from .distance_providers import MSACachedDistanceProvider
+            logger.debug(f"Creating MSA for {len(neighborhood_sequences)} medoids in {query_header}'s neighborhood")
 
-                # Add distance to all subject clusters using proper distance calculation
+            msa_provider = MSACachedDistanceProvider(
+                neighborhood_sequences,
+                neighborhood_headers
+            )
+
+            # Calculate distances using MSA-based provider
+            subject_distances = []
+            for local_subject_idx in range(1, len(neighborhood_sequences)):  # Start at 1 to skip query itself
+                subject_unique_idx = neighborhood_unique_indices[local_subject_idx]
+                subject_sequence = unique_sequences[subject_unique_idx]
+                subject_clusters = sequence_to_clusters[subject_sequence]
+
+                # Calculate distance from query (local index 0) to this subject using MSA
+                distance = msa_provider.get_distance(0, local_subject_idx)
+
+                # Map distance to all clusters that use this subject medoid
                 for subject_cluster_id in subject_clusters:
                     if subject_cluster_id in self.medoid_cache:
-                        subject_medoid_global_idx = self.medoid_cache[subject_cluster_id]
-
-                        # Use the same distance calculation as the main clustering algorithm
-                        distance = self.distance_provider.get_distance(query_medoid_global_idx, subject_medoid_global_idx)
-
-                        logger.debug(f"BLAST hit: {query_header} -> {subject_original_header}, "
-                                   f"blast_identity={hit.blast_identity:.1f}%, proper_distance={distance:.4f}, "
-                                   f"subject_cluster={subject_cluster_id}")
-
+                        logger.debug(f"MSA distance: {query_header} -> medoid_{subject_unique_idx}, "
+                                   f"distance={distance:.4f}, subject_cluster={subject_cluster_id}")
                         subject_distances.append((subject_cluster_id, distance))
                     else:
                         logger.warning(f"Could not find medoid for subject cluster {subject_cluster_id}")

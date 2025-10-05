@@ -131,7 +131,7 @@ class TestMainCLI:
             with patch('sys.argv', test_args), \
                  patch('gaphack.cli.TargetModeClustering') as mock_target_clustering, \
                  patch('gaphack.cli.load_sequences_from_fasta') as mock_load, \
-                 patch('gaphack.cli.DistanceProviderFactory') as mock_factory, \
+                 patch('gaphack.distance_providers.MSACachedDistanceProvider') as mock_provider_class, \
                  patch('gaphack.cli.save_clusters_to_file') as mock_save, \
                  patch('gaphack.cli.validate_sequences') as mock_validate:
 
@@ -145,13 +145,13 @@ class TestMainCLI:
                     {f"seq_{i}": f"seq_{i}" for i in range(len(self.test_sequences))}
                 )
 
-                # Mock distance provider
+                # Mock MSA distance provider
                 mock_provider = Mock()
                 mock_provider.get_cache_stats.return_value = {
                     'cached_distances': 10,
                     'theoretical_max': 100
                 }
-                mock_factory.create_lazy_provider.return_value = mock_provider
+                mock_provider_class.return_value = mock_provider
 
                 # Mock target clustering with correct signature
                 mock_target_instance = Mock()

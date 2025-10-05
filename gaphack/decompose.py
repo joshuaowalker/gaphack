@@ -12,7 +12,7 @@ from .vsearch_neighborhood import VsearchNeighborhoodFinder
 from .neighborhood_finder import NeighborhoodFinder
 from .target_clustering import TargetModeClustering
 from .utils import load_sequences_from_fasta, load_sequences_with_deduplication, calculate_distance_matrix
-from .lazy_distances import DistanceProviderFactory, SubsetDistanceProvider, DistanceProvider
+from .distance_providers import DistanceProvider
 from .state import DecomposeState, StateManager, create_initial_state
 from .target_selection import TargetSelector, BlastResultMemory, NearbyTargetSelector
 from .cluster_id_utils import (
@@ -507,33 +507,20 @@ class DecomposeClustering:
                     pruned_sequences, pruned_headers, pruned_target_indices = self._prune_neighborhood_by_distance(
                         neighborhood_sequences, sequences_for_clustering, target_indices_in_neighborhood, sequences, headers
                     )
-                    
-                    # Use global distance provider with subset mapping for pruned neighborhood
-                    self.logger.debug(f"Using global distance provider for {len(pruned_sequences)} pruned neighborhood sequences")
-                    global_distance_provider = self._get_or_create_distance_provider(sequences)
-    
-                    # Map pruned headers back to global indices
-                    pruned_global_indices = [headers.index(h) for h in pruned_headers]
-    
-                    # Create subset provider that maps pruned indices to global indices
-                    subset_distance_provider = SubsetDistanceProvider(global_distance_provider, pruned_global_indices)
-    
+
+                    # Create MSA-based distance provider for pruned neighborhood
+                    # This provides consistent alignment across all sequences in the neighborhood
+                    self.logger.debug(f"Creating MSA-based distance provider for {len(pruned_sequences)} pruned neighborhood sequences")
+                    from .distance_providers import MSACachedDistanceProvider
+                    pruned_distance_provider = MSACachedDistanceProvider(
+                        pruned_sequences,
+                        pruned_headers
+                    )
+
                     # Perform target clustering on pruned neighborhood
                     target_cluster_indices, remaining_indices, clustering_metrics = self.target_clustering.cluster(
-                        subset_distance_provider, pruned_target_indices, pruned_sequences
+                        pruned_distance_provider, pruned_target_indices, pruned_sequences
                     )
-                    
-                    # Log distance computation statistics
-                    if hasattr(global_distance_provider, 'get_cache_stats'):
-                        stats = global_distance_provider.get_cache_stats()
-                        if stats['theoretical_max'] > 0:
-                            coverage_pct = 100.0 * stats['cached_distances'] / stats['theoretical_max']
-                            self.logger.debug(f"Distance computation stats: {stats['cached_distances']} computed "
-                                           f"out of {stats['theoretical_max']} possible "
-                                           f"({coverage_pct:.1f}% coverage)")
-                        else:
-                            self.logger.debug(f"Distance computation stats: {stats['cached_distances']} computed "
-                                           f"(no pairwise distances needed for single sequence)")
                     
                     # Convert indices back to sequence headers
                     target_cluster_headers = [pruned_headers[i] for i in target_cluster_indices]
@@ -896,14 +883,13 @@ class DecomposeClustering:
         # Calculate distances from all sequences to target sequences
         target_sequences = [neighborhood_sequences[i] for i in target_indices]
 
-        # Use global distance provider with subset mapping for pruning calculation
-        global_distance_provider = self._get_or_create_distance_provider(global_sequences)
-
-        # Map neighborhood headers to global indices
-        neighborhood_global_indices = [global_headers.index(h) for h in neighborhood_headers]
-
-        # Create subset provider for neighborhood
-        neighborhood_distance_provider = SubsetDistanceProvider(global_distance_provider, neighborhood_global_indices)
+        # Create MSA-based distance provider for neighborhood
+        # This provides consistent alignment across all sequences in the neighborhood
+        from .distance_providers import MSACachedDistanceProvider
+        neighborhood_distance_provider = MSACachedDistanceProvider(
+            neighborhood_sequences,
+            neighborhood_headers
+        )
 
         # Calculate minimum distance from each sequence to any target
         sequence_min_distances = []
@@ -1100,21 +1086,6 @@ class DecomposeClustering:
 
         return expanded_results
 
-    def _get_or_create_distance_provider(self, sequences: List[str]) -> DistanceProvider:
-        """Get or create the global distance provider for program lifetime."""
-        if self._global_distance_provider is None:
-            self.logger.debug(f"Creating global distance provider for {len(sequences)} sequences")
-            self._global_distance_provider = DistanceProviderFactory.create_lazy_provider(
-                sequences,
-                alignment_method="adjusted",
-                end_skip_distance=20,
-                normalize_homopolymers=True,
-                handle_iupac_overlap=True,
-                normalize_indels=True,
-                max_repeat_motif_length=2
-            )
-        return self._global_distance_provider
-
     def _resolve_conflicts(self, results: DecomposeResults,
                                           sequences: List[str], headers: List[str]) -> DecomposeResults:
         """Resolve conflicts using cluster refinement with full gapHACk.
@@ -1129,9 +1100,6 @@ class DecomposeClustering:
         """
         from .cluster_refinement import resolve_conflicts, RefinementConfig
 
-        # Get global distance provider for the full dataset
-        distance_provider = self._get_or_create_distance_provider(sequences)
-
         # Create refinement configuration for minimal conflict resolution
         config = RefinementConfig(
             max_full_gaphack_size=300  # Conservative limit for performance
@@ -1144,7 +1112,6 @@ class DecomposeClustering:
             all_clusters=results.all_clusters,
             sequences=sequences,
             headers=headers,
-            distance_provider=distance_provider,
             config=config,
             min_split=self.min_split,
             max_lump=self.max_lump,
@@ -1201,11 +1168,8 @@ class DecomposeClustering:
         from .cluster_refinement import refine_close_clusters, RefinementConfig
         from .cluster_graph import ClusterGraph
 
-        # Get global distance provider for the full dataset
-        distance_provider = self._get_or_create_distance_provider(sequences)
-
         # Create proximity graph for cluster proximity queries
-        proximity_graph = self._create_proximity_graph(results.all_clusters, sequences, headers, distance_provider)
+        proximity_graph = self._create_proximity_graph(results.all_clusters, sequences, headers)
 
         # Create refinement configuration with user-provided threshold
         config = RefinementConfig(
@@ -1219,7 +1183,6 @@ class DecomposeClustering:
             all_clusters=results.all_clusters,
             sequences=sequences,
             headers=headers,
-            distance_provider=distance_provider,
             proximity_graph=proximity_graph,
             config=config,
             min_split=self.min_split,
@@ -1261,14 +1224,13 @@ class DecomposeClustering:
         return new_results
 
     def _create_proximity_graph(self, clusters: Dict[str, List[str]], sequences: List[str],
-                               headers: List[str], distance_provider) -> 'ClusterGraph':
+                               headers: List[str]) -> 'ClusterGraph':
         """Create proximity graph based on configuration.
 
         Args:
             clusters: Dictionary mapping cluster_id -> list of sequence headers
             sequences: Full sequence list
             headers: Full header list
-            distance_provider: Provider for distance calculations
 
         Returns:
             ClusterGraph instance
@@ -1280,7 +1242,6 @@ class DecomposeClustering:
             clusters=clusters,
             sequences=sequences,
             headers=headers,
-            distance_provider=distance_provider,
             k_neighbors=self.knn_neighbors,
             blast_evalue=self.blast_evalue,  # Use user-specified e-value
             blast_identity=self.min_identity or 90.0,  # Use user-specified identity or default

@@ -8,9 +8,13 @@ import numpy as np
 from typing import List, Tuple, Optional, Literal, Dict
 from Bio import SeqIO
 from Bio.Seq import Seq
+from Bio.SeqRecord import SeqRecord
 import logging
 from tqdm import tqdm
 import hashlib
+import subprocess
+import tempfile
+import os
 
 
 def load_sequences_from_fasta(fasta_path: str) -> Tuple[List[str], List[str], Dict[str, str]]:
@@ -109,93 +113,270 @@ def load_sequences_with_deduplication(fasta_path: str) -> Tuple[List[str], List[
     return unique_sequences, hash_ids, hash_to_headers
 
 
-def calculate_distance_matrix(sequences: List[str], 
-                            alignment_method: Literal["adjusted", "traditional"] = "adjusted",
-                            end_skip_distance: int = 20,
-                            normalize_homopolymers: bool = True,
-                            handle_iupac_overlap: bool = True,
-                            normalize_indels: bool = True,
-                            max_repeat_motif_length: int = 2,
-                            show_progress: bool = True) -> np.ndarray:
-    """
-    Calculate pairwise distance matrix for sequences using adjusted-identity.
-    
+def run_spoa_msa(sequences: List[str]) -> Optional[List[str]]:
+    """Run SPOA to create multiple sequence alignment.
+
     Args:
-        sequences: List of DNA sequences as strings
-        alignment_method: Either "adjusted" (with MycoBLAST adjustments) or "traditional" (raw BLAST-like)
-        end_skip_distance: Distance from sequence ends to skip in alignment (for adjusted method)
-        normalize_homopolymers: Whether to ignore homopolymer length differences (for adjusted method)
-        handle_iupac_overlap: Whether to allow IUPAC ambiguity codes to match via intersection (for adjusted method)
-        normalize_indels: Whether to count contiguous indels as single events (for adjusted method)
-        max_repeat_motif_length: Maximum length of repeat motifs to detect (for adjusted method)
-        show_progress: Whether to show progress bar for distance calculations
-        
+        sequences: List of DNA sequences
+
     Returns:
-        Numpy array of pairwise distances (n x n)
+        List of aligned sequences (with gaps) in same order as input, or None if SPOA fails
+    """
+    if not sequences:
+        return None
+
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.fasta', delete=False) as temp_input:
+        try:
+            # Write sequences to temporary file with simple numeric IDs
+            seq_records = [
+                SeqRecord(Seq(seq), id=str(i), description="")
+                for i, seq in enumerate(sequences)
+            ]
+            SeqIO.write(seq_records, temp_input, "fasta")
+            temp_input.flush()
+
+            # Run SPOA with -r 2 for FASTA alignment output
+            result = subprocess.run(
+                ['spoa', temp_input.name, '-r', '2'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+
+            # Parse aligned sequences from SPOA output
+            aligned_sequences = {}
+            lines = result.stdout.strip().split('\n')
+            current_id = None
+            current_seq = []
+
+            for line in lines:
+                if line.startswith('>'):
+                    if current_id is not None and not current_id.startswith('Consensus'):
+                        aligned_sequences[current_id] = ''.join(current_seq)
+                    current_id = line[1:].strip()
+                    current_seq = []
+                elif line.strip():
+                    current_seq.append(line.strip())
+
+            # Add the last sequence (skip if consensus)
+            if current_id is not None and not current_id.startswith('Consensus'):
+                aligned_sequences[current_id] = ''.join(current_seq)
+
+            # Return sequences in original order
+            result_sequences = []
+            for i in range(len(sequences)):
+                if str(i) in aligned_sequences:
+                    result_sequences.append(aligned_sequences[str(i)])
+                else:
+                    logging.warning(f"SPOA did not return alignment for sequence {i}")
+                    return None
+
+            return result_sequences
+
+        except subprocess.CalledProcessError as e:
+            logging.warning(f"SPOA alignment failed: {e}")
+            return None
+        except Exception as e:
+            logging.warning(f"Error running SPOA: {e}")
+            return None
+        finally:
+            # Clean up temporary file
+            if os.path.exists(temp_input.name):
+                os.unlink(temp_input.name)
+
+
+def replace_terminal_gaps(aligned_sequences: List[str]) -> List[str]:
+    """Replace leading and trailing '-' gaps with '.' to mark terminal gaps.
+
+    Args:
+        aligned_sequences: List of aligned sequences with gap characters
+
+    Returns:
+        List of sequences with terminal gaps marked as '.'
+    """
+    processed = []
+
+    for seq in aligned_sequences:
+        seq_list = list(seq)
+
+        # Find first non-gap character
+        first_base = None
+        for i, char in enumerate(seq_list):
+            if char != '-':
+                first_base = i
+                break
+
+        # Find last non-gap character
+        last_base = None
+        for i in range(len(seq_list) - 1, -1, -1):
+            if seq_list[i] != '-':
+                last_base = i
+                break
+
+        # Replace leading gaps with '.'
+        if first_base is not None:
+            for i in range(first_base):
+                if seq_list[i] == '-':
+                    seq_list[i] = '.'
+
+        # Replace trailing gaps with '.'
+        if last_base is not None:
+            for i in range(last_base + 1, len(seq_list)):
+                if seq_list[i] == '-':
+                    seq_list[i] = '.'
+
+        processed.append(''.join(seq_list))
+
+    return processed
+
+
+def filter_msa_positions(seq1_aligned: str, seq2_aligned: str) -> Tuple[str, str]:
+    """Remove positions unsuitable for pairwise scoring from MSA.
+
+    Removes positions where:
+    - Either sequence has a terminal gap ('.') - represents missing data
+    - Both sequences have indel gaps ('-') - no information to compare
+
+    Args:
+        seq1_aligned: First aligned sequence (with gaps)
+        seq2_aligned: Second aligned sequence (with gaps)
+
+    Returns:
+        Tuple of (cleaned_seq1, cleaned_seq2) ready for scoring
+    """
+    cleaned_seq1 = []
+    cleaned_seq2 = []
+
+    for i in range(len(seq1_aligned)):
+        # Skip if either has terminal gap
+        if seq1_aligned[i] == '.' or seq2_aligned[i] == '.':
+            continue
+        # Skip if both have indel gaps
+        if seq1_aligned[i] == '-' and seq2_aligned[i] == '-':
+            continue
+
+        cleaned_seq1.append(seq1_aligned[i])
+        cleaned_seq2.append(seq2_aligned[i])
+
+    return ''.join(cleaned_seq1), ''.join(cleaned_seq2)
+
+
+def compute_msa_distance(seq1_aligned: str, seq2_aligned: str) -> float:
+    """Compute distance between two sequences from an MSA.
+
+    Uses standardized MycoBLAST-style adjustment parameters to score a
+    pre-existing alignment.
+
+    Args:
+        seq1_aligned: First aligned sequence (with gaps: '-' and '.')
+        seq2_aligned: Second aligned sequence (with gaps: '-' and '.')
+
+    Returns:
+        Distance value in range [0.0, 1.0]
     """
     try:
-        from adjusted_identity import align_and_score, AdjustmentParams, RAW_ADJUSTMENT_PARAMS
+        from adjusted_identity import score_alignment, AdjustmentParams
     except ImportError:
         raise ImportError(
             "adjusted-identity package is required. "
             "Install it with: pip install git+https://github.com/joshuaowalker/adjusted-identity.git"
         )
-    
+
+    # Filter positions unsuitable for scoring
+    seq1_clean, seq2_clean = filter_msa_positions(seq1_aligned, seq2_aligned)
+
+    if len(seq1_clean) == 0:
+        # No positions to score
+        return 1.0
+
+    # MycoBLAST-style parameters: end_skip=0, all normalizations=True, max_repeat=0
+    params = AdjustmentParams(
+        end_skip_distance=0,
+        normalize_homopolymers=True,
+        handle_iupac_overlap=True,
+        normalize_indels=True,
+        max_repeat_motif_length=0
+    )
+
+    try:
+        # Score the pre-aligned sequences
+        result = score_alignment(seq1_clean, seq2_clean, adjustment_params=params)
+
+        # Convert identity to distance
+        distance = 1.0 - result.identity
+
+    except Exception as e:
+        logging.warning(f"Alignment scoring failed: {e}")
+        distance = 1.0  # Maximum distance for failed alignments
+
+    return distance
+
+
+def calculate_distance_matrix(sequences: List[str],
+                            alignment_method: Literal["adjusted", "traditional"] = "adjusted",
+                            show_progress: bool = True) -> np.ndarray:
+    """
+    Calculate pairwise distance matrix for sequences using MSA-based scoring.
+
+    Uses SPOA to create a multiple sequence alignment, then scores all pairwise
+    distances based on the shared alignment space. This provides more consistent
+    alignment positions compared to independent pairwise alignments.
+
+    Uses standardized MycoBLAST-style adjustment parameters for all alignments.
+
+    Args:
+        sequences: List of DNA sequences as strings
+        alignment_method: Either "adjusted" (MycoBLAST adjustments) or "traditional" (raw BLAST-like)
+        show_progress: Whether to show progress bar for distance calculations
+
+    Returns:
+        Numpy array of pairwise distances (n x n)
+
+    Raises:
+        RuntimeError: If SPOA fails to create multiple sequence alignment
+    """
     n = len(sequences)
     distance_matrix = np.zeros((n, n))
-    
-    # Choose alignment parameters based on method
-    if alignment_method == "adjusted":
-        params = AdjustmentParams(
-            end_skip_distance=end_skip_distance,
-            normalize_homopolymers=normalize_homopolymers,
-            handle_iupac_overlap=handle_iupac_overlap,
-            normalize_indels=normalize_indels,
-            max_repeat_motif_length=max_repeat_motif_length
+
+    # Use SPOA for MSA-based distance calculation
+    logging.info("Creating MSA using SPOA for distance calculation...")
+    aligned_sequences = run_spoa_msa(sequences)
+
+    if aligned_sequences is None:
+        raise RuntimeError(
+            f"Failed to create multiple sequence alignment for {n} sequences using SPOA. "
+            "This could be due to: extremely divergent sequences, SPOA subprocess error, "
+            "or incomplete alignment output. Please check that SPOA is installed and sequences are valid."
         )
-        adjustments = []
-        if normalize_homopolymers: adjustments.append("homopolymer_norm")
-        if handle_iupac_overlap: adjustments.append("iupac_overlap")
-        if normalize_indels: adjustments.append("indel_norm")
-        adjustments_str = f"({', '.join(adjustments)})" if adjustments else "(no adjustments)"
-        logging.debug(f"Using adjusted identity with MycoBLAST adjustments {adjustments_str}, "
-                    f"end_skip_distance={end_skip_distance}, max_repeat_motif_length={max_repeat_motif_length}")
-    else:  # traditional
-        params = RAW_ADJUSTMENT_PARAMS
-        logging.info("Using traditional BLAST-like identity calculation")
-    
+
+    # Successfully created MSA
+    logging.info(f"SPOA alignment successful for {n} sequences")
+
+    # Replace terminal gaps with '.'
+    aligned_sequences = replace_terminal_gaps(aligned_sequences)
+
     # Calculate total number of comparisons for progress bar
     total_comparisons = (n * (n - 1)) // 2
-    
-    # Create progress bar if requested and meaningful
+
+    # Create progress bar if requested
     pbar = None
     if show_progress and total_comparisons > 0:
-        pbar = tqdm(total=total_comparisons, 
-                    desc="Calculating pairwise distances", 
+        pbar = tqdm(total=total_comparisons,
+                    desc="Calculating MSA-based distances",
                     unit=" comparisons")
-    
+
+    # Compute pairwise distances from MSA
     for i in range(n):
         for j in range(i + 1, n):
-            try:
-                # Pass shortest sequence first for consistent infix alignment
-                seq_i, seq_j = sequences[i], sequences[j]
-                if len(seq_i) <= len(seq_j):
-                    result = align_and_score(seq_i, seq_j, params)
-                else:
-                    result = align_and_score(seq_j, seq_i, params)
-                dist = 1.0 - result.identity
-            except Exception as e:
-                logging.warning(f"Alignment failed for sequences {i} and {j}: {e}")
-                dist = 1.0  # Maximum distance for failed alignments
-            
+            dist = compute_msa_distance(aligned_sequences[i], aligned_sequences[j])
             distance_matrix[i, j] = dist
             distance_matrix[j, i] = dist
             if pbar:
                 pbar.update(1)
-    
+
     if pbar:
         pbar.close()
-    
+
     return distance_matrix
 
 

@@ -78,19 +78,33 @@ class TestDistanceCalculations:
     def test_alignment_methods(self):
         """Test different alignment methods."""
         sequences = ["ATCG", "ATCC"]
-        
+
         # Test adjusted method
         distance_matrix_adj = calculate_distance_matrix(sequences, alignment_method="adjusted")
         assert distance_matrix_adj.shape == (2, 2)
         assert distance_matrix_adj[0, 0] == 0.0
         assert distance_matrix_adj[1, 1] == 0.0
-        
+
         # Test traditional method
         distance_matrix_trad = calculate_distance_matrix(sequences, alignment_method="traditional")
         assert distance_matrix_trad.shape == (2, 2)
         assert distance_matrix_trad[0, 0] == 0.0
         assert distance_matrix_trad[1, 1] == 0.0
-    
+
+    def test_calculate_distance_matrix_spoa_failure(self):
+        """Test that RuntimeError is raised when SPOA fails."""
+        from unittest.mock import patch
+
+        sequences = ["ATCG", "ATCC", "TACG"]
+
+        # Mock run_spoa_msa to return None (failure)
+        with patch('gaphack.utils.run_spoa_msa', return_value=None):
+            with pytest.raises(RuntimeError) as exc_info:
+                calculate_distance_matrix(sequences)
+
+            # Verify error message mentions SPOA failure
+            assert "Failed to create multiple sequence alignment" in str(exc_info.value)
+            assert "SPOA" in str(exc_info.value)
 
 
 class TestOutputFormatting:

@@ -13,27 +13,24 @@ import logging
 from .utils import load_sequences_from_fasta, calculate_distance_matrix
 
 
-def calculate_intra_cluster_distances(sequences: List[str], 
-                                    alignment_method: str = "adjusted",
-                                    **alignment_kwargs) -> np.ndarray:
+def calculate_intra_cluster_distances(sequences: List[str],
+                                    alignment_method: str = "adjusted") -> np.ndarray:
     """
     Calculate all pairwise distances within a cluster.
-    
+
     Args:
         sequences: List of DNA sequences
         alignment_method: Method for distance calculation
-        **alignment_kwargs: Additional arguments for distance calculation
-        
+
     Returns:
         1D array of pairwise distances (upper triangle, excluding diagonal)
     """
     if len(sequences) < 2:
         return np.array([])
-    
+
     distance_matrix = calculate_distance_matrix(
-        sequences, 
-        alignment_method=alignment_method,
-        **alignment_kwargs
+        sequences,
+        alignment_method=alignment_method
     )
     
     # Extract upper triangle (excluding diagonal)
@@ -46,39 +43,36 @@ def calculate_intra_cluster_distances(sequences: List[str],
     return np.array(distances)
 
 
-def calculate_inter_cluster_distances(cluster_sequences: List[List[str]], 
-                                    alignment_method: str = "adjusted",
-                                    **alignment_kwargs) -> np.ndarray:
+def calculate_inter_cluster_distances(cluster_sequences: List[List[str]],
+                                    alignment_method: str = "adjusted") -> np.ndarray:
     """
     Calculate all pairwise distances between different clusters.
-    
+
     Args:
         cluster_sequences: List of sequence lists, one per cluster
         alignment_method: Method for distance calculation
-        **alignment_kwargs: Additional arguments for distance calculation
-        
+
     Returns:
         1D array of inter-cluster pairwise distances
     """
     if len(cluster_sequences) < 2:
         return np.array([])
-    
+
     # Flatten all sequences and track cluster membership
     all_sequences = []
     cluster_membership = []
-    
+
     for cluster_idx, sequences in enumerate(cluster_sequences):
         all_sequences.extend(sequences)
         cluster_membership.extend([cluster_idx] * len(sequences))
-    
+
     if len(all_sequences) < 2:
         return np.array([])
-    
+
     # Calculate full distance matrix
     distance_matrix = calculate_distance_matrix(
-        all_sequences, 
-        alignment_method=alignment_method,
-        **alignment_kwargs
+        all_sequences,
+        alignment_method=alignment_method
     )
     
     # Extract inter-cluster distances

@@ -13,7 +13,7 @@ import numpy as np
 from tqdm import tqdm
 
 from .core import DistanceCache, GapCalculator
-from .lazy_distances import DistanceProvider, DistanceProviderFactory
+from .distance_providers import DistanceProvider
 from .triangle_filtering import filter_distance_dict_triangles, filter_intra_cluster_triangles
 
 
@@ -70,26 +70,19 @@ class TargetModeClustering:
             - remaining_sequences is List[int] of indices not merged into target cluster
             - clustering_history is Dict containing optimization metrics and history
         """
-        # Handle backward compatibility and create distance provider
-        if isinstance(distance_provider, np.ndarray):
-            # Legacy mode: precomputed distance matrix
-            distance_matrix = distance_provider
-            n = len(distance_matrix)
-            provider = DistanceProviderFactory.create_precomputed_provider(distance_matrix)
-            self.logger.debug("Using precomputed distance matrix")
-        elif isinstance(distance_provider, DistanceProvider):
-            # Modern mode: distance provider
-            provider = distance_provider
-            if hasattr(provider, 'n'):
-                n = provider.n
-            elif sequences is not None:
-                n = len(sequences)
-            else:
-                # Determine n from target indices (assumes they represent valid range)
-                n = max(target_indices) + 1
-            self.logger.debug("Using distance provider for on-demand computation")
+        # Validate distance provider
+        if not isinstance(distance_provider, DistanceProvider):
+            raise TypeError(f"distance_provider must be DistanceProvider, got {type(distance_provider)}")
+
+        provider = distance_provider
+        if hasattr(provider, 'n'):
+            n = provider.n
+        elif sequences is not None:
+            n = len(sequences)
         else:
-            raise ValueError("distance_provider must be either np.ndarray or DistanceProvider instance")
+            # Determine n from target indices (assumes they represent valid range)
+            n = max(target_indices) + 1
+        self.logger.debug("Using distance provider for on-demand computation")
         
         # Validate target indices
         for idx in target_indices:

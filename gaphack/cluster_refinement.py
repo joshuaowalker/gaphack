@@ -12,8 +12,7 @@ from typing import List, Dict, Tuple, Set, Optional, Union
 import numpy as np
 
 from .cluster_graph import ClusterGraph
-from .scoped_distances import ScopedDistanceProvider, create_scoped_distance_provider
-from .lazy_distances import DistanceProvider
+from .distance_providers import DistanceProvider
 from .core import GapOptimizedClustering
 from .decompose import DecomposeResults
 
@@ -174,7 +173,7 @@ def apply_full_gaphack_to_scope_with_metadata(scope_sequences: List[str],
         scope_headers: Headers for scope sequences
         global_sequences: Full sequence list
         global_headers: Full header list
-        global_distance_provider: Distance provider for full dataset
+        global_distance_provider: Distance provider for full dataset (unused - kept for compatibility)
         min_split: Minimum distance to split clusters
         max_lump: Maximum distance to lump clusters
         target_percentile: Percentile for gap optimization
@@ -182,13 +181,13 @@ def apply_full_gaphack_to_scope_with_metadata(scope_sequences: List[str],
     Returns:
         Tuple of (cluster_dict, metadata_dict) where metadata includes gap_size
     """
-    # Create scoped distance provider
-    scoped_provider = create_scoped_distance_provider(
-        global_distance_provider, scope_headers, global_headers
-    )
+    # Create MSA-based distance provider for scope
+    # This provides consistent alignment across all sequences in the scope
+    from .distance_providers import MSACachedDistanceProvider
+    msa_provider = MSACachedDistanceProvider(scope_sequences, scope_headers)
 
-    # Build distance matrix for full gapHACk
-    distance_matrix = scoped_provider.build_distance_matrix()
+    # Build distance matrix from MSA
+    distance_matrix = msa_provider.build_distance_matrix()
 
     # Apply full gapHACk clustering
     clusterer = GapOptimizedClustering(
@@ -251,7 +250,7 @@ def apply_full_gaphack_to_scope(scope_sequences: List[str],
         scope_headers: Headers for scope sequences
         global_sequences: Full sequence list
         global_headers: Full header list
-        global_distance_provider: Distance provider for full dataset
+        global_distance_provider: Distance provider for full dataset (unused - kept for compatibility)
         min_split: Minimum distance to split clusters
         max_lump: Maximum distance to lump clusters
         target_percentile: Percentile for gap optimization
@@ -272,7 +271,6 @@ def resolve_conflicts(conflicts: Dict[str, List[str]],
                                      all_clusters: Dict[str, List[str]],
                                      sequences: List[str],
                                      headers: List[str],
-                                     distance_provider: DistanceProvider,
                                      config: Optional[RefinementConfig] = None,
                                      min_split: float = 0.005,
                                      max_lump: float = 0.02,
@@ -288,7 +286,6 @@ def resolve_conflicts(conflicts: Dict[str, List[str]],
         all_clusters: Dict mapping cluster_id -> list of sequence headers
         sequences: Full sequence list
         headers: Full header list (indices must match sequences)
-        distance_provider: Provider for distance calculations
         config: Configuration for refinement parameters
         min_split: Minimum distance to split clusters
         max_lump: Maximum distance to lump clusters
@@ -357,7 +354,7 @@ def resolve_conflicts(conflicts: Dict[str, List[str]],
 
             full_result = apply_full_gaphack_to_scope(
                 scope_headers, scope_headers,  # Use minimal scope directly
-                sequences, headers, distance_provider,
+                sequences, headers, None,  # distance_provider unused
                 min_split, max_lump, target_percentile,
                 cluster_id_generator
             )
@@ -544,7 +541,6 @@ def expand_context_for_gap_optimization(core_cluster_ids: List[str],
                                        all_clusters: Dict[str, List[str]],
                                        sequences: List[str],
                                        headers: List[str],
-                                       distance_provider: DistanceProvider,
                                        proximity_graph: ClusterGraph,
                                        expansion_threshold: float,
                                        max_scope_size: int,
@@ -561,7 +557,6 @@ def expand_context_for_gap_optimization(core_cluster_ids: List[str],
         all_clusters: All available clusters
         sequences: Full sequence list
         headers: Full header list
-        distance_provider: Distance calculation provider
         proximity_graph: Graph for finding neighbors
         expansion_threshold: Regular expansion threshold
         max_scope_size: Maximum sequences in scope
@@ -602,7 +597,7 @@ def expand_context_for_gap_optimization(core_cluster_ids: List[str],
 
             full_clusters, full_metadata = apply_full_gaphack_to_scope_with_metadata(
                 current_scope.sequences, current_scope.headers,
-                sequences, headers, distance_provider,
+                sequences, headers, None,  # distance_provider unused
                 min_split, max_lump, target_percentile,
                 cluster_id_generator=cluster_id_generator  # Use shared generator
             )
@@ -768,7 +763,6 @@ def expand_scope_for_close_clusters(initial_sequences: Set[str],
 def refine_close_clusters(all_clusters: Dict[str, List[str]],
                          sequences: List[str],
                          headers: List[str],
-                         distance_provider: DistanceProvider,
                          proximity_graph: ClusterGraph,
                          config: Optional[RefinementConfig] = None,
                          min_split: float = 0.005,
@@ -782,7 +776,6 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
         all_clusters: Current cluster dictionary
         sequences: Full sequence list
         headers: Full header list (indices must match sequences)
-        distance_provider: Provider for distance calculations
         proximity_graph: Graph for finding close cluster pairs
         config: Configuration for refinement parameters
         min_split: Minimum distance to split clusters
@@ -913,7 +906,6 @@ def refine_close_clusters(all_clusters: Dict[str, List[str]],
             updated_clusters,
             sequences,
             headers,
-            distance_provider,
             proximity_graph,
             expansion_threshold,
             config.max_full_gaphack_size,

@@ -11,7 +11,6 @@ from typing import Optional
 
 from .core import GapOptimizedClustering
 from .target_clustering import TargetModeClustering
-from .lazy_distances import DistanceProviderFactory
 from .utils import (
     load_sequences_from_fasta,
     calculate_distance_matrix,
@@ -42,7 +41,6 @@ Examples:
   gaphack input.fasta --format tsv -o results.tsv
   gaphack input.fasta --min-split 0.003 --max-lump 0.03
   gaphack input.fasta --export-metrics gap_analysis.json -v
-  gaphack input.fasta --no-homopolymer-normalization --no-indel-normalization
   gaphack input.fasta --alignment-method traditional
   gaphack input.fasta --target seeds.fasta    # Target mode: grow cluster from seeds.fasta
         """
@@ -93,36 +91,9 @@ Examples:
         '--alignment-method',
         choices=['adjusted', 'traditional'],
         default='adjusted',
-        help='Alignment method: adjusted (with MycoBLAST adjustments) or traditional (raw identity) (default: adjusted)'
+        help='Alignment method: adjusted (MycoBLAST-style) or traditional (raw identity) (default: adjusted)'
     )
-    parser.add_argument(
-        '--end-skip-distance',
-        type=int,
-        default=20,
-        help='Distance from sequence ends to skip in alignment (for adjusted method, default: 20)'
-    )
-    parser.add_argument(
-        '--no-homopolymer-normalization',
-        action='store_true',
-        help='Disable normalization of homopolymer length differences (default: enabled)'
-    )
-    parser.add_argument(
-        '--no-iupac-overlap',
-        action='store_true',
-        help='Disable IUPAC ambiguity code overlap matching (default: enabled)'
-    )
-    parser.add_argument(
-        '--no-indel-normalization',
-        action='store_true',
-        help='Disable normalization of contiguous indels as single events (default: enabled)'
-    )
-    parser.add_argument(
-        '--max-repeat-motif-length',
-        type=int,
-        default=2,
-        help='Maximum length of repeat motifs to detect (1=homopolymers only, 2=dinucleotides, etc., default: 2)'
-    )
-    
+
     # Target mode clustering
     parser.add_argument(
         '--target',
@@ -220,15 +191,10 @@ Examples:
             # Conditional distance calculation - only full matrix for non-target mode
             if not args.target:
                 logging.info(f"Calculating pairwise distances using {args.alignment_method} method...")
-                
+
                 distance_matrix = calculate_distance_matrix(
-                    sequences, 
-                    alignment_method=args.alignment_method,
-                    end_skip_distance=args.end_skip_distance,
-                    normalize_homopolymers=not args.no_homopolymer_normalization,
-                    handle_iupac_overlap=not args.no_iupac_overlap,
-                    normalize_indels=not args.no_indel_normalization,
-                    max_repeat_motif_length=args.max_repeat_motif_length
+                    sequences,
+                    alignment_method=args.alignment_method
                 )
                 logging.info("Distance calculation complete")
         
@@ -267,25 +233,22 @@ Examples:
         
         # Choose clustering mode and run
         if args.target:
-            # Target mode clustering with lazy distance calculation
+            # Target mode clustering with MSA-based distance calculation
             logging.info("Running target mode clustering...")
             clustering = TargetModeClustering(
                 min_split=args.min_split,
                 max_lump=args.max_lump,
                 target_percentile=args.target_percentile,
             )
-            
-            # Create lazy distance provider
-            distance_provider = DistanceProviderFactory.create_lazy_provider(
+
+            # Create MSA-based distance provider for consistent alignment
+            from .distance_providers import MSACachedDistanceProvider
+            logging.info(f"Creating MSA for {len(sequences)} sequences...")
+            distance_provider = MSACachedDistanceProvider(
                 sequences,
-                alignment_method=args.alignment_method,
-                end_skip_distance=args.end_skip_distance,
-                normalize_homopolymers=not args.no_homopolymer_normalization,
-                handle_iupac_overlap=not args.no_iupac_overlap,
-                normalize_indels=not args.no_indel_normalization,
-                max_repeat_motif_length=args.max_repeat_motif_length
+                headers
             )
-            
+
             target_cluster, remaining_sequences, metrics = clustering.cluster(distance_provider, target_indices, sequences)
             
             # Log optimization statistics

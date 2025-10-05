@@ -65,22 +65,20 @@ def validate_fasta_files(fasta_paths: List[str]) -> List[Path]:
     return validated_paths
 
 
-def analyze_single_cluster(fasta_path: Path, 
-                          alignment_method: str,
-                          alignment_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+def analyze_single_cluster(fasta_path: Path,
+                          alignment_method: str) -> Dict[str, Any]:
     """
     Analyze a single FASTA file as a cluster.
-    
+
     Args:
         fasta_path: Path to FASTA file
         alignment_method: Method for distance calculation
-        alignment_kwargs: Additional arguments for distance calculation
-        
+
     Returns:
         Dictionary with cluster analysis results
     """
     logging.info(f"Analyzing cluster: {fasta_path.name}")
-    
+
     # Load sequences
     try:
         sequences, headers, _ = load_sequences_from_fasta(str(fasta_path))
@@ -94,12 +92,11 @@ def analyze_single_cluster(fasta_path: Path,
             'distances': np.array([]),
             'percentiles': {}
         }
-    
+
     # Calculate intra-cluster distances
     distances = calculate_intra_cluster_distances(
-        sequences, 
-        alignment_method=alignment_method,
-        **alignment_kwargs
+        sequences,
+        alignment_method=alignment_method
     )
     
     # Calculate percentiles
@@ -175,36 +172,9 @@ Examples:
         '--alignment-method',
         choices=['adjusted', 'traditional'],
         default='adjusted',
-        help='Alignment method for distance calculation (default: adjusted)'
+        help='Alignment method: adjusted (MycoBLAST-style) or traditional (raw identity) (default: adjusted)'
     )
-    parser.add_argument(
-        '--end-skip-distance',
-        type=int,
-        default=20,
-        help='Distance from sequence ends to skip in alignment (default: 20)'
-    )
-    parser.add_argument(
-        '--no-homopolymer-normalization',
-        action='store_true',
-        help='Disable homopolymer length normalization'
-    )
-    parser.add_argument(
-        '--no-iupac-overlap',
-        action='store_true',
-        help='Disable IUPAC ambiguity code overlap matching'
-    )
-    parser.add_argument(
-        '--no-indel-normalization',
-        action='store_true',
-        help='Disable indel normalization'
-    )
-    parser.add_argument(
-        '--max-repeat-motif-length',
-        type=int,
-        default=2,
-        help='Maximum repeat motif length to detect (default: 2)'
-    )
-    
+
     # Analysis parameters
     parser.add_argument(
         '--bins',
@@ -239,23 +209,14 @@ Examples:
     # Create output directory
     output_dir = create_output_directory(args.output)
     logging.info(f"Output directory: {output_dir}")
-    
-    # Prepare alignment parameters
-    alignment_kwargs = {
-        'end_skip_distance': args.end_skip_distance,
-        'normalize_homopolymers': not args.no_homopolymer_normalization,
-        'handle_iupac_overlap': not args.no_iupac_overlap,
-        'normalize_indels': not args.no_indel_normalization,
-        'max_repeat_motif_length': args.max_repeat_motif_length
-    }
-    
+
     try:
         # Analyze individual clusters
         cluster_results = []
         all_sequences_by_cluster = []
-        
+
         for fasta_path in fasta_paths:
-            result = analyze_single_cluster(fasta_path, args.alignment_method, alignment_kwargs)
+            result = analyze_single_cluster(fasta_path, args.alignment_method)
             cluster_results.append(result)
             
             if 'sequences' in result:
@@ -280,12 +241,11 @@ Examples:
         # Calculate global intra-cluster distances
         all_intra_distances = np.concatenate([r['distances'] for r in cluster_results if len(r['distances']) > 0])
         
-        # Calculate global inter-cluster distances  
+        # Calculate global inter-cluster distances
         valid_cluster_sequences = [r['sequences'] for r in cluster_results if 'sequences' in r and len(r['sequences']) > 0]
         all_inter_distances = calculate_inter_cluster_distances(
             valid_cluster_sequences,
-            alignment_method=args.alignment_method,
-            **alignment_kwargs
+            alignment_method=args.alignment_method
         )
         
         # Calculate global statistics
@@ -339,7 +299,6 @@ Examples:
                 'barcode_gap_metrics': gap_metrics,
                 'analysis_parameters': {
                     'alignment_method': args.alignment_method,
-                    'alignment_kwargs': alignment_kwargs,
                     'gap_percentiles': args.gap_percentiles
                 }
             }

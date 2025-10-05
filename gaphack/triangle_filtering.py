@@ -9,7 +9,7 @@ alignments, particularly for short sequences with minimal overlap.
 import logging
 import numpy as np
 from typing import Dict, List, Tuple, Set, Optional, Union
-from .lazy_distances import DistanceProvider
+from .distance_providers import DistanceProvider
 
 
 # Shared constants for triangle inequality filtering

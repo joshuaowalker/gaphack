@@ -340,19 +340,6 @@ def _apply_conflict_resolution_stage(state: DecomposeState,
     # Load sequences and headers
     sequences, hash_ids, hash_to_headers = load_sequences_with_deduplication(input_fasta)
 
-    # Create distance provider using default parameters
-    # Note: We don't store alignment parameters in state, so use defaults
-    from .lazy_distances import LazyDistanceProvider
-    distance_provider = LazyDistanceProvider(
-        sequences=sequences,
-        alignment_method="adjusted",
-        end_skip_distance=20,
-        normalize_homopolymers=True,
-        handle_iupac_overlap=True,
-        normalize_indels=True,
-        max_repeat_motif_length=2
-    )
-
     # Create refinement configuration
     config = RefinementConfig(
         max_full_gaphack_size=300  # Conservative limit for performance
@@ -366,7 +353,6 @@ def _apply_conflict_resolution_stage(state: DecomposeState,
         all_clusters=current_clusters,
         sequences=sequences,
         headers=hash_ids,
-        distance_provider=distance_provider,
         config=config,
         min_split=params['min_split'],
         max_lump=params['max_lump'],
@@ -447,25 +433,12 @@ def _apply_close_cluster_refinement_stage(state: DecomposeState,
     # Load sequences and headers
     sequences, hash_ids, hash_to_headers = load_sequences_with_deduplication(input_fasta)
 
-    # Create distance provider using default parameters
-    # Note: We don't store alignment parameters in state, so use defaults
-    from .lazy_distances import LazyDistanceProvider
-    distance_provider = LazyDistanceProvider(
-        sequences=sequences,
-        alignment_method="adjusted",
-        end_skip_distance=20,
-        normalize_homopolymers=True,
-        handle_iupac_overlap=True,
-        normalize_indels=True,
-        max_repeat_motif_length=2
-    )
-
     # Create proximity graph for cluster proximity queries
+    # Note: ClusterGraph uses MSA internally for all distance calculations
     proximity_graph = ClusterGraph(
         clusters=current_clusters,
         sequences=sequences,
         headers=hash_ids,
-        distance_provider=distance_provider,
         k_neighbors=20
     )
 
@@ -486,7 +459,6 @@ def _apply_close_cluster_refinement_stage(state: DecomposeState,
         all_clusters=current_clusters,
         sequences=sequences,
         headers=hash_ids,
-        distance_provider=distance_provider,
         proximity_graph=proximity_graph,
         config=config,
         min_split=params['min_split'],

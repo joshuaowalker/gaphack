@@ -292,21 +292,21 @@ class TestFullGapHACkApplication:
         self.test_sequences = ["ATCGATCG", "ATCGATCC", "TTTTGGGG", "TTTTGGCC"]
         self.test_headers = ["seq_0", "seq_1", "seq_2", "seq_3"]
 
-    @patch('gaphack.cluster_refinement.create_scoped_distance_provider')
+    @patch('gaphack.distance_providers.MSACachedDistanceProvider')
     @patch('gaphack.cluster_refinement.GapOptimizedClustering')
-    def test_apply_full_gaphack_to_scope_basic(self, mock_clustering_class, mock_scoped_provider):
+    def test_apply_full_gaphack_to_scope_basic(self, mock_clustering_class, mock_msa_provider):
         """Test basic full gapHACk application to scope."""
-        # Mock scoped distance provider
+        # Mock MSA distance provider
         mock_provider = Mock()
         mock_provider.build_distance_matrix.return_value = np.array([[0.0, 0.1], [0.1, 0.0]])
-        mock_scoped_provider.return_value = mock_provider
+        mock_msa_provider.return_value = mock_provider
 
         # Mock clustering result
         mock_clusterer = Mock()
         mock_clusterer.cluster.return_value = ([[0, 1]], [], {})
         mock_clustering_class.return_value = mock_clusterer
 
-        # Mock distance provider
+        # Mock distance provider (not used by refinement but passed in)
         mock_distance_provider = Mock()
 
         result = apply_full_gaphack_to_scope(
@@ -319,14 +319,14 @@ class TestFullGapHACkApplication:
         assert "seq_0" in cluster_values[0]
         assert "seq_1" in cluster_values[0]
 
-    @patch('gaphack.cluster_refinement.create_scoped_distance_provider')
+    @patch('gaphack.distance_providers.MSACachedDistanceProvider')
     @patch('gaphack.cluster_refinement.GapOptimizedClustering')
-    def test_apply_full_gaphack_to_scope_with_metadata(self, mock_clustering_class, mock_scoped_provider):
+    def test_apply_full_gaphack_to_scope_with_metadata(self, mock_clustering_class, mock_msa_provider):
         """Test full gapHACk application with metadata return."""
-        # Mock scoped distance provider
+        # Mock MSA distance provider
         mock_provider = Mock()
         mock_provider.build_distance_matrix.return_value = np.array([[0.0, 0.1], [0.1, 0.0]])
-        mock_scoped_provider.return_value = mock_provider
+        mock_msa_provider.return_value = mock_provider
 
         # Mock clustering result with metadata
         mock_clusterer = Mock()
@@ -367,11 +367,9 @@ class TestConflictResolution:
             "classic_2": ["seq_2"]
         }
 
-        mock_distance_provider = Mock()
-
         updated_clusters, tracking_info = resolve_conflicts(
             self.conflicts, self.test_clusters, self.test_sequences,
-            self.test_headers, mock_distance_provider
+            self.test_headers
         )
 
         # Should remove conflicted clusters and add classic results
@@ -387,11 +385,9 @@ class TestConflictResolution:
 
     def test_resolve_conflicts_empty(self):
         """Test conflict resolution with no conflicts."""
-        mock_distance_provider = Mock()
-
         updated_clusters, tracking_info = resolve_conflicts(
             {}, self.test_clusters, self.test_sequences,
-            self.test_headers, mock_distance_provider
+            self.test_headers
         )
 
         # Should return unchanged clusters
@@ -416,11 +412,9 @@ class TestConflictResolution:
                 conflicts["seq_0"].append(cluster_id)
 
         config = RefinementConfig(max_full_gaphack_size=100)  # Small size limit
-        mock_distance_provider = Mock()
-
         updated_clusters, tracking_info = resolve_conflicts(
             conflicts, large_clusters, [], [],
-            mock_distance_provider, config
+            config
         )
 
         # Should skip oversized component
@@ -462,11 +456,9 @@ class TestCloseClusterRefinement:
         }
         mock_expand_context.return_value = (mock_scope, mock_result)
 
-        mock_distance_provider = Mock()
-
         updated_clusters, tracking_info = refine_close_clusters(
             self.test_clusters, self.test_sequences, self.test_headers,
-            mock_distance_provider, mock_graph, close_threshold=0.02
+            mock_graph, close_threshold=0.02
         )
 
         # Should replace close clusters with refined result
@@ -485,11 +477,9 @@ class TestCloseClusterRefinement:
         mock_graph = Mock()
         mock_graph.find_close_pairs.return_value = []
 
-        mock_distance_provider = Mock()
-
         updated_clusters, tracking_info = refine_close_clusters(
             self.test_clusters, self.test_sequences, self.test_headers,
-            mock_distance_provider, mock_graph
+            mock_graph
         )
 
         # Should return unchanged clusters
@@ -501,11 +491,9 @@ class TestCloseClusterRefinement:
         single_cluster = {"cluster_1": ["seq_1", "seq_2"]}
 
         mock_graph = Mock()
-        mock_distance_provider = Mock()
-
         updated_clusters, tracking_info = refine_close_clusters(
             single_cluster, self.test_sequences, self.test_headers,
-            mock_distance_provider, mock_graph
+            mock_graph
         )
 
         assert updated_clusters == single_cluster
@@ -548,7 +536,7 @@ class TestContextExpansion:
 
         scope, result = expand_context_for_gap_optimization(
             core_cluster_ids, self.test_clusters, [], [],
-            mock_distance_provider, mock_graph,
+            mock_graph,
             expansion_threshold=0.03, max_scope_size=10,
             max_lump=0.02, min_split=0.005, target_percentile=95,
             target_gap=0.001, max_iterations=3
@@ -575,7 +563,7 @@ class TestContextExpansion:
 
         scope, result = expand_context_for_gap_optimization(
             core_cluster_ids, self.test_clusters, [], [],
-            mock_distance_provider, mock_graph,
+            mock_graph,
             expansion_threshold=0.03, max_scope_size=10,
             max_lump=0.02, min_split=0.005, target_percentile=95,
             target_gap=0.001, max_iterations=2

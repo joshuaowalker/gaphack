@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 
 from gaphack.target_clustering import TargetModeClustering
+from gaphack.distance_providers import PrecomputedDistanceProvider
 
 
 class TestTargetModeClustering:
@@ -42,14 +43,15 @@ class TestTargetModeClustering:
         distance_matrix = np.array([
             [0.0,  0.02, 0.04, 0.06],  # target sequence
             [0.02, 0.0,  0.07, 0.08],  # closest to target
-            [0.04, 0.07, 0.0,  0.09],  # second closest to target  
+            [0.04, 0.07, 0.0,  0.09],  # second closest to target
             [0.06, 0.08, 0.09, 0.0]    # farthest from target
         ])
-        
+
         target_indices = [0]
-        
+
         sequences = self._generate_test_sequences(len(distance_matrix))
-        target_cluster, remaining, metrics = self.clustering.cluster(distance_matrix, target_indices, sequences)
+        distance_provider = PrecomputedDistanceProvider(distance_matrix)
+        target_cluster, remaining, metrics = self.clustering.cluster(distance_provider, target_indices, sequences)
         
         # Should include target (0), closest sequence (1), and second closest (2)
         # but not farthest (3) since it exceeds max_lump threshold
@@ -72,16 +74,17 @@ class TestTargetModeClustering:
         # and sequence 2 is close to both (should be merged)
         distance_matrix = np.array([
             [0.0,  0.01, 0.03, 0.08, 0.09],  # target seed 1
-            [0.01, 0.0,  0.02, 0.08, 0.09],  # target seed 2  
+            [0.01, 0.0,  0.02, 0.08, 0.09],  # target seed 2
             [0.03, 0.02, 0.0,  0.07, 0.08],  # close to both seeds
             [0.08, 0.08, 0.07, 0.0,  0.01],  # distant cluster
             [0.09, 0.09, 0.08, 0.01, 0.0]   # distant cluster
         ])
-        
+
         target_indices = [0, 1]  # Both sequences 0 and 1 are seeds
-        
+
         sequences = self._generate_test_sequences(len(distance_matrix))
-        target_cluster, remaining, metrics = self.clustering.cluster(distance_matrix, target_indices, sequences)
+        distance_provider = PrecomputedDistanceProvider(distance_matrix)
+        target_cluster, remaining, metrics = self.clustering.cluster(distance_provider, target_indices, sequences)
         
         # Both seed sequences should be in target cluster
         assert 0 in target_cluster
@@ -102,15 +105,16 @@ class TestTargetModeClustering:
         # All inter-sequence distances exceed max_lump
         distance_matrix = np.array([
             [0.0,  0.10, 0.12, 0.15],  # target
-            [0.10, 0.0,  0.11, 0.13],  
+            [0.10, 0.0,  0.11, 0.13],
             [0.12, 0.11, 0.0,  0.14],
             [0.15, 0.13, 0.14, 0.0]
         ])
-        
+
         target_indices = [0]
-        
+
         sequences = self._generate_test_sequences(len(distance_matrix))
-        target_cluster, remaining, metrics = self.clustering.cluster(distance_matrix, target_indices, sequences)
+        distance_provider = PrecomputedDistanceProvider(distance_matrix)
+        target_cluster, remaining, metrics = self.clustering.cluster(distance_provider, target_indices, sequences)
         
         # Only target sequence should be in cluster (no merging)
         assert target_cluster == [0]
@@ -126,11 +130,12 @@ class TestTargetModeClustering:
             [0.02, 0.0,  0.04],
             [0.03, 0.04, 0.0]
         ])
-        
+
         target_indices = [0, 1, 2]  # All sequences are targets
-        
+
         sequences = self._generate_test_sequences(len(distance_matrix))
-        target_cluster, remaining, metrics = self.clustering.cluster(distance_matrix, target_indices, sequences)
+        distance_provider = PrecomputedDistanceProvider(distance_matrix)
+        target_cluster, remaining, metrics = self.clustering.cluster(distance_provider, target_indices, sequences)
         
         # All sequences should be in target cluster
         assert set(target_cluster) == {0, 1, 2}
@@ -142,34 +147,34 @@ class TestTargetModeClustering:
             [0.0,  0.02],
             [0.02, 0.0]
         ])
-        
+
         # Test out of range index
         with pytest.raises(ValueError, match="Target index .* is out of range"):
             sequences = self._generate_test_sequences(len(distance_matrix))
-            self.clustering.cluster(distance_matrix, [5], sequences)
-        
+            distance_provider = PrecomputedDistanceProvider(distance_matrix)
+            self.clustering.cluster(distance_provider, [5], sequences)
+
         # Test negative index
         with pytest.raises(ValueError, match="Target index .* is out of range"):
             sequences = self._generate_test_sequences(len(distance_matrix))
-            self.clustering.cluster(distance_matrix, [-1], sequences)
+            distance_provider = PrecomputedDistanceProvider(distance_matrix)
+            self.clustering.cluster(distance_provider, [-1], sequences)
     
     def test_find_closest_to_target(self):
         """Test _find_closest_to_target helper method."""
-        from gaphack.lazy_distances import DistanceProviderFactory
-        
         distance_matrix = np.array([
             [0.0,  0.02, 0.04, 0.06],
             [0.02, 0.0,  0.07, 0.08],
             [0.04, 0.07, 0.0,  0.09],
             [0.06, 0.08, 0.09, 0.0]
         ])
-        
-        # Create distance provider from matrix
-        distance_provider = DistanceProviderFactory.create_precomputed_provider(distance_matrix)
-        
+
+        # Create distance provider
+        distance_provider = PrecomputedDistanceProvider(distance_matrix)
+
         target_cluster = {0}
         remaining = {1, 2, 3}
-        
+
         closest_seq, distance = self.clustering._find_closest_to_target(
             target_cluster, remaining, distance_provider
         )
@@ -203,11 +208,12 @@ class TestTargetModeClustering:
             [0.08, 0.08, 0.0,  0.01],  # far from target, close to seq 3
             [0.09, 0.09, 0.01, 0.0]   # far from target, close to seq 2
         ])
-        
+
         target_indices = [0]
-        
+
         sequences = self._generate_test_sequences(len(distance_matrix))
-        target_cluster, remaining, metrics = self.clustering.cluster(distance_matrix, target_indices, sequences)
+        distance_provider = PrecomputedDistanceProvider(distance_matrix)
+        target_cluster, remaining, metrics = self.clustering.cluster(distance_provider, target_indices, sequences)
         
         # Should have clear gap between target cluster (0,1) and remaining (2,3)
         best_config = metrics['best_config']
@@ -225,17 +231,19 @@ class TestTargetModeClustering:
             [0.0,  0.02],
             [0.02, 0.0]
         ])
-        
+
         # Test with progress bar disabled
         clustering_no_progress = TargetModeClustering(show_progress=False)
         sequences = self._generate_test_sequences(len(distance_matrix))
-        clustering_no_progress.cluster(distance_matrix, [0], sequences)
+        distance_provider = PrecomputedDistanceProvider(distance_matrix)
+        clustering_no_progress.cluster(distance_provider, [0], sequences)
         mock_tqdm.assert_not_called()
-        
-        # Test with progress bar enabled  
+
+        # Test with progress bar enabled
         clustering_with_progress = TargetModeClustering(show_progress=True)
         sequences = self._generate_test_sequences(len(distance_matrix))
-        clustering_with_progress.cluster(distance_matrix, [0], sequences)
+        distance_provider = PrecomputedDistanceProvider(distance_matrix)
+        clustering_with_progress.cluster(distance_provider, [0], sequences)
         mock_tqdm.assert_called()
     
     def test_gap_history_tracking(self):
@@ -246,11 +254,12 @@ class TestTargetModeClustering:
             [0.02, 0.04, 0.0,  0.06],
             [0.03, 0.05, 0.06, 0.0]
         ])
-        
+
         target_indices = [0]
-        
+
         sequences = self._generate_test_sequences(len(distance_matrix))
-        target_cluster, remaining, metrics = self.clustering.cluster(distance_matrix, target_indices, sequences)
+        distance_provider = PrecomputedDistanceProvider(distance_matrix)
+        target_cluster, remaining, metrics = self.clustering.cluster(distance_provider, target_indices, sequences)
         
         gap_history = metrics['gap_history']
         
