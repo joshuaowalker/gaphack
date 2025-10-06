@@ -84,14 +84,12 @@ class TestInterruptionEdgeCases:
         output_dir = tmp_path / "output"
         output_dir.mkdir()
 
-        # Run clustering with resolve_conflicts and refine_close_clusters enabled
-        # but stop early with max_clusters limit
+        # Run clustering (decompose no longer has refinement parameters)
+        # Stop early with max_clusters limit
         decomposer = DecomposeClustering(
             min_split=0.005,
             max_lump=0.02,
             target_percentile=95,
-            resolve_conflicts=False,  # Disabled to simplify test
-            refine_close_clusters=False,  # Disabled to simplify test
             show_progress=False
         )
 
@@ -106,10 +104,6 @@ class TestInterruptionEdgeCases:
         # Verify clustering ran but stopped at limit
         assert results.total_iterations >= 3
         assert len(results.clusters) >= 3
-
-        # Since refinement is disabled, processing_stages should be empty
-        assert len(results.processing_stages) == 0, \
-            f"No refinement stages should run when disabled"
 
         # Verify state file shows in_progress status
         from gaphack.state import DecomposeState
@@ -139,14 +133,12 @@ class TestInterruptionEdgeCases:
         output_dir = tmp_path / "output"
         output_dir.mkdir()
 
-        # Run clustering with conflict resolution enabled
-        # (conflict resolution uses core gapHACk which may use multiprocessing)
+        # Run clustering (decompose no longer has refinement parameters)
         from gaphack.decompose import DecomposeClustering
         decomposer = DecomposeClustering(
             min_split=0.005,
             max_lump=0.02,
             target_percentile=95,
-            resolve_conflicts=True,  # This triggers core gapHACk
             show_progress=False
         )
 

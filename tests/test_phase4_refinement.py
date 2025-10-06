@@ -1,11 +1,14 @@
 """Tests for Phase 4: Staged Refinement capability.
 
 This test suite validates:
-1. Applying conflict resolution to resumed clustering
-2. Applying close cluster refinement to resumed clustering
-3. Chaining refinement stages
+1. Applying conflict resolution using gaphack-refine CLI
+2. Applying close cluster refinement using gaphack-refine CLI
+3. Chaining refinement stages across decompose and refine
 4. Tracking refinement history in state
-5. Stage completion flags
+5. Verifying MECE property after refinement
+
+NOTE: These tests now use the gaphack-refine CLI to test refinement functionality
+that has been separated from gaphack-decompose.
 """
 
 import pytest
@@ -17,8 +20,8 @@ from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
 from gaphack.decompose import DecomposeClustering
-from gaphack.resume import resume_decompose
 from gaphack.state import DecomposeState
+from test_phase4_integration import CLIRunner
 
 
 @pytest.fixture
@@ -95,21 +98,19 @@ def test_apply_conflict_resolution_after_initial_clustering(sample_fasta, temp_o
     """Test applying conflict resolution to completed initial clustering.
 
     Scenario:
-    1. Run initial clustering without conflict resolution
-    2. Resume with resolve_conflicts=True
+    1. Run gaphack-decompose (initial clustering only)
+    2. Run gaphack-refine for conflict resolution
     3. Verify conflicts are resolved
-    4. Verify state tracks conflict resolution completion
+    4. Verify MECE property
     """
     output_dir = temp_output_dir / "test_conflict_resolution"
     output_dir.mkdir()
 
-    # Step 1: Initial clustering without conflict resolution
-    # Run to completion (no max_clusters limit)
+    # Step 1: Run gaphack-decompose (initial clustering only)
     decomposer = DecomposeClustering(
         min_split=0.01,
         max_lump=0.05,
         target_percentile=95,
-        resolve_conflicts=False,  # Explicitly disable
         show_progress=False
     )
 
@@ -118,53 +119,53 @@ def test_apply_conflict_resolution_after_initial_clustering(sample_fasta, temp_o
         output_dir=str(output_dir)
     )
 
-    # Verify state shows initial clustering complete
-    state = DecomposeState.load(output_dir)
-    assert state.initial_clustering.completed, "Initial clustering should be marked complete"
-    assert state.stage == "initial_clustering"
-    assert not state.conflict_resolution.completed, "Conflict resolution should not be complete"
+    # Verify initial clustering completed
+    initial_clusters_dir = output_dir / "work" / "initial"
+    assert initial_clusters_dir.exists(), "Initial clusters directory should exist"
+    initial_files = list(initial_clusters_dir.glob("cluster_*.fasta"))
+    assert len(initial_files) > 0, "Initial cluster files should exist"
 
-    # Step 2: Resume with conflict resolution
-    results_after = resume_decompose(
-        output_dir=output_dir,
-        resolve_conflicts=True
+    # Step 2: Run gaphack-refine for conflict resolution
+    refine_output = temp_output_dir / "refined_conflict_resolution"
+    result = CLIRunner.run_gaphack_refine(
+        input_dir=initial_clusters_dir,
+        output_dir=refine_output,
+        no_timestamp=True  # Write directly to output_dir
     )
 
-    # Step 3: Verify state after conflict resolution
-    state_after = DecomposeState.load(output_dir)
-    assert state_after.conflict_resolution.completed, "Conflict resolution should be marked complete"
-    assert state_after.stage == "conflict_resolution"
-    assert state_after.conflict_resolution.conflicts_after == 0, "All conflicts should be resolved"
+    # Step 3: Verify refinement succeeded
+    assert result['returncode'] == 0, f"Refine should succeed. stderr: {result['stderr']}"
 
-    # If there were conflicts, deconflicted files should exist
-    # If there were no conflicts, files aren't created (stage_directory stays as initial)
-    if state_after.conflict_resolution.conflicts_before > 0:
-        deconflicted_files = list((output_dir / "work/deconflicted").glob("*.fasta"))
-        assert len(deconflicted_files) > 0, "Deconflicted cluster files should exist when conflicts resolved"
-        assert state_after.conflict_resolution.stage_directory == "work/deconflicted"
-    else:
-        # No conflicts - stage_directory should remain as initial clustering
-        assert state_after.conflict_resolution.stage_directory == "work/initial"
+    # Check that refined clusters exist
+    refined_files = list(refine_output.glob("cluster_*.fasta"))
+    assert len(refined_files) > 0, "Refined cluster files should exist"
+
+    # Step 4: Verify MECE property (no sequence appears in multiple clusters)
+    all_sequences = set()
+    for cluster_file in refined_files:
+        cluster_sequences = {record.id for record in SeqIO.parse(cluster_file, "fasta")}
+        overlap = all_sequences & cluster_sequences
+        assert len(overlap) == 0, f"MECE violation: sequences {overlap} appear in multiple clusters"
+        all_sequences.update(cluster_sequences)
 
 
 def test_apply_close_cluster_refinement_after_initial_clustering(sample_fasta, temp_output_dir):
     """Test applying close cluster refinement to completed clustering.
 
     Scenario:
-    1. Run initial clustering without refinement
-    2. Resume with refine_close_clusters parameter
+    1. Run gaphack-decompose (initial clustering only)
+    2. Run gaphack-refine with close cluster refinement
     3. Verify clusters are refined
-    4. Verify state tracks refinement completion
+    4. Verify MECE property
     """
     output_dir = temp_output_dir / "test_close_refinement"
     output_dir.mkdir()
 
-    # Step 1: Initial clustering without refinement
+    # Step 1: Run gaphack-decompose
     decomposer = DecomposeClustering(
         min_split=0.01,
         max_lump=0.05,
         target_percentile=95,
-        refine_close_clusters=False,
         show_progress=False
     )
 
@@ -173,59 +174,55 @@ def test_apply_close_cluster_refinement_after_initial_clustering(sample_fasta, t
         output_dir=str(output_dir)
     )
 
-    # Verify state
-    state = DecomposeState.load(output_dir)
-    assert state.initial_clustering.completed
-    clusters_before = state.initial_clustering.total_clusters
+    # Verify initial clustering completed
+    initial_clusters_dir = output_dir / "work" / "initial"
+    assert initial_clusters_dir.exists(), "Initial clusters directory should exist"
+    initial_files = list(initial_clusters_dir.glob("cluster_*.fasta"))
+    assert len(initial_files) > 0, "Initial cluster files should exist"
+    clusters_before = len(initial_files)
 
-    # Step 2: Resume with close cluster refinement
-    results_after = resume_decompose(
-        output_dir=output_dir,
-        refine_close_clusters=0.05
+    # Step 2: Run gaphack-refine with close cluster refinement
+    refine_output = temp_output_dir / "refined_close_clusters"
+    result = CLIRunner.run_gaphack_refine(
+        input_dir=initial_clusters_dir,
+        output_dir=refine_output,
+        refine_close_clusters=0.05,
+        no_timestamp=True
     )
 
-    # Step 3: Verify state after refinement
-    state_after = DecomposeState.load(output_dir)
-    assert state_after.close_cluster_refinement.completed, "Refinement should be marked complete"
-    assert state_after.stage == "close_cluster_refinement"
-    assert state_after.close_cluster_refinement.threshold == 0.05
+    # Step 3: Verify refinement succeeded
+    assert result['returncode'] == 0, f"Refine should succeed. stderr: {result['stderr']}"
 
-    # If refinement found clusters to refine, check that refined files exist
-    # If no clusters needed refinement, stage_directory may still point to initial
-    if state_after.close_cluster_refinement.stage_directory == "work/refined_1":
-        # Refinement occurred - verify files exist
-        refined_files = list((output_dir / "work/refined_1").glob("*.fasta"))
-        assert len(refined_files) > 0, "Refined cluster files should exist when refinement occurred"
-    else:
-        # No refinement needed - stage_directory should still point to previous stage
-        assert state_after.close_cluster_refinement.stage_directory in ["work/initial", "work/deconflicted"]
+    # Check that refined clusters exist
+    refined_files = list(refine_output.glob("cluster_*.fasta"))
+    assert len(refined_files) > 0, "Refined cluster files should exist"
 
-    # Verify refinement history
-    assert len(state_after.close_cluster_refinement.refinement_history) == 1
-    history_entry = state_after.close_cluster_refinement.refinement_history[0]
-    assert history_entry['threshold'] == 0.05
-    assert 'timestamp' in history_entry
+    # Step 4: Verify MECE property
+    all_sequences = set()
+    for cluster_file in refined_files:
+        cluster_sequences = {record.id for record in SeqIO.parse(cluster_file, "fasta")}
+        overlap = all_sequences & cluster_sequences
+        assert len(overlap) == 0, f"MECE violation: sequences {overlap} appear in multiple clusters"
+        all_sequences.update(cluster_sequences)
 
 
 def test_chained_refinement_stages(sample_fasta, temp_output_dir):
     """Test chaining multiple refinement stages.
 
     Scenario:
-    1. Run initial clustering
-    2. Apply conflict resolution
-    3. Apply close cluster refinement (should chain on deconflicted results)
-    4. Verify each stage updates correctly
+    1. Run gaphack-decompose (initial clustering)
+    2. Run gaphack-refine with conflict resolution
+    3. Run gaphack-refine again with close cluster refinement on deconflicted results
+    4. Verify MECE property is maintained throughout
     """
     output_dir = temp_output_dir / "test_chained_refinement"
     output_dir.mkdir()
 
-    # Step 1: Initial clustering
+    # Step 1: Run gaphack-decompose
     decomposer = DecomposeClustering(
         min_split=0.01,
         max_lump=0.05,
         target_percentile=95,
-        resolve_conflicts=False,
-        refine_close_clusters=False,
         show_progress=False
     )
 
@@ -234,35 +231,53 @@ def test_chained_refinement_stages(sample_fasta, temp_output_dir):
         output_dir=str(output_dir)
     )
 
-    state_1 = DecomposeState.load(output_dir)
-    clusters_initial = state_1.initial_clustering.total_clusters
+    # Verify initial clustering
+    initial_clusters_dir = output_dir / "work" / "initial"
+    assert initial_clusters_dir.exists()
+    initial_files = list(initial_clusters_dir.glob("cluster_*.fasta"))
+    assert len(initial_files) > 0
 
-    # Step 2: Apply conflict resolution
-    resume_decompose(output_dir=output_dir, resolve_conflicts=True)
+    # Step 2: Apply conflict resolution with gaphack-refine
+    refine_output_1 = temp_output_dir / "refined_stage1"
+    result_1 = CLIRunner.run_gaphack_refine(
+        input_dir=initial_clusters_dir,
+        output_dir=refine_output_1,
+        no_timestamp=True
+    )
+    assert result_1['returncode'] == 0, f"First refinement should succeed. stderr: {result_1['stderr']}"
 
-    state_2 = DecomposeState.load(output_dir)
-    assert state_2.conflict_resolution.completed
-    assert state_2.stage == "conflict_resolution"
-    clusters_deconflicted = state_2.conflict_resolution.total_clusters
+    # Verify MECE after conflict resolution
+    all_sequences_1 = set()
+    refined_files_1 = list(refine_output_1.glob("cluster_*.fasta"))
+    assert len(refined_files_1) > 0
+    for cluster_file in refined_files_1:
+        cluster_sequences = {record.id for record in SeqIO.parse(cluster_file, "fasta")}
+        overlap = all_sequences_1 & cluster_sequences
+        assert len(overlap) == 0, f"MECE violation after stage 1: {overlap}"
+        all_sequences_1.update(cluster_sequences)
 
-    # Step 3: Apply close cluster refinement (should use deconflicted results)
-    resume_decompose(output_dir=output_dir, refine_close_clusters=0.05)
+    # Step 3: Apply close cluster refinement on deconflicted results
+    refine_output_2 = temp_output_dir / "refined_stage2"
+    result_2 = CLIRunner.run_gaphack_refine(
+        input_dir=refine_output_1,
+        output_dir=refine_output_2,
+        refine_close_clusters=0.05,
+        no_timestamp=True
+    )
+    assert result_2['returncode'] == 0, f"Second refinement should succeed. stderr: {result_2['stderr']}"
 
-    state_3 = DecomposeState.load(output_dir)
-    assert state_3.close_cluster_refinement.completed
-    assert state_3.stage == "close_cluster_refinement"
+    # Verify MECE after close cluster refinement
+    all_sequences_2 = set()
+    refined_files_2 = list(refine_output_2.glob("cluster_*.fasta"))
+    assert len(refined_files_2) > 0
+    for cluster_file in refined_files_2:
+        cluster_sequences = {record.id for record in SeqIO.parse(cluster_file, "fasta")}
+        overlap = all_sequences_2 & cluster_sequences
+        assert len(overlap) == 0, f"MECE violation after stage 2: {overlap}"
+        all_sequences_2.update(cluster_sequences)
 
-    # Verify clusters_before for refinement stage matches deconflicted output
-    assert state_3.close_cluster_refinement.clusters_before == clusters_deconflicted
-
-    # Verify initial stage files exist
-    initial_dir = output_dir / "work/initial"
-    if initial_dir.exists():
-        assert len(list(initial_dir.glob("*.fasta"))) > 0
-
-    # Deconflicted files may not exist if no conflicts found
-    # Refined files may not exist if clusters were already optimal
-    # The important thing is that stages completed successfully
+    # Verify all sequences are present in final output
+    assert all_sequences_1 == all_sequences_2, "All sequences should be preserved across refinement stages"
 
 
 if __name__ == "__main__":

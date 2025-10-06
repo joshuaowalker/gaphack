@@ -99,7 +99,7 @@ def save_decompose_results(results: DecomposeResults, output_dir,
     """Save decomposition clustering results to files in timestamp-based directory.
 
     Creates:
-        output_dir/clusters/{timestamp}/cluster_00001.fasta, cluster_00002.fasta, ...
+        output_dir/clusters/{timestamp}/cluster_00001I.fasta, cluster_00002I.fasta, ...
         output_dir/clusters/latest -> {timestamp}/ (symlink)
 
     Args:
@@ -161,7 +161,7 @@ def save_decompose_results(results: DecomposeResults, output_dir,
         latest_symlink.unlink()
     latest_symlink.symlink_to(timestamp, target_is_directory=True)
 
-    # Save FASTA files with sequential numbering
+    # Save FASTA files using original cluster IDs
     if all_headers:
         from Bio.Seq import Seq
         from Bio.SeqRecord import SeqRecord
@@ -169,11 +169,9 @@ def save_decompose_results(results: DecomposeResults, output_dir,
 
         header_to_idx = {header: i for i, header in enumerate(all_headers)}
 
-        # Sort clusters by size (largest first) for consistent numbering
-        sorted_clusters = sorted(results.all_clusters.items(), key=lambda x: len(x[1]), reverse=True)
-
-        for cluster_num, (cluster_id, cluster_headers) in enumerate(sorted_clusters, start=1):
-            cluster_file = timestamp_dir / f"cluster_{cluster_num:05d}.fasta"
+        # Use original cluster IDs in filenames (e.g., cluster_00001I.fasta)
+        for cluster_id, cluster_headers in results.all_clusters.items():
+            cluster_file = timestamp_dir / f"{cluster_id}.fasta"
 
             records = []
             for header in cluster_headers:
@@ -271,16 +269,7 @@ def save_decompose_results(results: DecomposeResults, output_dir,
         f.write(f"Unassigned sequences: {len(results.unassigned)}\n")
         f.write(f"Conflicts detected: {len(results.conflicts)}\n\n")
 
-        # Verification results
-        if results.verification_results:
-            f.write("Verification Summary:\n")
-            f.write("-" * 20 + "\n")
-            for stage, verification in results.verification_results.items():
-                f.write(f"{stage.title()}: {verification['conflict_count']} conflicts, "
-                       f"Conflict-free: {verification['no_conflicts']}\n")
-            f.write("\n")
-
-        # Iteration summary with active cluster IDs (moved after verification)
+        # Iteration summary
         if results.iteration_summaries:
             f.write("Iteration Summary:\n")
             f.write("-" * 20 + "\n")
@@ -293,69 +282,6 @@ def save_decompose_results(results: DecomposeResults, output_dir,
                        f"gap_size={summary['gap_size']:.4f}, "
                        f"cluster_name={cluster_name}\n")
             f.write("\n")
-
-        # Processing stages (conflict resolution and close cluster refinement)
-        if results.processing_stages:
-            for stage_info in results.processing_stages:
-                f.write(f"{stage_info.stage_name}:\n")
-                f.write("-" * (len(stage_info.stage_name) + 1) + "\n")
-
-                # Stage summary
-                stats = stage_info.summary_stats
-                before_count = stats.get('clusters_before_count', 0)
-                after_count = stats.get('clusters_after_count', 0)
-                change = after_count - before_count
-
-                f.write(f"Clusters before: {before_count}\n")
-                f.write(f"Clusters after: {after_count}\n")
-                f.write(f"Net change: {change:+d}\n")
-
-                if 'conflicts_count' in stats:  # Conflict resolution
-                    f.write(f"Conflicts resolved: {stats['conflicts_count']}\n")
-                    f.write(f"Components processed: {stats.get('components_processed_count', 0)}\n")
-                    f.write(f"Remaining conflicts: {stats.get('remaining_conflicts_count', 0)}\n")
-
-                if 'close_pairs_found' in stats:  # Close cluster refinement
-                    f.write(f"Close pairs found: {stats['close_pairs_found']}\n")
-                    f.write(f"Close threshold: {stats.get('close_threshold', 'N/A')}\n")
-                    f.write(f"Components processed: {stats.get('components_processed_count', 0)}\n")
-
-                # Component-by-component transformations will be shown in Component Details section below
-
-                # Component details
-                if stage_info.components_processed:
-                    f.write(f"\nComponent Details:\n")
-                    for comp in stage_info.components_processed:
-                        status = "✓ processed" if comp.get('processed', False) else "✗ skipped"
-                        f.write(f"  Component {comp['component_index']}: "
-                               f"{comp['clusters_before_count']} → {comp['clusters_after_count']} clusters "
-                               f"({status})\n")
-                        if 'skipped_reason' in comp:
-                            f.write(f"    Reason: {comp['skipped_reason']}\n")
-                        # Show source → destination cluster mapping
-                        if 'clusters_before' in comp:
-                            f.write(f"    Source: {', '.join(sorted(comp['clusters_before']))}\n")
-                        if 'clusters_after' in comp and comp.get('processed', False):
-                            f.write(f"    Result: {', '.join(sorted(comp['clusters_after']))}\n")
-                f.write("\n")
-
-        # Active to final cluster mapping
-        if results.active_to_final_mapping:
-            f.write("Active to Final Cluster Mapping:\n")
-            f.write("-" * 35 + "\n")
-            # Group by final cluster for better readability
-            final_to_active = {}
-            for active_id, final_id in results.active_to_final_mapping.items():
-                if final_id not in final_to_active:
-                    final_to_active[final_id] = []
-                final_to_active[final_id].append(active_id)
-
-            for final_id in sorted(final_to_active.keys()):
-                active_list = final_to_active[final_id]
-                f.write(f"{final_id}: {', '.join(sorted(active_list))}\n")
-            f.write("\n")
-
-
 
         # Conflicts (if any)
         if results.conflicts:
@@ -445,12 +371,6 @@ Examples:
                        help='Maximum distance to lump clusters (default: 0.02)')
     parser.add_argument('--target-percentile', type=int, default=95,
                        help='Percentile for gap optimization (default: 95)')
-    
-    # Conflict resolution arguments
-    parser.add_argument('--resolve-conflicts', action='store_true',
-                       help='Enable cluster refinement for conflict resolution using full gapHACk (minimal scope)')
-    parser.add_argument('--refine-close-clusters', type=float, default=0.0, metavar='DISTANCE',
-                       help='Enable close cluster refinement with distance threshold (0.0 = disabled, e.g. 0.02 for 2%% distance)')
 
     # Finalization arguments
     parser.add_argument('--finalize', action='store_true',
@@ -515,8 +435,6 @@ Examples:
                 output_dir=output_dir,
                 max_clusters=args.max_clusters,
                 max_sequences=args.max_sequences,
-                resolve_conflicts=args.resolve_conflicts,
-                refine_close_clusters=args.refine_close_clusters,
                 force_input_change=args.force_input_change,
                 checkpoint_interval=args.checkpoint_interval,
                 show_progress=not args.no_progress
@@ -605,9 +523,6 @@ Examples:
         blast_threads=args.blast_threads,
         blast_evalue=args.blast_evalue,
         min_identity=args.min_identity,
-        resolve_conflicts=args.resolve_conflicts,
-        refine_close_clusters=args.refine_close_clusters > 0.0,
-        close_cluster_threshold=args.refine_close_clusters,
         search_method=args.search_method,
         show_progress=not args.no_progress,
         logger=logger

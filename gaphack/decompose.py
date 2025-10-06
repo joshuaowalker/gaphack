@@ -77,13 +77,8 @@ class DecomposeResults:
     total_iterations: int = 0
     total_sequences_processed: int = 0
     coverage_percentage: float = 0.0
-    verification_results: Dict[str, Dict] = field(default_factory=dict)  # comprehensive conflict verification results
-
-    # Enhanced tracking for debugging
-    processing_stages: List[ProcessingStageInfo] = field(default_factory=list)  # conflict resolution, refinement stages
-    active_to_final_mapping: Dict[str, str] = field(default_factory=dict)       # active_id -> final_id
-    command_line: str = ""                                                        # command used to run decompose
-    start_time: str = ""                                                         # ISO timestamp of run start
+    command_line: str = ""  # command used to run decompose
+    start_time: str = ""  # ISO timestamp of run start
 
 
 class AssignmentTracker:
@@ -150,9 +145,6 @@ class DecomposeClustering:
                  blast_threads: Optional[int] = None,
                  blast_evalue: float = 1e-5,
                  min_identity: Optional[float] = None,
-                 resolve_conflicts: bool = False,
-                 refine_close_clusters: bool = False,
-                 close_cluster_threshold: float = 0.0,
                  search_method: str = "blast",
                  show_progress: bool = True,
                  logger: Optional[logging.Logger] = None):
@@ -166,9 +158,6 @@ class DecomposeClustering:
             blast_threads: BLAST/vsearch thread count (auto if None)
             blast_evalue: BLAST e-value threshold (vsearch uses min_identity only)
             min_identity: BLAST/vsearch identity threshold (auto if None)
-            resolve_conflicts: Enable cluster refinement for conflict resolution with minimal scope (default: False)
-            refine_close_clusters: Enable cluster refinement for close cluster refinement (default: False)
-            close_cluster_threshold: Distance threshold for close cluster refinement and scope expansion (default: 0.0)
             search_method: Search method for neighborhood discovery: 'blast' or 'vsearch' (default: 'blast')
             show_progress: Show progress bars
             logger: Logger instance
@@ -180,11 +169,7 @@ class DecomposeClustering:
         self.blast_threads = blast_threads
         self.blast_evalue = blast_evalue
         self.min_identity = min_identity
-        self.resolve_conflicts = resolve_conflicts
-        self.refine_close_clusters = refine_close_clusters
-        self.close_cluster_threshold = close_cluster_threshold
         self.search_method = search_method
-        self.knn_neighbors = 20  # Hardcoded for K-NN cluster graph
         self.show_progress = show_progress
         self.logger = logger or logging.getLogger(__name__)
 
@@ -307,10 +292,7 @@ class DecomposeClustering:
                         "blast_evalue": self.blast_evalue,
                         "min_identity": self.min_identity,
                         "max_clusters": max_clusters,
-                        "max_sequences": max_sequences,
-                        "resolve_conflicts": self.resolve_conflicts,
-                        "refine_close_clusters": self.refine_close_clusters,
-                        "close_cluster_threshold": self.close_cluster_threshold
+                        "max_sequences": max_sequences
                     }
 
                     # Create initial state
@@ -752,102 +734,24 @@ class DecomposeClustering:
                     # Return results immediately without refinement
                     return results
 
-                # Perform initial conflict verification after decomposition
-                initial_verification = self._verify_no_conflicts(results.all_clusters, results.conflicts, "after_decomposition")
-            
-                # Store original conflicts for tracking resolution progress
-                original_conflicts = results.conflicts.copy() if results.conflicts else {}
-            
-                # Apply cluster refinement for conflict resolution if enabled
-                if getattr(self, 'resolve_conflicts', False) and results.conflicts:
-                    self.logger.info(f"Starting cluster refinement for {len(results.conflicts)} conflicts")
-                    results = self._resolve_conflicts(results, sequences, headers)
-
-                    # Verify conflict resolution effectiveness
-                    if original_conflicts:
-                        post_resolution_verification = self._verify_no_conflicts(
-                            results.all_clusters, original_conflicts, "after_conflict_resolution"
-                        )
-
-                    # Save intermediate output after conflict resolution
-                    if output_dir:
-                        # Expand hash IDs temporarily for saving
-                        expanded_results = self._expand_hash_ids_to_headers(results, hash_to_headers)
-                        from .decompose_cli import save_decompose_results
-                        save_decompose_results(expanded_results, output_dir, input_fasta)
-                        self.logger.info("Intermediate output saved after conflict resolution in clusters/latest/")
-
-                # Apply cluster refinement for close cluster refinement if enabled
-                if getattr(self, 'refine_close_clusters', False):
-                    self.logger.info("Starting cluster refinement for close cluster refinement")
-                    results = self._refine_close_clusters_via_refinement(results, sequences, headers)
-
-                    # Save intermediate output after close cluster refinement
-                    if output_dir:
-                        # Expand hash IDs temporarily for saving
-                        expanded_results = self._expand_hash_ids_to_headers(results, hash_to_headers)
-                        from .decompose_cli import save_decompose_results
-                        save_decompose_results(expanded_results, output_dir, input_fasta)
-                        self.logger.info("Intermediate output saved after close cluster refinement in clusters/latest/")
-            
                 # Expand hash IDs back to original headers
                 results = self._expand_hash_ids_to_headers(results, hash_to_headers)
-            
-                # CRITICAL: Always perform final comprehensive conflict verification
-                # This runs regardless of whether initial conflicts were detected or resolved
-                # to catch any conflicts that may have been missed or introduced during processing
-                self.logger.info("Performing final comprehensive conflict verification (always runs regardless of initial conflict status)")
-                final_verification = self._verify_no_conflicts(results.all_clusters, original_conflicts, "final_comprehensive")
-            
-                # Store verification results in the results object for external access
-                results.verification_results = {
-                    'initial': initial_verification,
-                    'final': final_verification
-                }
-            
-                # Add post-resolution verification if conflict resolution was performed
-                if getattr(self, 'resolve_conflicts', False) and original_conflicts and 'post_resolution_verification' in locals():
-                    results.verification_results['post_resolution'] = post_resolution_verification
-            
-                # Update final results based on comprehensive verification findings
-                # The final verification is the authoritative source of truth for conflicts
-                if final_verification.get('critical_failure', False):
-                    # Override the conflicts field with what final verification actually found
-                    results.conflicts = final_verification['conflicts']
-                    self.logger.warning(f"Final verification detected {len(final_verification['conflicts'])} conflicts that were missed by initial detection!")
-            
-                # Always update the conflicts field with the final verification results for accuracy
-                # This ensures the output reflects the true state regardless of intermediate processing
-                results.conflicts = final_verification['conflicts']
-            
-                # Log final status
-                if final_verification['no_conflicts']:
-                    self.logger.info("🎉 Final verification confirms conflict-free clustering achieved")
-                else:
-                    self.logger.error(f"❌ Final verification reveals {len(final_verification['conflicts'])} conflicts in output")
-            
-                # Final renumbering: internal names (initial_xxx, deconflicted_xxx, refined_xxx) -> cluster_xxx
-                # This is the only renumbering, creating a clean 1:1 mapping for output
-                self.logger.info("Applying final cluster renumbering for output")
-                final_clusters, final_mapping = self._renumber_clusters_sequentially(results.all_clusters)
-            
-                results.all_clusters = final_clusters
-                # For results.clusters, we need to rebuild from non-conflicted sequences
-                # since the cluster IDs have changed
+
+                # Report conflict status (informational - not an error)
                 if results.conflicts:
-                    # Rebuild clusters dict excluding conflicted sequences
-                    results.clusters = {}
-                    for cluster_id, headers in final_clusters.items():
-                        non_conflicted_headers = [h for h in headers if h not in results.conflicts]
-                        if non_conflicted_headers:
-                            results.clusters[cluster_id] = non_conflicted_headers
+                    self.logger.info(f"ℹ️  {len(results.conflicts)} conflicts detected (sequences assigned to multiple clusters)")
+                    self.logger.info(f"   These can be resolved using: gaphack-refine {output_dir_path} --resolve-conflicts")
                 else:
-                    results.clusters = final_clusters.copy()
-            
-                results.active_to_final_mapping = final_mapping
-            
-                self.logger.debug(f"Final renumbering: {len(final_mapping)} internal clusters -> {len(final_clusters)} output clusters")
-            
+                    self.logger.info("✓ No conflicts detected - clustering is clean")
+
+                # Initial clustering complete
+                self.logger.info(f"\nInitial clustering complete:")
+                self.logger.info(f"  Clusters: {len(results.all_clusters)}")
+                self.logger.info(f"  Sequences assigned: {results.total_sequences_processed}")
+                self.logger.info(f"  Unassigned: {len(results.unassigned)}")
+                self.logger.info(f"  Conflicts: {len(results.conflicts)}")
+                self.logger.info(f"  Output: {output_dir_path}/work/initial/")
+
                 return results
 
         finally:
@@ -1038,12 +942,9 @@ class DecomposeClustering:
         expanded_results.coverage_percentage = results.coverage_percentage
         expanded_results.iteration_summaries = results.iteration_summaries
 
-        # Copy enhanced tracking fields
-        expanded_results.processing_stages = results.processing_stages
-        expanded_results.active_to_final_mapping = results.active_to_final_mapping
+        # Copy tracking fields
         expanded_results.command_line = results.command_line
         expanded_results.start_time = results.start_time
-        expanded_results.verification_results = results.verification_results
 
         # Expand clusters
         for cluster_id, hash_ids in results.clusters.items():
@@ -1085,169 +986,6 @@ class DecomposeClustering:
                 expanded_results.conflicts[hash_id] = cluster_ids
 
         return expanded_results
-
-    def _resolve_conflicts(self, results: DecomposeResults,
-                                          sequences: List[str], headers: List[str]) -> DecomposeResults:
-        """Resolve conflicts using cluster refinement with full gapHACk.
-
-        Args:
-            results: Current decomposition results with conflicts
-            sequences: Full sequence list
-            headers: Full header list
-
-        Returns:
-            Updated DecomposeResults with conflicts resolved
-        """
-        from .cluster_refinement import resolve_conflicts, RefinementConfig
-
-        # Create refinement configuration for minimal conflict resolution
-        config = RefinementConfig(
-            max_full_gaphack_size=300  # Conservative limit for performance
-        )
-
-        # Apply conflict resolution (no proximity graph needed - uses minimal scope only)
-        conflict_id_generator = ClusterIDGenerator(stage_name="deconflicted")
-        resolved_clusters, conflict_tracking = resolve_conflicts(
-            conflicts=results.conflicts,
-            all_clusters=results.all_clusters,
-            sequences=sequences,
-            headers=headers,
-            config=config,
-            min_split=self.min_split,
-            max_lump=self.max_lump,
-            target_percentile=self.target_percentile,
-            cluster_id_generator=conflict_id_generator
-        )
-
-        # Rebuild results with resolved clusters
-        new_results = DecomposeResults()
-        new_results.iteration_summaries = results.iteration_summaries
-        new_results.total_iterations = results.total_iterations
-        new_results.total_sequences_processed = results.total_sequences_processed
-        new_results.coverage_percentage = results.coverage_percentage
-
-        # Keep internal cluster names (deconflicted_xxx) - no renumbering yet
-        # Final renumbering will happen at the end of decompose()
-        new_results.all_clusters = resolved_clusters
-        new_results.clusters = resolved_clusters  # No conflicts after resolution
-
-        # No active_to_final_mapping yet - that will be created during final renumbering
-        new_results.active_to_final_mapping = {}
-
-        # Add conflict resolution tracking info
-        new_results.processing_stages = results.processing_stages.copy()
-        new_results.processing_stages.append(conflict_tracking)
-
-        # Preserve command line and start time
-        new_results.command_line = results.command_line
-        new_results.start_time = results.start_time
-
-        # Clear conflicts since they've been resolved
-        new_results.conflicts = {}
-
-        # Keep original unassigned sequences
-        new_results.unassigned = results.unassigned
-
-        self.logger.info(f"Conflict resolution complete: {len(results.conflicts)} conflicts resolved, "
-                        f"{len(results.all_clusters)} -> {len(new_results.all_clusters)} clusters")
-
-        return new_results
-
-    def _refine_close_clusters_via_refinement(self, results: DecomposeResults,
-                                              sequences: List[str], headers: List[str]) -> DecomposeResults:
-        """Refine close clusters using cluster refinement with full gapHACk.
-
-        Args:
-            results: Current decomposition results
-            sequences: Full sequence list
-            headers: Full header list
-
-        Returns:
-            Updated DecomposeResults with close clusters refined
-        """
-        from .cluster_refinement import refine_close_clusters, RefinementConfig
-        from .cluster_graph import ClusterGraph
-
-        # Create proximity graph for cluster proximity queries
-        proximity_graph = self._create_proximity_graph(results.all_clusters, sequences, headers)
-
-        # Create refinement configuration with user-provided threshold
-        config = RefinementConfig(
-            max_full_gaphack_size=300,  # Conservative limit for performance
-            close_cluster_expansion_threshold=self.close_cluster_threshold  # User-controlled expansion threshold
-        )
-
-        # Apply close cluster refinement
-        refinement_id_generator = ClusterIDGenerator(stage_name="refined", refinement_count=0)
-        refined_clusters, refinement_tracking = refine_close_clusters(
-            all_clusters=results.all_clusters,
-            sequences=sequences,
-            headers=headers,
-            proximity_graph=proximity_graph,
-            config=config,
-            min_split=self.min_split,
-            max_lump=self.max_lump,
-            target_percentile=self.target_percentile,
-            close_threshold=self.max_lump,  # Use max_lump as close threshold
-            cluster_id_generator=refinement_id_generator
-        )
-
-        # Rebuild results with refined clusters
-        new_results = DecomposeResults()
-        new_results.iteration_summaries = results.iteration_summaries
-        new_results.total_iterations = results.total_iterations
-        new_results.total_sequences_processed = results.total_sequences_processed
-        new_results.coverage_percentage = results.coverage_percentage
-
-        # Keep internal cluster names (refined_xxx) - no renumbering yet
-        # Final renumbering will happen at the end of decompose()
-        new_results.all_clusters = refined_clusters
-        new_results.clusters = refined_clusters  # No conflicts expected after refinement
-
-        # No active_to_final_mapping yet - that will be created during final renumbering
-        new_results.active_to_final_mapping = {}
-
-        # Add close cluster refinement tracking info
-        new_results.processing_stages = results.processing_stages.copy()
-        new_results.processing_stages.append(refinement_tracking)
-
-        # Preserve command line and start time
-        new_results.command_line = results.command_line
-        new_results.start_time = results.start_time
-
-        new_results.conflicts = {}  # Close cluster refinement doesn't create conflicts
-        new_results.unassigned = results.unassigned
-
-        self.logger.info(f"Close cluster refinement complete: "
-                        f"{len(results.all_clusters)} -> {len(new_results.all_clusters)} clusters")
-
-        return new_results
-
-    def _create_proximity_graph(self, clusters: Dict[str, List[str]], sequences: List[str],
-                               headers: List[str]) -> 'ClusterGraph':
-        """Create proximity graph based on configuration.
-
-        Args:
-            clusters: Dictionary mapping cluster_id -> list of sequence headers
-            sequences: Full sequence list
-            headers: Full header list
-
-        Returns:
-            ClusterGraph instance
-        """
-        from .cluster_graph import ClusterGraph
-
-        self.logger.info(f"Creating {self.search_method.upper()} K-NN cluster graph with K={self.knn_neighbors}")
-        return ClusterGraph(
-            clusters=clusters,
-            sequences=sequences,
-            headers=headers,
-            k_neighbors=self.knn_neighbors,
-            blast_evalue=self.blast_evalue,  # Use user-specified e-value
-            blast_identity=self.min_identity or 90.0,  # Use user-specified identity or default
-            search_method=self.search_method,  # Use user-specified search method
-            show_progress=self.show_progress
-        )
 
     def _renumber_clusters_sequentially(self, clusters: Dict[str, List[str]]) -> Tuple[Dict[str, List[str]], Dict[str, str]]:
         """Renumber clusters with sequential cluster_XXX naming for consistency.

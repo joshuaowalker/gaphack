@@ -205,6 +205,34 @@ class CLIRunner:
         }
 
     @staticmethod
+    def run_gaphack_refine(input_dir: Path, output_dir: Path = None, **kwargs) -> Dict[str, Any]:
+        """Run gaphack-refine with specified parameters."""
+        if output_dir is None:
+            output_dir = Path(tempfile.mktemp(suffix="_refine_output"))
+
+        cmd = ['python', '-m', 'gaphack.refine_cli', '--input-dir', str(input_dir), '--output-dir', str(output_dir)]
+
+        # Add parameter flags
+        for param, value in kwargs.items():
+            param_name = param.replace('_', '-')
+            if isinstance(value, bool) and value:
+                cmd.append(f'--{param_name}')
+            elif not isinstance(value, bool):
+                cmd.extend([f'--{param_name}', str(value)])
+
+        with PerformanceMonitor() as monitor:
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=Path(__file__).parent.parent)
+
+        return {
+            'returncode': result.returncode,
+            'stdout': result.stdout,
+            'stderr': result.stderr,
+            'output_path': output_dir,
+            'execution_time': monitor.execution_time,
+            'memory_usage': monitor.memory_growth
+        }
+
+    @staticmethod
     def run_gaphack_main(input_path: Path, output_base: Path = None, **kwargs) -> Dict[str, Any]:
         """Run main gaphack clustering tool."""
         if output_base is None:
@@ -245,9 +273,7 @@ class TestPipelineIntegration:
                 RUSSULA_50,
                 output_base,
                 min_split=0.003,
-                max_lump=0.012,
-                resolve_conflicts=True,
-                refine_close_clusters=0.012
+                max_lump=0.012
             )
 
             # Should complete successfully
@@ -270,8 +296,7 @@ class TestPipelineIntegration:
                 RUSSULA_100,
                 output_base,
                 min_split=0.003,
-                max_lump=0.012,
-                resolve_conflicts=True
+                max_lump=0.012
             )
 
             # Should complete successfully
@@ -294,8 +319,7 @@ class TestPipelineIntegration:
 
             result = CLIRunner.run_gaphack_decompose(
                 RUSSULA_50, output_base,
-                min_split=0.003, max_lump=0.012,
-                resolve_conflicts=True
+                min_split=0.003, max_lump=0.012
             )
 
             # Should complete successfully
@@ -367,8 +391,7 @@ class TestGroundTruthValidation:
 
             result = CLIRunner.run_gaphack_decompose(
                 RUSSULA_500, output_base,
-                min_split=0.003, max_lump=0.012,
-                resolve_conflicts=True
+                min_split=0.003, max_lump=0.012
             )
 
             assert result['returncode'] == 0, f"Quality test failed: {result['stderr']}"

@@ -355,8 +355,7 @@ class TestClusteringQuality:
 
             result = CLIRunner.run_gaphack_decompose(
                 RUSSULA_300, output_base,
-                min_split=0.003, max_lump=0.012,
-                resolve_conflicts=True
+                min_split=0.003, max_lump=0.012
             )
 
             assert result['returncode'] == 0

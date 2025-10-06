@@ -9,8 +9,6 @@ from gaphack.state import (
     StateManager,
     InputInfo,
     InitialClusteringStage,
-    ConflictResolutionStage,
-    CloseClusterRefinementStage,
     FinalizedStage,
     compute_file_hash,
     create_initial_state
@@ -69,8 +67,6 @@ class TestDecomposeState:
                 "target_percentile": 95
             },
             initial_clustering=InitialClusteringStage(),
-            conflict_resolution=ConflictResolutionStage(),
-            close_cluster_refinement=CloseClusterRefinementStage(),
             finalized=FinalizedStage(),
             command_history=["gaphack-decompose input.fasta -o output"],
             start_time="2025-01-01T00:00:00",
@@ -113,8 +109,6 @@ class TestDecomposeState:
             ),
             parameters={"min_split": 0.005},
             initial_clustering=InitialClusteringStage(),
-            conflict_resolution=ConflictResolutionStage(),
-            close_cluster_refinement=CloseClusterRefinementStage(),
             finalized=FinalizedStage(),
             command_history=[],
             start_time="2025-01-01T00:00:00",
@@ -136,8 +130,6 @@ class TestDecomposeState:
         assert "parameters" in data
         assert "stages" in data
         assert "initial_clustering" in data["stages"]
-        assert "conflict_resolution" in data["stages"]
-        assert "close_cluster_refinement" in data["stages"]
         assert "finalized" in data["stages"]
         assert "metadata" in data
         assert "command_history" in data["metadata"]
@@ -159,8 +151,6 @@ class TestDecomposeState:
             ),
             parameters={},
             initial_clustering=InitialClusteringStage(),
-            conflict_resolution=ConflictResolutionStage(),
-            close_cluster_refinement=CloseClusterRefinementStage(),
             finalized=FinalizedStage(),
             command_history=[],
             start_time="2025-01-01T00:00:00",
@@ -198,8 +188,6 @@ class TestDecomposeState:
             ),
             parameters={},
             initial_clustering=InitialClusteringStage(),
-            conflict_resolution=ConflictResolutionStage(),
-            close_cluster_refinement=CloseClusterRefinementStage(),
             finalized=FinalizedStage(),
             command_history=[],
             start_time="2025-01-01T00:00:00",

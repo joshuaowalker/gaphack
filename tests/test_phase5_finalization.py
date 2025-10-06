@@ -155,20 +155,19 @@ def test_finalize_after_refinement(sample_fasta, temp_output_dir):
     """Test finalizing after applying refinement stages.
 
     Scenario:
-    1. Run initial clustering
-    2. Apply conflict resolution
-    3. Finalize from deconflicted stage
-    4. Verify source_stage is 'deconflicted'
+    1. Run gaphack-decompose (initial clustering)
+    2. Run gaphack-refine (conflict resolution)
+    3. Verify refined clusters are properly numbered and complete
+    4. Verify MECE property
     """
     output_dir = temp_output_dir / "test_finalize_refinement"
     output_dir.mkdir()
 
-    # Step 1: Initial clustering
+    # Step 1: Run gaphack-decompose
     decomposer = DecomposeClustering(
         min_split=0.01,
         max_lump=0.05,
         target_percentile=95,
-        resolve_conflicts=False,
         show_progress=False
     )
 
@@ -177,36 +176,46 @@ def test_finalize_after_refinement(sample_fasta, temp_output_dir):
         output_dir=str(output_dir)
     )
 
-    # Step 2: Apply conflict resolution
-    resume_decompose(
-        output_dir=output_dir,
-        resolve_conflicts=True
+    # Get initial clusters
+    initial_clusters_dir = output_dir / "work" / "initial"
+    assert initial_clusters_dir.exists(), "Initial clusters directory should exist"
+
+    # Step 2: Run gaphack-refine
+    from test_phase4_integration import CLIRunner
+
+    refine_output = temp_output_dir / "refined_final"
+    result = CLIRunner.run_gaphack_refine(
+        input_dir=initial_clusters_dir,
+        output_dir=refine_output,
+        no_timestamp=True,
+        renumber=True  # Ensure clusters are renumbered by size
     )
 
-    state_before = DecomposeState.load(output_dir)
-    assert state_before.conflict_resolution.completed, "Conflict resolution should be complete"
+    # Step 3: Verify refinement succeeded
+    assert result['returncode'] == 0, f"Refinement should succeed. stderr: {result['stderr']}"
 
-    # Step 3: Finalize
-    finalize_decompose(output_dir=str(output_dir), cleanup=False)
-
-    # Step 4: Verify finalization
-    state_after = DecomposeState.load(output_dir)
-    assert state_after.finalized.completed, "Should be finalized"
-    assert state_after.stage == "finalized"
-
-    # Source stage is determined by which stage completed last
-    # If conflict resolution was applied, source is the pattern from conflict resolution
-    # (which might still be 'initial' if no conflicts, or 'deconflicted' if conflicts existed)
-    assert state_after.finalized.source_stage in ["initial", "deconflicted"], \
-        f"Source stage should be initial or deconflicted, got {state_after.finalized.source_stage}"
-
-    # Verify final files exist
-    latest_dir = output_dir / "clusters/latest"
-    if latest_dir.exists():
-        final_files = [f for f in latest_dir.glob("*.fasta") if f.name != "unassigned.fasta"]
-    else:
-        final_files = list(output_dir.glob("cluster_*.fasta"))
+    # Check that refined/final cluster files exist
+    final_files = sorted(refine_output.glob("cluster_*.fasta"))
     assert len(final_files) > 0, "Final cluster files should exist"
+
+    # Step 4: Verify clusters are ordered by size (largest first)
+    cluster_sizes = []
+    for final_file in final_files:
+        records = list(SeqIO.parse(final_file, "fasta"))
+        cluster_sizes.append(len(records))
+
+    # Check that sizes are non-increasing (largest first)
+    for i in range(len(cluster_sizes) - 1):
+        assert cluster_sizes[i] >= cluster_sizes[i+1], \
+            f"Cluster sizes should be non-increasing: {cluster_sizes}"
+
+    # Step 5: Verify MECE property
+    all_sequences = set()
+    for cluster_file in final_files:
+        cluster_sequences = {record.id for record in SeqIO.parse(cluster_file, "fasta")}
+        overlap = all_sequences & cluster_sequences
+        assert len(overlap) == 0, f"MECE violation: sequences {overlap} appear in multiple clusters"
+        all_sequences.update(cluster_sequences)
 
 
 def test_finalize_with_cleanup(sample_fasta, temp_output_dir):

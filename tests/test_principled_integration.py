@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
-"""Test script for principled reclustering integration with decompose."""
+"""Test script for principled reclustering integration with gaphack-refine.
+
+NOTE: These tests now use the gaphack-refine CLI to test refinement functionality
+that has been separated from gaphack-decompose.
+"""
 
 import tempfile
 import logging
+import pytest
 from pathlib import Path
+from Bio import SeqIO
 
-from gaphack.decompose import DecomposeClustering, DecomposeResults
-from gaphack.cluster_refinement import resolve_conflicts, RefinementConfig, verify_no_conflicts
-from gaphack.cluster_graph import ClusterGraph
+from gaphack.decompose import DecomposeClustering
+from gaphack.cluster_refinement import verify_no_conflicts
+from test_phase4_integration import CLIRunner
 
 
 def create_test_fasta(sequences, filename):
@@ -18,8 +24,8 @@ def create_test_fasta(sequences, filename):
 
 
 def test_conflict_resolution_integration():
-    """Test the basic conflict resolution integration."""
-    print("Testing principled reclustering integration...")
+    """Test the basic conflict resolution integration using gaphack-refine CLI."""
+    print("Testing gaphack-refine conflict resolution integration...")
 
     # Create test sequences that will likely create conflicts
     test_sequences = [
@@ -42,77 +48,76 @@ def test_conflict_resolution_integration():
         targets_fasta = tmpdir / "targets.fasta"
         create_test_fasta([test_sequences[0], test_sequences[3]], targets_fasta)
 
-        # Initialize decomposer with conflict resolution enabled
+        # Step 1: Run gaphack-decompose
+        output_dir = tmpdir / "decompose_output"
         decomposer = DecomposeClustering(
             min_split=0.005,
             max_lump=0.02,  # Low threshold to encourage conflicts
             target_percentile=95,
-            resolve_conflicts=True,  # Enable our new feature
             show_progress=False,
             logger=logging.getLogger(__name__)
         )
 
-        # Run decomposition
         print(f"Running decomposition on {len(test_sequences)} sequences...")
-        results = decomposer.decompose(
+        decomposer.decompose(
             input_fasta=str(input_fasta),
             targets_fasta=str(targets_fasta),
+            output_dir=str(output_dir)
         )
 
-        # Analyze results
-        print(f"Results:")
-        print(f"  Total clusters: {len(results.clusters)}")
-        print(f"  Total sequences processed: {results.total_sequences_processed}")
-        print(f"  Conflicts remaining: {len(results.conflicts)}")
-        print(f"  Unassigned sequences: {len(results.unassigned)}")
+        # Step 2: Run gaphack-refine for conflict resolution
+        initial_clusters_dir = output_dir / "work" / "initial"
+        refine_output = tmpdir / "refined_output"
+        result = CLIRunner.run_gaphack_refine(
+            input_dir=initial_clusters_dir,
+            output_dir=refine_output,
+            no_timestamp=True
+        )
 
-        if results.conflicts:
-            print(f"  Remaining conflicts:")
-            for seq_id, cluster_ids in results.conflicts.items():
-                print(f"    {seq_id}: {cluster_ids}")
-        else:
-            print(f"  ✓ All conflicts resolved!")
+        assert result['returncode'] == 0, f"Refinement should succeed. stderr: {result['stderr']}"
+
+        # Analyze results
+        refined_files = list(refine_output.glob("cluster_*.fasta"))
+        print(f"Results:")
+        print(f"  Total clusters: {len(refined_files)}")
 
         # Verify MECE property
         all_assigned_sequences = set()
-        for cluster_id, cluster_sequences in results.clusters.items():
-            for seq in cluster_sequences:
-                if seq in all_assigned_sequences:
-                    print(f"  ❌ MECE violation: {seq} appears in multiple clusters")
-                    return False
-                all_assigned_sequences.add(seq)
+        for cluster_file in refined_files:
+            cluster_sequences = {record.id for record in SeqIO.parse(cluster_file, "fasta")}
+            overlap = all_assigned_sequences & cluster_sequences
+            if overlap:
+                print(f"  ❌ MECE violation: {overlap} appears in multiple clusters")
+                assert False, f"MECE violation: {overlap}"
+            all_assigned_sequences.update(cluster_sequences)
 
         print(f"  ✓ MECE property verified - no sequence appears in multiple clusters")
-        # Test completed successfully
+        print(f"  ✓ All conflicts resolved!")
 
 
 def test_conflict_resolution_algorithm_directly():
-    """Test the conflict resolution algorithm directly."""
-    print("\nTesting conflict resolution algorithm directly...")
+    """Test the MECE verification algorithm directly."""
+    print("\nTesting MECE verification algorithm directly...")
 
-    # Create mock data with known conflicts
-    sequences = ["ATGC", "ATCC", "TTGG", "TTGG"]
-    headers = ["seq_0", "seq_1", "seq_2", "seq_3"]
-
-    # Create clusters with conflicts (seq_1 in both clusters)
+    # Create clusters with known conflicts (seq_1 in both clusters)
     all_clusters = {
         "cluster_1": ["seq_0", "seq_1"],
         "cluster_2": ["seq_1", "seq_2"],
         "cluster_3": ["seq_3"]
     }
 
-    # Define conflicts
-    conflicts = {
-        "seq_1": ["cluster_1", "cluster_2"]
-    }
-
     print(f"Input clusters: {all_clusters}")
-    print(f"Conflicts: {conflicts}")
 
-    # This would normally require a real distance provider, but for this test
-    # we just verify the integration works
-    print("✓ Conflict resolution algorithm structure is properly integrated")
-    # Test completed successfully
+    # Verify conflicts are detected
+    verification = verify_no_conflicts(all_clusters, context="test")
+    print(f"Conflicts detected: {verification['conflicts']}")
+
+    assert not verification['no_conflicts'], "Should detect conflicts"
+    assert verification['conflict_count'] == 1, "Should detect 1 conflicted sequence"
+    assert "seq_1" in verification['conflicts'], "Should detect seq_1 as conflicted"
+    assert len(verification['conflicts']['seq_1']) == 2, "seq_1 should be in 2 clusters"
+
+    print("✓ MECE verification algorithm works correctly")
 
 
 def test_comprehensive_verification():
@@ -206,10 +211,10 @@ def test_comprehensive_verification():
 
 
 def test_verification_integration():
-    """Test that verification is properly integrated into the decompose workflow."""
-    print("\nTesting verification integration in decompose workflow...")
+    """Test that MECE verification works correctly across decompose and refine."""
+    print("\nTesting MECE verification across decompose and refine workflow...")
 
-    # Create test sequences that will create conflicts
+    # Create test sequences
     test_sequences = [
         "ATGCGATCGATCGATCG",    # seq_0
         "ATGCGATCGATCGATCC",    # seq_1 - similar to seq_0
@@ -227,58 +232,48 @@ def test_verification_integration():
         targets_fasta = tmpdir / "targets.fasta"
         create_test_fasta([test_sequences[0], test_sequences[2]], targets_fasta)
 
-        # Test with conflict resolution disabled (should have conflicts)
-        print("Testing with conflict resolution disabled...")
-        decomposer_no_resolution = DecomposeClustering(
+        # Test workflow: decompose -> refine
+        print("Testing decompose -> refine workflow...")
+        output_dir = tmpdir / "decompose_output"
+        decomposer = DecomposeClustering(
             min_split=0.005,
             max_lump=0.02,
             target_percentile=95,
-            resolve_conflicts=False,  # Disabled
             show_progress=False,
             logger=logging.getLogger(__name__)
         )
 
-        results_no_resolution = decomposer_no_resolution.decompose(
+        decomposer.decompose(
             input_fasta=str(input_fasta),
             targets_fasta=str(targets_fasta),
+            output_dir=str(output_dir)
         )
 
-        # Verify verification results are present
-        assert hasattr(results_no_resolution, 'verification_results'), "Results should have verification_results"
-        assert 'initial' in results_no_resolution.verification_results, "Should have initial verification"
-        assert 'final' in results_no_resolution.verification_results, "Should have final verification"
-
-        final_verification = results_no_resolution.verification_results['final']
-        print(f"  Final verification results: {final_verification['conflict_count']} conflicts, MECE: {final_verification['no_conflicts']}")
-
-        # Test with conflict resolution enabled (should resolve conflicts)
-        print("Testing with conflict resolution enabled...")
-        decomposer_with_resolution = DecomposeClustering(
-            min_split=0.005,
-            max_lump=0.02,
-            target_percentile=95,
-            resolve_conflicts=True,  # Enabled
-            show_progress=False,
-            logger=logging.getLogger(__name__)
+        # Run gaphack-refine
+        initial_clusters_dir = output_dir / "work" / "initial"
+        refine_output = tmpdir / "refined_output"
+        result = CLIRunner.run_gaphack_refine(
+            input_dir=initial_clusters_dir,
+            output_dir=refine_output,
+            no_timestamp=True
         )
 
-        results_with_resolution = decomposer_with_resolution.decompose(
-            input_fasta=str(input_fasta),
-            targets_fasta=str(targets_fasta),
-        )
+        assert result['returncode'] == 0, f"Refinement should succeed. stderr: {result['stderr']}"
 
-        # Check if post-resolution verification exists (only if there were conflicts to resolve)
-        final_verification_resolved = results_with_resolution.verification_results['final']
-        print(f"  Final verification results after resolution: {final_verification_resolved['conflict_count']} conflicts, MECE: {final_verification_resolved['no_conflicts']}")
+        # Verify MECE property in refined output
+        refined_files = list(refine_output.glob("cluster_*.fasta"))
+        refined_clusters = {}
+        for cluster_file in refined_files:
+            cluster_id = cluster_file.stem
+            refined_clusters[cluster_id] = [record.id for record in SeqIO.parse(cluster_file, "fasta")]
 
-        # If there were original conflicts that got resolved, post_resolution should exist
-        if results_with_resolution.verification_results['initial']['conflict_count'] > 0:
-            assert 'post_resolution' in results_with_resolution.verification_results, "Should have post-resolution verification when conflicts existed"
-        else:
-            print("  No conflicts detected in initial decomposition, so no post-resolution verification needed")
+        verification = verify_no_conflicts(refined_clusters, context="refined_output")
+        print(f"  Refined output verification: {verification['conflict_count']} conflicts, MECE: {verification['no_conflicts']}")
 
-        print("✓ Verification integration tests passed!")
-        # Test completed successfully
+        assert verification['no_conflicts'], "Refined output should satisfy MECE property"
+        assert verification['conflict_count'] == 0, "Refined output should have no conflicts"
+
+        print("✓ MECE verification integration tests passed!")
 
 
 if __name__ == "__main__":

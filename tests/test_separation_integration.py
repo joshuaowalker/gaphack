@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
-"""Test script for separated conflict resolution and close cluster refinement."""
+"""Test script to demonstrate common usage patterns with separated decompose and refine CLIs.
+
+NOTE: This test demonstrates the three common usage patterns with the new
+modular gaphack-decompose and gaphack-refine architecture.
+"""
 
 import tempfile
 import logging
+import pytest
 from pathlib import Path
+from Bio import SeqIO
 
 from gaphack.decompose import DecomposeClustering
+from test_phase4_integration import CLIRunner
 
 
 def create_test_fasta(sequences, filename):
@@ -15,9 +22,9 @@ def create_test_fasta(sequences, filename):
             f.write(f">seq_{i}\n{seq}\n")
 
 
-def test_separated_functionality():
-    """Test the separated conflict resolution and close cluster refinement."""
-    print("=== Testing Separated Conflict Resolution and Close Cluster Refinement ===\n")
+def test_usage_patterns():
+    """Test the three common usage patterns for gaphack-decompose and gaphack-refine."""
+    print("=== Testing Common Usage Patterns ===\n")
 
     # Create test sequences
     test_sequences = [
@@ -39,85 +46,126 @@ def test_separated_functionality():
         targets_fasta = tmpdir / "targets.fasta"
         create_test_fasta([test_sequences[0], test_sequences[2], test_sequences[4]], targets_fasta)
 
-        print("Test 1: Pure conflict resolution (minimal scope)")
-        decomposer_conflicts_only = DecomposeClustering(
+        print("=" * 70)
+        print("Pattern 1: Decompose only (no refinement)")
+        print("=" * 70)
+        print("  CLI command:")
+        print("    gaphack-decompose input.fasta --targets targets.fasta -o results/")
+        print()
+
+        output_dir_1 = tmpdir / "pattern1_decompose_only"
+        decomposer_1 = DecomposeClustering(
             min_split=0.005,
             max_lump=0.02,
             target_percentile=95,
-            resolve_conflicts=True,   # Enable conflict resolution
-            refine_close_clusters=False,  # Disable close cluster refinement
-            close_cluster_threshold=0.0,  # No expansion
             show_progress=False,
             logger=logging.getLogger(__name__)
         )
 
-        results_conflicts = decomposer_conflicts_only.decompose(
+        decomposer_1.decompose(
             input_fasta=str(input_fasta),
             targets_fasta=str(targets_fasta),
+            output_dir=str(output_dir_1)
         )
 
-        print(f"  Clusters: {len(results_conflicts.clusters)}")
-        print(f"  Conflicts: {len(results_conflicts.conflicts)}")
-        print(f"  Final verification passed: {results_conflicts.verification_results['final']['no_conflicts']}")
+        clusters_dir_1 = output_dir_1 / "work" / "initial"
+        cluster_files_1 = list(clusters_dir_1.glob("cluster_*.fasta"))
+        print(f"  Result: {len(cluster_files_1)} clusters")
+        print(f"  Use case: Quick clustering, conflicts acceptable for downstream processing")
         print()
 
-        print("Test 2: Close cluster refinement with expansion threshold")
-        decomposer_refinement = DecomposeClustering(
+        print("=" * 70)
+        print("Pattern 2: Decompose + conflict resolution only")
+        print("=" * 70)
+        print("  CLI commands:")
+        print("    gaphack-decompose input.fasta --targets targets.fasta -o results/")
+        print("    gaphack-refine --input-dir results/work/initial/ --output-dir refined/")
+        print()
+
+        output_dir_2 = tmpdir / "pattern2_decompose"
+        decomposer_2 = DecomposeClustering(
             min_split=0.005,
             max_lump=0.02,
             target_percentile=95,
-            resolve_conflicts=False,  # Disable conflict resolution
-            refine_close_clusters=True,  # Enable close cluster refinement
-            close_cluster_threshold=0.03,  # 3% distance threshold for expansion
             show_progress=False,
             logger=logging.getLogger(__name__)
         )
 
-        results_refinement = decomposer_refinement.decompose(
+        decomposer_2.decompose(
             input_fasta=str(input_fasta),
             targets_fasta=str(targets_fasta),
+            output_dir=str(output_dir_2)
         )
 
-        print(f"  Clusters: {len(results_refinement.clusters)}")
-        print(f"  Conflicts: {len(results_refinement.conflicts)}")
-        print(f"  Final verification passed: {results_refinement.verification_results['final']['no_conflicts']}")
+        # Run gaphack-refine (conflict resolution only)
+        clusters_dir_2 = output_dir_2 / "work" / "initial"
+        refine_output_2 = tmpdir / "pattern2_refined"
+        result_2 = CLIRunner.run_gaphack_refine(
+            input_dir=clusters_dir_2,
+            output_dir=refine_output_2,
+            no_timestamp=True
+        )
+
+        assert result_2['returncode'] == 0, f"Refinement should succeed. stderr: {result_2['stderr']}"
+        cluster_files_2 = list(refine_output_2.glob("cluster_*.fasta"))
+        print(f"  Result: {len(cluster_files_2)} MECE clusters (no conflicts)")
+        print(f"  Use case: Ensure mutually exclusive clustering for downstream analysis")
         print()
 
-        print("Test 3: Both conflict resolution and refinement")
-        decomposer_both = DecomposeClustering(
+        print("=" * 70)
+        print("Pattern 3: Decompose + full refinement (conflicts + close clusters)")
+        print("=" * 70)
+        print("  CLI commands:")
+        print("    gaphack-decompose input.fasta --targets targets.fasta -o results/")
+        print("    gaphack-refine --input-dir results/work/initial/ \\")
+        print("                   --output-dir refined/ \\")
+        print("                   --refine-close-clusters 0.025")
+        print()
+
+        output_dir_3 = tmpdir / "pattern3_decompose"
+        decomposer_3 = DecomposeClustering(
             min_split=0.005,
             max_lump=0.02,
             target_percentile=95,
-            resolve_conflicts=True,   # Enable conflict resolution
-            refine_close_clusters=True,  # Enable close cluster refinement
-            close_cluster_threshold=0.025,  # 2.5% distance threshold
             show_progress=False,
             logger=logging.getLogger(__name__)
         )
 
-        results_both = decomposer_both.decompose(
+        decomposer_3.decompose(
             input_fasta=str(input_fasta),
             targets_fasta=str(targets_fasta),
+            output_dir=str(output_dir_3)
         )
 
-        print(f"  Clusters: {len(results_both.clusters)}")
-        print(f"  Conflicts: {len(results_both.conflicts)}")
-        print(f"  Final verification passed: {results_both.verification_results['final']['no_conflicts']}")
+        # Run gaphack-refine with close cluster refinement
+        clusters_dir_3 = output_dir_3 / "work" / "initial"
+        refine_output_3 = tmpdir / "pattern3_refined"
+        result_3 = CLIRunner.run_gaphack_refine(
+            input_dir=clusters_dir_3,
+            output_dir=refine_output_3,
+            refine_close_clusters=0.025,  # 2.5% distance threshold
+            no_timestamp=True
+        )
+
+        assert result_3['returncode'] == 0, f"Refinement should succeed. stderr: {result_3['stderr']}"
+        cluster_files_3 = list(refine_output_3.glob("cluster_*.fasta"))
+        print(f"  Result: {len(cluster_files_3)} optimized MECE clusters")
+        print(f"  Use case: Maximum quality - resolve conflicts AND optimize barcode gaps")
         print()
 
-        print("Test 4: CLI-style usage demonstration")
-        print("  # Pure conflict resolution (minimal scope):")
-        print("  gaphack-decompose input.fasta --targets targets.fasta --resolve-conflicts -o results")
-        print()
-        print("  # Close cluster refinement with 2% expansion threshold:")
-        print("  gaphack-decompose input.fasta --targets targets.fasta --refine-close-clusters 0.02 -o results")
-        print()
-        print("  # Both correctness and quality improvement:")
-        print("  gaphack-decompose input.fasta --targets targets.fasta --resolve-conflicts --refine-close-clusters 0.025 -o results")
-        print()
+        # Verify MECE property for patterns 2 and 3
+        for pattern_num, refine_output in [(2, refine_output_2), (3, refine_output_3)]:
+            all_sequences = set()
+            cluster_files = list(refine_output.glob("cluster_*.fasta"))
+            for cluster_file in cluster_files:
+                cluster_sequences = {record.id for record in SeqIO.parse(cluster_file, "fasta")}
+                overlap = all_sequences & cluster_sequences
+                assert len(overlap) == 0, f"Pattern {pattern_num}: MECE violation - {overlap}"
+                all_sequences.update(cluster_sequences)
 
-        print("✓ All separated functionality tests completed successfully!")
-        # Test completed successfully
+        print("=" * 70)
+        print("✓ All usage patterns completed successfully!")
+        print("=" * 70)
 
 
 # Separation integration test converted to pytest format

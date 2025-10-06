@@ -4,7 +4,6 @@ Resume and finalization logic for decompose clustering.
 This module contains functions for:
 - Resuming decompose clustering from checkpoints
 - Continuing initial clustering after interruption
-- Applying refinement stages (conflict resolution, close cluster refinement)
 - Finalizing numbered output from intermediate stages
 
 These functions enable incremental restart capabilities in gaphack-decompose mode.
@@ -30,8 +29,6 @@ logger = logging.getLogger(__name__)
 def resume_decompose(output_dir: Path,
                      max_clusters: Optional[int] = None,
                      max_sequences: Optional[int] = None,
-                     resolve_conflicts: bool = False,
-                     refine_close_clusters: float = 0.0,
                      force_input_change: bool = False,
                      checkpoint_interval: int = 10,
                      **kwargs) -> DecomposeResults:
@@ -39,15 +36,12 @@ def resume_decompose(output_dir: Path,
 
     Determines current stage and continues appropriately:
     - If in initial_clustering: continue adding clusters
-    - If refinement requested: apply refinement stage
     - If all complete: report completion status
 
     Args:
         output_dir: Output directory containing state.json
         max_clusters: New maximum cluster count (absolute, not incremental)
         max_sequences: New maximum sequence count (absolute, not incremental)
-        resolve_conflicts: Whether to apply conflict resolution
-        refine_close_clusters: Distance threshold for close cluster refinement (0.0 = disabled)
         force_input_change: Allow resuming with modified input FASTA
         checkpoint_interval: Save checkpoint every N iterations (default: 10)
         **kwargs: Additional parameters passed to DecomposeClustering
@@ -96,7 +90,7 @@ def resume_decompose(output_dir: Path,
     assignment_tracker = state_manager.rebuild_assignment_tracker(current_clusters, all_headers)
     logger.info(f"Rebuilt assignment tracker: {len(assignment_tracker.assigned_sequences)} assigned")
 
-    # Determine action based on stage and parameters
+    # Determine action based on stage
     if not state.initial_clustering.completed:
         # Continue initial clustering
         logger.info("Continuing initial clustering from checkpoint")
@@ -108,39 +102,17 @@ def resume_decompose(output_dir: Path,
             current_clusters=current_clusters,
             max_clusters=max_clusters,
             max_sequences=max_sequences,
-            resolve_conflicts=resolve_conflicts,
-            refine_close_clusters=refine_close_clusters,
             checkpoint_interval=checkpoint_interval,
             **kwargs
         )
-    elif resolve_conflicts and not state.conflict_resolution.completed:
-        # Apply conflict resolution
-        logger.info("Applying conflict resolution stage")
-        return _apply_conflict_resolution_stage(
-            state=state,
-            state_manager=state_manager,
-            input_fasta=input_fasta,
-            current_clusters=current_clusters,
-            assignment_tracker=assignment_tracker,
-            **kwargs
-        )
-    elif refine_close_clusters > 0:
-        # Apply close cluster refinement
-        logger.info(f"Applying close cluster refinement with threshold={refine_close_clusters}")
-        return _apply_close_cluster_refinement_stage(
-            state=state,
-            state_manager=state_manager,
-            input_fasta=input_fasta,
-            current_clusters=current_clusters,
-            close_threshold=refine_close_clusters,
-            **kwargs
-        )
     else:
-        # Nothing to do
-        logger.info("Clustering already complete. No action requested.")
+        # Initial clustering complete
+        logger.info("Initial clustering already complete.")
         logger.info(f"  Total clusters: {len(current_clusters)}")
         logger.info(f"  Unassigned sequences: {len(unassigned_headers)}")
-        logger.info("Use --resolve-conflicts or --refine-close-clusters to apply refinement.")
+        logger.info(f"  Conflicts: {len(assignment_tracker.get_conflicts())}")
+        logger.info("")
+        logger.info("For refinement: gaphack-refine {output_dir}")
 
         # Return results object from current state
         results = DecomposeResults()
@@ -212,8 +184,6 @@ def _continue_initial_clustering(state: DecomposeState,
                                  current_clusters: Dict[str, List[str]],
                                  max_clusters: Optional[int] = None,
                                  max_sequences: Optional[int] = None,
-                                 resolve_conflicts: bool = False,
-                                 refine_close_clusters: float = 0.0,
                                  checkpoint_interval: int = 10,
                                  **kwargs) -> DecomposeResults:
     """Continue initial clustering from checkpoint.
@@ -226,8 +196,6 @@ def _continue_initial_clustering(state: DecomposeState,
         current_clusters: Currently assigned clusters
         max_clusters: New maximum cluster count (absolute)
         max_sequences: New maximum sequence count (absolute)
-        resolve_conflicts: Whether to apply conflict resolution after clustering
-        refine_close_clusters: Distance threshold for close cluster refinement
         checkpoint_interval: Save checkpoint every N iterations (default: 10)
         **kwargs: Additional parameters
 
@@ -257,9 +225,6 @@ def _continue_initial_clustering(state: DecomposeState,
         blast_threads=params.get('blast_threads'),
         blast_evalue=params['blast_evalue'],
         min_identity=params.get('min_identity'),
-        resolve_conflicts=resolve_conflicts,
-        refine_close_clusters=refine_close_clusters > 0.0,
-        close_cluster_threshold=refine_close_clusters,
         show_progress=kwargs.get('show_progress', True),
         logger=logger
     )
@@ -282,243 +247,6 @@ def _continue_initial_clustering(state: DecomposeState,
         from .decompose_cli import save_decompose_results
         save_decompose_results(results, state_manager.output_dir, input_fasta)
         logger.info("Final output created in clusters/latest/")
-
-    return results
-
-
-def _apply_conflict_resolution_stage(state: DecomposeState,
-                                      state_manager: StateManager,
-                                      input_fasta: str,
-                                      current_clusters: Dict[str, List[str]],
-                                      assignment_tracker: AssignmentTracker,
-                                      **kwargs) -> DecomposeResults:
-    """Apply conflict resolution stage to loaded clusters.
-
-    Args:
-        state: Current decompose state
-        state_manager: State manager for saving results
-        input_fasta: Input FASTA path
-        current_clusters: Current cluster assignments (from FASTA files)
-        assignment_tracker: Reconstructed assignment tracker
-        **kwargs: Additional parameters
-
-    Returns:
-        DecomposeResults with conflicts resolved
-    """
-    from .cluster_refinement import resolve_conflicts, RefinementConfig
-
-    logger.info(f"Applying conflict resolution to {len(current_clusters)} clusters")
-
-    # Get conflicts from assignment tracker
-    conflicts = assignment_tracker.get_conflicts()
-    logger.info(f"Found {len(conflicts)} sequences with conflicts")
-
-    if len(conflicts) == 0:
-        logger.info("No conflicts to resolve - marking stage complete")
-        # Update state to mark conflict resolution as complete even if no work needed
-        state.conflict_resolution.completed = True
-        state.conflict_resolution.conflicts_before = 0
-        state.conflict_resolution.conflicts_after = 0
-        state.conflict_resolution.clusters_before = len(current_clusters)
-        state.conflict_resolution.clusters_after = len(current_clusters)
-        state.conflict_resolution.total_clusters = len(current_clusters)
-        # Keep using initial clustering directory since no new files created
-        state.conflict_resolution.stage_directory = state.initial_clustering.stage_directory
-        state.stage = "conflict_resolution"
-
-        # Don't create new files - just update state
-        state_manager.checkpoint(state)
-
-        # Return current state as results
-        results = DecomposeResults()
-        results.clusters = current_clusters
-        results.all_clusters = current_clusters.copy()
-        results.conflicts = {}
-        results.unassigned = []  # Load from state if needed
-        return results
-
-    # Load sequences and headers
-    sequences, hash_ids, hash_to_headers = load_sequences_with_deduplication(input_fasta)
-
-    # Create refinement configuration
-    config = RefinementConfig(
-        max_full_gaphack_size=300  # Conservative limit for performance
-    )
-
-    # Apply conflict resolution
-    params = state.parameters
-    conflict_id_generator = ClusterIDGenerator(stage_name="deconflicted")
-    resolved_clusters, conflict_tracking = resolve_conflicts(
-        conflicts=conflicts,
-        all_clusters=current_clusters,
-        sequences=sequences,
-        headers=hash_ids,
-        config=config,
-        min_split=params['min_split'],
-        max_lump=params['max_lump'],
-        target_percentile=params['target_percentile'],
-        cluster_id_generator=conflict_id_generator
-    )
-
-    logger.info(f"Conflict resolution complete: {len(current_clusters)} -> {len(resolved_clusters)} clusters")
-
-    # Build results object
-    results = DecomposeResults()
-    results.clusters = resolved_clusters
-    results.all_clusters = resolved_clusters.copy()
-    results.conflicts = {}  # All conflicts resolved
-    results.unassigned = []  # Preserve from state if needed
-    results.total_iterations = state.initial_clustering.total_iterations
-    results.total_sequences_processed = state.initial_clustering.total_sequences
-    results.coverage_percentage = state.initial_clustering.coverage_percentage
-    results.processing_stages = [conflict_tracking]
-
-    # Save results to FASTA files in deconflicted stage directory
-    from .cluster_id_utils import get_stage_directory
-    stage_dir = get_stage_directory(state_manager.output_dir, "deconflicted")
-    state_manager.save_stage_results(
-        results=results,
-        stage_dir=stage_dir,
-        sequences=sequences,
-        headers=hash_ids,
-        hash_to_headers=hash_to_headers
-    )
-
-    # Update state
-    state.conflict_resolution.completed = True
-    state.conflict_resolution.conflicts_before = len(conflicts)
-    state.conflict_resolution.conflicts_after = 0
-    state.conflict_resolution.clusters_before = len(current_clusters)
-    state.conflict_resolution.clusters_after = len(resolved_clusters)
-    state.conflict_resolution.total_clusters = len(resolved_clusters)
-    state.conflict_resolution.stage_directory = "work/deconflicted"
-    state.stage = "conflict_resolution"
-    state_manager.checkpoint(state)
-
-    logger.info(f"Conflict resolution stage complete and saved")
-
-    # Automatically create final output
-    from .decompose_cli import save_decompose_results
-    save_decompose_results(results, state_manager.output_dir, input_fasta)
-    logger.info("Final output created in clusters/latest/")
-
-    return results
-
-
-def _apply_close_cluster_refinement_stage(state: DecomposeState,
-                                          state_manager: StateManager,
-                                          input_fasta: str,
-                                          current_clusters: Dict[str, List[str]],
-                                          close_threshold: float,
-                                          **kwargs) -> DecomposeResults:
-    """Apply close cluster refinement stage to loaded clusters.
-
-    Args:
-        state: Current decompose state
-        state_manager: State manager for saving results
-        input_fasta: Input FASTA path
-        current_clusters: Current cluster assignments (from FASTA files)
-        close_threshold: Distance threshold for close cluster refinement
-        **kwargs: Additional parameters
-
-    Returns:
-        DecomposeResults with close clusters refined
-    """
-    from .cluster_refinement import refine_close_clusters, RefinementConfig
-    from .cluster_graph import ClusterGraph
-
-    logger.info(f"Applying close cluster refinement to {len(current_clusters)} clusters")
-    logger.info(f"Close threshold: {close_threshold}")
-
-    # Load sequences and headers
-    sequences, hash_ids, hash_to_headers = load_sequences_with_deduplication(input_fasta)
-
-    # Create proximity graph for cluster proximity queries
-    # Note: ClusterGraph uses MSA internally for all distance calculations
-    proximity_graph = ClusterGraph(
-        clusters=current_clusters,
-        sequences=sequences,
-        headers=hash_ids,
-        k_neighbors=20,
-        show_progress=False  # Don't show progress in resume context
-    )
-
-    # Create refinement configuration
-    config = RefinementConfig(
-        max_full_gaphack_size=300,
-        close_cluster_expansion_threshold=close_threshold
-    )
-
-    # Determine refinement count (how many refinement stages already exist)
-    from .cluster_id_utils import count_refinement_stages
-    refinement_count = count_refinement_stages(state_manager.output_dir)
-
-    # Apply close cluster refinement
-    params = state.parameters
-    refinement_id_generator = ClusterIDGenerator(stage_name="refined", refinement_count=refinement_count)
-    refined_clusters, refinement_tracking = refine_close_clusters(
-        all_clusters=current_clusters,
-        sequences=sequences,
-        headers=hash_ids,
-        proximity_graph=proximity_graph,
-        config=config,
-        min_split=params['min_split'],
-        max_lump=params['max_lump'],
-        target_percentile=params['target_percentile'],
-        close_threshold=params['max_lump'],  # Use max_lump as base threshold
-        cluster_id_generator=refinement_id_generator
-    )
-
-    logger.info(f"Close cluster refinement complete: {len(current_clusters)} -> {len(refined_clusters)} clusters")
-
-    # Build results object
-    results = DecomposeResults()
-    results.clusters = refined_clusters
-    results.all_clusters = refined_clusters.copy()
-    results.conflicts = {}
-    results.unassigned = []  # Preserve from state if needed
-    results.total_iterations = state.initial_clustering.total_iterations
-    results.total_sequences_processed = state.initial_clustering.total_sequences
-    results.coverage_percentage = state.initial_clustering.coverage_percentage
-    results.processing_stages = [refinement_tracking]
-
-    # Save results to FASTA files in refined stage directory
-    from .cluster_id_utils import get_stage_directory
-    stage_dir = get_stage_directory(state_manager.output_dir, "refined", refinement_count=refinement_count)
-    state_manager.save_stage_results(
-        results=results,
-        stage_dir=stage_dir,
-        sequences=sequences,
-        headers=hash_ids,
-        hash_to_headers=hash_to_headers
-    )
-
-    # Update state - note that close cluster refinement can be chained
-    state.close_cluster_refinement.completed = True
-    state.close_cluster_refinement.threshold = close_threshold
-    state.close_cluster_refinement.clusters_before = len(current_clusters)
-    state.close_cluster_refinement.clusters_after = len(refined_clusters)
-    state.close_cluster_refinement.total_clusters = len(refined_clusters)
-    state.close_cluster_refinement.stage_directory = f"work/refined_{refinement_count + 1}"
-    state.stage = "close_cluster_refinement"
-
-    # Add to refinement history
-    history_entry = {
-        'threshold': close_threshold,
-        'timestamp': datetime.datetime.now().isoformat(),
-        'clusters_before': len(current_clusters),
-        'clusters_after': len(refined_clusters)
-    }
-    state.close_cluster_refinement.refinement_history.append(history_entry)
-
-    state_manager.checkpoint(state)
-
-    logger.info(f"Close cluster refinement stage complete and saved")
-
-    # Automatically create final output
-    from .decompose_cli import save_decompose_results
-    save_decompose_results(results, state_manager.output_dir, input_fasta)
-    logger.info("Final output created in clusters/latest/")
 
     return results
 

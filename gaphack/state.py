@@ -74,24 +74,6 @@ class InitialClusteringStage(StageInfo):
 
 
 @dataclass
-class ConflictResolutionStage(StageInfo):
-    """Conflict resolution stage information."""
-    conflicts_before: int = 0
-    conflicts_after: int = 0
-    clusters_before: int = 0
-    clusters_after: int = 0
-
-
-@dataclass
-class CloseClusterRefinementStage(StageInfo):
-    """Close cluster refinement stage information."""
-    threshold: float = 0.0
-    clusters_before: int = 0
-    clusters_after: int = 0
-    refinement_history: List[Dict[str, Any]] = field(default_factory=list)
-
-
-@dataclass
 class FinalizedStage(StageInfo):
     """Finalization stage information."""
     total_clusters: int = 0  # Number of final numbered clusters
@@ -109,15 +91,13 @@ class DecomposeState:
     """
     version: str
     status: str  # "in_progress", "completed"
-    stage: str   # "initial_clustering", "conflict_resolution", "close_cluster_refinement", "finalized"
+    stage: str   # "initial_clustering" or "finalized"
 
     input: InputInfo
     parameters: Dict[str, Any]
 
     # Stage information
     initial_clustering: InitialClusteringStage
-    conflict_resolution: ConflictResolutionStage
-    close_cluster_refinement: CloseClusterRefinementStage
     finalized: FinalizedStage
 
     # Metadata
@@ -188,8 +168,6 @@ class DecomposeState:
             'parameters': self.parameters,
             'stages': {
                 'initial_clustering': asdict(self.initial_clustering),
-                'conflict_resolution': asdict(self.conflict_resolution),
-                'close_cluster_refinement': asdict(self.close_cluster_refinement),
                 'finalized': asdict(self.finalized)
             },
             'metadata': {
@@ -207,8 +185,6 @@ class DecomposeState:
 
         stages = data.get('stages', {})
         initial = InitialClusteringStage(**stages.get('initial_clustering', {}))
-        conflict = ConflictResolutionStage(**stages.get('conflict_resolution', {}))
-        refinement = CloseClusterRefinementStage(**stages.get('close_cluster_refinement', {}))
         finalized_stage = FinalizedStage(**stages.get('finalized', {}))
 
         metadata = data.get('metadata', {})
@@ -220,8 +196,6 @@ class DecomposeState:
             input=input_info,
             parameters=data['parameters'],
             initial_clustering=initial,
-            conflict_resolution=conflict,
-            close_cluster_refinement=refinement,
             finalized=finalized_stage,
             command_history=metadata.get('command_history', []),
             start_time=metadata.get('start_time', ''),
@@ -271,10 +245,6 @@ class DecomposeState:
         """
         if self.stage == "initial_clustering":
             return output_dir / self.initial_clustering.stage_directory
-        elif self.stage == "conflict_resolution":
-            return output_dir / self.conflict_resolution.stage_directory
-        elif self.stage == "close_cluster_refinement":
-            return output_dir / self.close_cluster_refinement.stage_directory
         elif self.stage == "finalized":
             return output_dir / "clusters" / "latest"
         else:
@@ -289,24 +259,6 @@ class DecomposeState:
         return (self.stage == "initial_clustering" and
                 not self.initial_clustering.completed)
 
-    def can_apply_conflict_resolution(self) -> bool:
-        """Check if conflict resolution can be applied.
-
-        Returns:
-            True if conflict resolution hasn't been applied yet
-        """
-        return not self.conflict_resolution.completed
-
-    def can_apply_close_cluster_refinement(self) -> bool:
-        """Check if close cluster refinement can be applied.
-
-        Close cluster refinement can always be applied (chains on current state).
-
-        Returns:
-            True (always)
-        """
-        return True
-
     def update_stage_completion(self, stage: str, **stats) -> None:
         """Mark stage complete and record statistics.
 
@@ -319,28 +271,7 @@ class DecomposeState:
             for key, value in stats.items():
                 if hasattr(self.initial_clustering, key):
                     setattr(self.initial_clustering, key, value)
-            self.stage = "initial_clustering"  # Stay in this stage until refinement requested
-
-        elif stage == "conflict_resolution":
-            self.conflict_resolution.completed = True
-            for key, value in stats.items():
-                if hasattr(self.conflict_resolution, key):
-                    setattr(self.conflict_resolution, key, value)
-            self.stage = "conflict_resolution"
-
-        elif stage == "close_cluster_refinement":
-            self.close_cluster_refinement.completed = True
-            for key, value in stats.items():
-                if hasattr(self.close_cluster_refinement, key):
-                    setattr(self.close_cluster_refinement, key, value)
-
-            # Add to refinement history
-            history_entry = {
-                'threshold': stats.get('threshold', 0.0),
-                'timestamp': datetime.now().isoformat()
-            }
-            self.close_cluster_refinement.refinement_history.append(history_entry)
-            self.stage = "close_cluster_refinement"
+            self.stage = "initial_clustering"
 
         elif stage == "finalized":
             self.finalized.completed = True
@@ -667,12 +598,6 @@ def create_initial_state(input_fasta: str,
         stage_directory="work/initial",
         unassigned_file="work/initial/unassigned.fasta"
     )
-    conflict = ConflictResolutionStage(
-        stage_directory="work/deconflicted"
-    )
-    refinement = CloseClusterRefinementStage(
-        stage_directory="work/refined_1"
-    )
     finalized_stage = FinalizedStage()
 
     state = DecomposeState(
@@ -682,8 +607,6 @@ def create_initial_state(input_fasta: str,
         input=input_info,
         parameters=parameters,
         initial_clustering=initial,
-        conflict_resolution=conflict,
-        close_cluster_refinement=refinement,
         finalized=finalized_stage,
         start_time=datetime.now().isoformat(),
         gaphack_version=version
