@@ -439,7 +439,8 @@ def _apply_close_cluster_refinement_stage(state: DecomposeState,
         clusters=current_clusters,
         sequences=sequences,
         headers=hash_ids,
-        k_neighbors=20
+        k_neighbors=20,
+        show_progress=False  # Don't show progress in resume context
     )
 
     # Create refinement configuration

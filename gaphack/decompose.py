@@ -1245,7 +1245,8 @@ class DecomposeClustering:
             k_neighbors=self.knn_neighbors,
             blast_evalue=self.blast_evalue,  # Use user-specified e-value
             blast_identity=self.min_identity or 90.0,  # Use user-specified identity or default
-            search_method=self.search_method  # Use user-specified search method
+            search_method=self.search_method,  # Use user-specified search method
+            show_progress=self.show_progress
         )
 
     def _renumber_clusters_sequentially(self, clusters: Dict[str, List[str]]) -> Tuple[Dict[str, List[str]], Dict[str, str]]:

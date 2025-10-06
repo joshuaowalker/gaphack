@@ -600,6 +600,7 @@ class GapOptimizedClustering:
         if pbar:
             pbar.close()
 
+        self.logger.debug(f"Fast clustering finished with {len(clusters)} clusters.")
         # Initialize distance cache and gap calculator
         cache = DistanceCache(distance_matrix)
         gap_calculator = GapCalculator(self.target_percentile)
@@ -625,7 +626,9 @@ class GapOptimizedClustering:
         # Determine execution mode and number of threads
         max_clusters = len(clusters)
         max_pairs = max_clusters * (max_clusters - 1) // 2
-        
+
+        self.num_threads = 0
+
         # Handle special case: num_threads=0 means single-process mode
         if self.num_threads == 0:
             self.single_process = True

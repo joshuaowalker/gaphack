@@ -10,6 +10,7 @@ import tempfile
 from typing import List, Dict, Tuple, Set, Optional
 from pathlib import Path
 import numpy as np
+from tqdm import tqdm
 
 from .blast_neighborhood import BlastNeighborhoodFinder
 from .vsearch_neighborhood import VsearchNeighborhoodFinder
@@ -29,7 +30,8 @@ class ClusterGraph:
     def __init__(self, clusters: Dict[str, List[str]], sequences: List[str],
                  headers: List[str], k_neighbors: int = 20,
                  blast_evalue: float = 1e-5, blast_identity: float = 90.0,
-                 cache_dir: Optional[Path] = None, search_method: str = "blast"):
+                 cache_dir: Optional[Path] = None, search_method: str = "blast",
+                 show_progress: bool = False):
         """Initialize K-NN proximity graph.
 
         Args:
@@ -41,6 +43,7 @@ class ClusterGraph:
             blast_identity: Minimum BLAST/vsearch identity percentage (0-100)
             cache_dir: Directory for database caching
             search_method: Search method for K-NN: 'blast' or 'vsearch' (default: 'blast')
+            show_progress: Whether to show progress bars (default: False)
         """
         self.clusters = clusters
         self.sequences = sequences
@@ -50,6 +53,7 @@ class ClusterGraph:
         self.blast_identity = blast_identity
         self.cache_dir = cache_dir or Path(tempfile.gettempdir()) / "gaphack_knn_cache"
         self.search_method = search_method
+        self.show_progress = show_progress
 
         # Initialize data structures
         self.medoid_cache: Dict[str, int] = {}
@@ -65,7 +69,10 @@ class ClusterGraph:
         """Compute medoids for all clusters and cache them."""
         logger.debug(f"Computing medoids for {len(self.clusters)} clusters")
 
-        for cluster_id, cluster_headers in self.clusters.items():
+        cluster_items = list(self.clusters.items())
+        iterator = tqdm(cluster_items, desc="Computing cluster medoids", unit="cluster") if self.show_progress else cluster_items
+
+        for cluster_id, cluster_headers in iterator:
             medoid_idx = self._find_cluster_medoid(cluster_headers)
             self.medoid_cache[cluster_id] = medoid_idx
 
@@ -180,13 +187,23 @@ class ClusterGraph:
 
         logger.debug(f"Running batch {self.search_method.upper()} queries for {len(batch_queries)} unique medoid sequences")
 
-        # Run batched search
-        search_results = self.neighborhood_finder._get_candidates_for_sequences(
-            query_sequences=batch_queries,
-            max_targets=self.k_neighbors + 10,  # Get extra hits to account for filtering
-            e_value_threshold=self.blast_evalue,
-            min_identity=self.blast_identity
-        )
+        # Run batched search with progress bar
+        if self.show_progress:
+            with tqdm(total=1, desc=f"Running {self.search_method.upper()} K-NN search", unit="batch") as pbar:
+                search_results = self.neighborhood_finder._get_candidates_for_sequences(
+                    query_sequences=batch_queries,
+                    max_targets=self.k_neighbors + 10,  # Get extra hits to account for filtering
+                    e_value_threshold=self.blast_evalue,
+                    min_identity=self.blast_identity
+                )
+                pbar.update(1)
+        else:
+            search_results = self.neighborhood_finder._get_candidates_for_sequences(
+                query_sequences=batch_queries,
+                max_targets=self.k_neighbors + 10,  # Get extra hits to account for filtering
+                e_value_threshold=self.blast_evalue,
+                min_identity=self.blast_identity
+            )
 
         # Step 5: Convert search results to K-NN graph by expanding results to all clusters
         # Initialize empty neighbor lists for all clusters
@@ -194,13 +211,16 @@ class ClusterGraph:
             self.knn_graph[cluster_id] = []
 
         # Process search results for each unique medoid sequence
-        for query_header in search_results:
+        search_result_items = list(search_results.items())
+        result_iterator = tqdm(search_result_items, desc="Building K-NN graph from results", unit="query") if self.show_progress else search_result_items
+
+        for query_header, query_hits in result_iterator:
             # Extract unique sequence index from header (format: "medoid_N")
             query_idx = int(query_header.split("_")[1])
             query_sequence = unique_sequences[query_idx]
             query_clusters = sequence_to_clusters[query_sequence]
 
-            logger.debug(f"Processing search results for {query_header}: {len(search_results[query_header])} hits, "
+            logger.debug(f"Processing search results for {query_header}: {len(query_hits)} hits, "
                         f"represents clusters {query_clusters}")
 
             # Collect all unique sequences in this query's neighborhood for MSA
@@ -208,7 +228,7 @@ class ClusterGraph:
             neighborhood_headers = [query_header]
             neighborhood_unique_indices = [query_idx]
 
-            for hit in search_results[query_header]:
+            for hit in query_hits:
                 # hit.sequence_hash contains the subject sequence hash
                 subject_sequence_hash = hit.sequence_hash
 

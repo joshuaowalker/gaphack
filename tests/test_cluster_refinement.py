@@ -14,7 +14,6 @@ from gaphack.cluster_refinement import (
     RefinementConfig,
     ExpandedScope,
     find_conflict_components,
-    expand_scope_for_conflicts,
     apply_full_gaphack_to_scope,
     apply_full_gaphack_to_scope_with_metadata,
     resolve_conflicts,
@@ -22,7 +21,6 @@ from gaphack.cluster_refinement import (
     needs_minimal_context_for_gap_calculation,
     add_context_at_distance_threshold,
     expand_context_for_gap_optimization,
-    expand_scope_for_close_clusters,
     refine_close_clusters,
     verify_no_conflicts,
     MAX_FULL_GAPHACK_SIZE,
@@ -170,52 +168,6 @@ class TestScopeExpansion:
             "cluster_4": ["seq_7", "seq_8"]
         }
 
-    def test_expand_scope_for_conflicts_basic(self):
-        """Test basic conflict scope expansion."""
-        initial_sequences = {"seq_1", "seq_2", "seq_3"}
-        core_cluster_ids = ["cluster_1", "cluster_2"]
-
-        # Mock proximity graph - get_neighbors_within_distance returns neighbors within threshold
-        mock_graph = Mock()
-        mock_graph.get_neighbors_within_distance.return_value = [
-            ("cluster_3", 0.015),  # Within threshold
-            ("cluster_4", 0.018)   # Also within threshold
-        ]
-
-        expanded_scope = expand_scope_for_conflicts(
-            initial_sequences, core_cluster_ids, self.test_clusters,
-            mock_graph, expansion_threshold=0.02, max_scope_size=10
-        )
-
-        # Should include both clusters since both are within threshold
-        assert "cluster_3" in expanded_scope.cluster_ids
-        assert "cluster_4" in expanded_scope.cluster_ids
-        assert "seq_5" in expanded_scope.sequences
-        assert "seq_6" in expanded_scope.sequences
-        assert "seq_7" in expanded_scope.sequences
-        assert "seq_8" in expanded_scope.sequences
-
-    def test_expand_scope_for_conflicts_size_limit(self):
-        """Test conflict scope expansion with size limit."""
-        initial_sequences = {"seq_1", "seq_2"}
-        core_cluster_ids = ["cluster_1"]
-
-        mock_graph = Mock()
-        mock_graph.get_neighbors_within_distance.return_value = [
-            ("cluster_2", 0.01),
-            ("cluster_3", 0.015)
-        ]
-
-        # Very small size limit
-        expanded_scope = expand_scope_for_conflicts(
-            initial_sequences, core_cluster_ids, self.test_clusters,
-            mock_graph, expansion_threshold=0.02, max_scope_size=4
-        )
-
-        # Should add cluster_2 (4 total sequences) but not cluster_3 (would be 6)
-        assert "cluster_2" in expanded_scope.cluster_ids
-        assert "cluster_3" not in expanded_scope.cluster_ids
-
     def test_needs_minimal_context_single_cluster(self):
         """Test minimal context detection with single cluster."""
         mock_graph = Mock()
@@ -309,10 +261,7 @@ class TestFullGapHACkApplication:
         # Mock distance provider (not used by refinement but passed in)
         mock_distance_provider = Mock()
 
-        result = apply_full_gaphack_to_scope(
-            ["ATCGATCG", "ATCGATCC"], ["seq_0", "seq_1"],
-            self.test_sequences, self.test_headers, mock_distance_provider
-        )
+        result = apply_full_gaphack_to_scope(["ATCGATCG", "ATCGATCC"], ["seq_0", "seq_1"])
 
         assert len(result) == 1  # One cluster
         cluster_values = list(result.values())
@@ -335,10 +284,7 @@ class TestFullGapHACkApplication:
 
         mock_distance_provider = Mock()
 
-        clusters, metadata = apply_full_gaphack_to_scope_with_metadata(
-            ["ATCGATCG", "ATCGATCC"], ["seq_0", "seq_1"],
-            self.test_sequences, self.test_headers, mock_distance_provider
-        )
+        clusters, metadata = apply_full_gaphack_to_scope_with_metadata(["ATCGATCG", "ATCGATCC"], ["seq_0", "seq_1"])
 
         assert len(clusters) == 2  # Two clusters
         assert metadata['gap_size'] == 0.05
@@ -510,6 +456,9 @@ class TestContextExpansion:
             "cluster_2": ["seq_3", "seq_4"],
             "cluster_3": ["seq_5", "seq_6"]
         }
+        # Provide actual sequences and headers for mapping
+        self.test_headers = ["seq_1", "seq_2", "seq_3", "seq_4", "seq_5", "seq_6"]
+        self.test_sequences = ["ACGT", "ACGG", "TTTT", "TTTG", "GGGG", "GGGC"]
 
     @patch('gaphack.cluster_refinement.apply_full_gaphack_to_scope_with_metadata')
     def test_expand_context_for_gap_optimization_success(self, mock_full_gaphack):
@@ -535,7 +484,7 @@ class TestContextExpansion:
         core_cluster_ids = ["cluster_1"]
 
         scope, result = expand_context_for_gap_optimization(
-            core_cluster_ids, self.test_clusters, [], [],
+            core_cluster_ids, self.test_clusters, self.test_sequences, self.test_headers,
             mock_graph,
             expansion_threshold=0.03, max_scope_size=10,
             max_lump=0.02, min_split=0.005, target_percentile=95,
@@ -562,7 +511,7 @@ class TestContextExpansion:
         core_cluster_ids = ["cluster_1"]
 
         scope, result = expand_context_for_gap_optimization(
-            core_cluster_ids, self.test_clusters, [], [],
+            core_cluster_ids, self.test_clusters, self.test_sequences, self.test_headers,
             mock_graph,
             expansion_threshold=0.03, max_scope_size=10,
             max_lump=0.02, min_split=0.005, target_percentile=95,
@@ -733,23 +682,6 @@ class TestPropertyBasedRefinement:
 
 class TestEdgeCases:
     """Test suite for edge cases and error conditions."""
-
-    def test_empty_scope_expansion(self):
-        """Test scope expansion with empty initial conditions."""
-        initial_sequences = set()
-        core_cluster_ids = []
-        all_clusters = {}
-
-        mock_graph = Mock()
-        mock_graph.get_neighbors_within_distance.return_value = []
-
-        expanded_scope = expand_scope_for_conflicts(
-            initial_sequences, core_cluster_ids, all_clusters,
-            mock_graph, expansion_threshold=0.02
-        )
-
-        assert len(expanded_scope.sequences) == 0
-        assert len(expanded_scope.cluster_ids) == 0
 
     def test_context_expansion_no_available_clusters(self):
         """Test context expansion when no clusters are available."""
