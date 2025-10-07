@@ -51,11 +51,20 @@ class MSACachedDistanceProvider(DistanceProvider):
             MSAAlignmentError: If SPOA fails to create alignment
         """
         from .utils import run_spoa_msa, replace_terminal_gaps
+        import numpy as np
 
         self.sequences = sequences
         self.headers = headers if headers is not None else [f"seq_{i}" for i in range(len(sequences))]
         self.n = len(sequences)
         self._distance_cache: Dict[Tuple[int, int], float] = {}
+
+        # Compute median sequence length for distance normalization
+        sequence_lengths = [len(seq) for seq in sequences]
+        self.normalization_length = int(np.median(sequence_lengths))
+        logger.debug(
+            f"MSA normalization length (median): {self.normalization_length}bp "
+            f"(range: {min(sequence_lengths)}-{max(sequence_lengths)}bp, n={self.n})"
+        )
 
         # Run SPOA once and cache aligned sequences
         logger.debug(f"Creating MSA for {self.n} sequences using SPOA")
@@ -85,10 +94,13 @@ class MSACachedDistanceProvider(DistanceProvider):
         if cache_key in self._distance_cache:
             return self._distance_cache[cache_key]
 
-        # Compute distance from MSA
+        # Compute distance from MSA, passing original sequence lengths and normalization length
         distance = compute_msa_distance(
             self.aligned_sequences[idx1],
-            self.aligned_sequences[idx2]
+            self.aligned_sequences[idx2],
+            original_len1=len(self.sequences[idx1]),
+            original_len2=len(self.sequences[idx2]),
+            normalization_length=self.normalization_length
         )
 
         # Cache and return

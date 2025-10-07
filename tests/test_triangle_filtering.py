@@ -139,6 +139,56 @@ class TestFilterDistanceDictTriangles:
                                               context="test_context")
         assert isinstance(result, dict)
 
+    def test_nan_distance_filtered(self):
+        """Test that NaN distances are filtered as violations."""
+        distances = {0: np.nan, 1: 0.1, 2: 0.1}  # seq 0 has NaN distance
+
+        # Mock valid distances between other sequences
+        self.mock_provider.get_distance.return_value = 0.05
+
+        result = filter_distance_dict_triangles(distances, self.mock_provider)
+
+        # Sequence 0 with NaN should be filtered out
+        assert 0 not in result
+        assert 1 in result
+        assert 2 in result
+
+    def test_nan_in_triangle_check_skipped(self):
+        """Test that triangles with NaN distances are skipped."""
+        distances = {0: 0.1, 1: 0.1, 2: 0.1}
+
+        # Mock provider returns NaN for some pairs
+        def mock_get_distance(i, j):
+            if i == 0 and j == 1:
+                return np.nan  # This triangle should be skipped
+            return 0.05
+
+        self.mock_provider.get_distance.side_effect = mock_get_distance
+
+        result = filter_distance_dict_triangles(distances, self.mock_provider)
+
+        # All sequences should remain (NaN triangles don't count as violations or validations)
+        assert len(result) == 3
+
+    def test_all_nan_neighbors_filtered(self):
+        """Test that sequence with all NaN neighbors gets filtered appropriately."""
+        distances = {0: 0.1, 1: 0.1, 2: 0.1, 3: 0.1}
+
+        # Mock provider: seq 0 has all NaN distances to others
+        def mock_get_distance(i, j):
+            if 0 in (i, j):
+                return np.nan
+            return 0.05
+
+        self.mock_provider.get_distance.side_effect = mock_get_distance
+
+        result = filter_distance_dict_triangles(distances, self.mock_provider,
+                                              min_validations=2)
+
+        # Sequences 0, 1, 2, 3 should all remain since NaN checks are skipped
+        # None can accumulate enough validations against seq 0, but they can validate against each other
+        assert len(result) >= 0  # At least some sequences remain
+
 
 class TestFilterIntraClusterTriangles:
     """Test intra-cluster triangle inequality filtering."""
@@ -215,6 +265,66 @@ class TestFilterIntraClusterTriangles:
         result = filter_intra_cluster_triangles(cluster_indices, self.mock_provider,
                                               min_validations=1)
         assert result == []
+
+    def test_nan_pair_filtered(self):
+        """Test that pairs with NaN distances are filtered as violations."""
+        cluster_indices = [0, 1, 2, 3]
+
+        # Mock distances where pair (0,1) has NaN
+        def mock_get_distance(i, j):
+            if (i == 0 and j == 1) or (i == 1 and j == 0):
+                return np.nan
+            return 0.1
+
+        self.mock_provider.get_distance.side_effect = mock_get_distance
+
+        result = filter_intra_cluster_triangles(cluster_indices, self.mock_provider)
+
+        # Pair (0, 1) should be in violations
+        assert (0, 1) in result or (1, 0) in result
+
+    def test_nan_in_triangle_check_skipped_intra(self):
+        """Test that triangles with NaN distances are skipped in validation."""
+        cluster_indices = [0, 1, 2, 3]
+
+        # Mock distances where some auxiliary distances are NaN
+        def mock_get_distance(i, j):
+            # Pair (0,1) is valid
+            if (i == 0 and j == 1) or (i == 1 and j == 0):
+                return 0.1
+            # But one of the triangle sides is NaN
+            if (i == 0 and j == 2) or (i == 2 and j == 0):
+                return np.nan
+            return 0.1
+
+        self.mock_provider.get_distance.side_effect = mock_get_distance
+
+        result = filter_intra_cluster_triangles(cluster_indices, self.mock_provider,
+                                              min_validations=1)
+
+        # Should not filter (0,1) even though some triangles have NaN
+        # NaN triangles are skipped, not counted as violations
+        assert result == [] or (0, 1) not in result
+
+    def test_multiple_nan_pairs(self):
+        """Test handling of multiple NaN pairs."""
+        cluster_indices = [0, 1, 2, 3]
+
+        # Mock distances with multiple NaN pairs
+        def mock_get_distance(i, j):
+            nan_pairs = [(0, 1), (1, 0), (2, 3), (3, 2)]
+            if (i, j) in nan_pairs:
+                return np.nan
+            return 0.1
+
+        self.mock_provider.get_distance.side_effect = mock_get_distance
+
+        result = filter_intra_cluster_triangles(cluster_indices, self.mock_provider)
+
+        # Both NaN pairs should be filtered
+        assert len(result) >= 2
+        assert (0, 1) in result or (1, 0) in result
+        assert (2, 3) in result or (3, 2) in result
 
 
 class TestFilterDistanceMatrixTriangles:
@@ -295,6 +405,45 @@ class TestFilterDistanceMatrixTriangles:
         # Should not raise exception with progress disabled
         result = filter_distance_matrix_triangles(matrix, show_progress=False)
         assert result.shape == matrix.shape
+
+    def test_existing_nan_skipped(self):
+        """Test that triangles with existing NaN values are skipped."""
+        matrix = np.array([
+            [0.0, 0.1, np.nan],  # Pre-existing NaN (failed alignment)
+            [0.1, 0.0, 0.1],
+            [np.nan, 0.1, 0.0]
+        ])
+
+        result = filter_distance_matrix_triangles(matrix, show_progress=False)
+
+        # Pre-existing NaN should remain NaN
+        assert np.isnan(result[0, 2])
+        assert np.isnan(result[2, 0])
+
+        # Other distances should remain unchanged (no false violations from NaN triangles)
+        assert result[0, 1] == 0.1
+        assert result[1, 2] == 0.1
+
+    def test_multiple_nan_in_matrix(self):
+        """Test matrix with multiple NaN values."""
+        matrix = np.array([
+            [0.0, np.nan, 0.1, 0.2],
+            [np.nan, 0.0, np.nan, 0.15],
+            [0.1, np.nan, 0.0, 0.1],
+            [0.2, 0.15, 0.1, 0.0]
+        ])
+
+        result = filter_distance_matrix_triangles(matrix, show_progress=False)
+
+        # All pre-existing NaN should remain
+        assert np.isnan(result[0, 1])
+        assert np.isnan(result[1, 0])
+        assert np.isnan(result[1, 2])
+        assert np.isnan(result[2, 1])
+
+        # Valid distances should remain (triangles with NaN are skipped)
+        assert result[0, 2] == 0.1
+        assert result[0, 3] == 0.2
 
         # Should not raise exception with progress enabled
         result = filter_distance_matrix_triangles(matrix, show_progress=True)

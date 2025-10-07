@@ -11,7 +11,11 @@ from gaphack.utils import (
     calculate_distance_matrix,
     format_cluster_output,
     save_clusters_to_file,
-    validate_sequences
+    validate_sequences,
+    compute_msa_distance,
+    filter_msa_positions,
+    replace_terminal_gaps,
+    run_spoa_msa
 )
 
 
@@ -188,7 +192,206 @@ class TestSequenceValidation:
         """Test validation with no sequences."""
         sequences = []
         is_valid, errors = validate_sequences(sequences)
-        
+
         assert not is_valid
         assert len(errors) == 1
         assert "no sequences" in errors[0].lower()
+
+
+class TestMSADistanceMinimumOverlap:
+    """Test minimum overlap fraction in MSA distance computation."""
+
+    def test_sufficient_overlap_returns_valid_distance(self):
+        """Test that sequences with sufficient overlap return valid distance."""
+        # Create aligned sequences with good overlap
+        # Sequence 1: 100bp original (no terminal gaps)
+        # Sequence 2: 100bp original (no terminal gaps)
+        # Overlap: 90bp (90% of shorter sequence - well above 50% threshold)
+        seq1 = "A" * 90 + "." * 10  # 90bp sequence, 10bp terminal gap at end
+        seq2 = "." * 10 + "A" * 90  # 90bp sequence, 10bp terminal gap at start
+
+        distance = compute_msa_distance(seq1, seq2)
+
+        # Should return valid distance (not NaN)
+        assert not np.isnan(distance)
+        assert 0.0 <= distance <= 1.0
+
+    def test_insufficient_overlap_returns_nan(self):
+        """Test that sequences with insufficient overlap return NaN."""
+        # Create aligned sequences with minimal overlap
+        # Sequence 1: 100bp original
+        # Sequence 2: 100bp original
+        # Overlap: 40bp (40% of shorter sequence - below 50% threshold)
+        seq1 = "A" * 100 + "." * 60
+        seq2 = "." * 60 + "A" * 100
+
+        # Only 40bp overlap in the middle
+        seq1 = "A" * 40 + "." * 120
+        seq2 = "." * 120 + "A" * 40
+
+        distance = compute_msa_distance(seq1, seq2)
+
+        # Should return NaN for insufficient overlap
+        assert np.isnan(distance)
+
+    def test_asymmetric_sequences_its2_scenario(self):
+        """Test asymmetric sequences like ITS2 vs full ITS."""
+        # ITS2: 200bp
+        # Full ITS: 500bp
+        # Overlap: 200bp (100% of ITS2, 40% of full ITS)
+        # Should pass because overlap >= 50% of shorter sequence (200bp)
+
+        # ITS2 fully covered, rest of full ITS is terminal gaps
+        its2_aligned = "A" * 200 + "." * 300  # 200bp + 300bp terminal gaps
+        full_its_aligned = "A" * 200 + "T" * 300  # Full 500bp sequence
+
+        distance = compute_msa_distance(its2_aligned, full_its_aligned)
+
+        # Should return valid distance (overlap is 200bp, >= 100bp threshold)
+        assert not np.isnan(distance)
+
+    def test_asymmetric_sequences_insufficient_overlap(self):
+        """Test asymmetric sequences with insufficient overlap."""
+        # Short seq: 100bp
+        # Long seq: 300bp
+        # Overlap: 40bp (40% of short seq - below 50% threshold)
+
+        short_aligned = "A" * 40 + "." * 260
+        long_aligned = "." * 60 + "A" * 40 + "T" * 200
+
+        distance = compute_msa_distance(short_aligned, long_aligned)
+
+        # Should return NaN (overlap 40bp < 50bp threshold)
+        assert np.isnan(distance)
+
+    def test_exact_threshold_boundary_just_below(self):
+        """Test sequences just below the 50% threshold."""
+        # Both 100bp original length, overlap 49bp (49% - just below 50% threshold)
+        seq1 = "A" * 49 + "T" * 51 + "." * 51  # 100bp + 51 terminal gaps
+        seq2 = "." * 51 + "A" * 49 + "C" * 51  # 51 terminal gaps + 100bp
+
+        distance = compute_msa_distance(seq1, seq2)
+
+        # Should return NaN (49bp < 50bp threshold)
+        assert np.isnan(distance)
+
+    def test_exact_threshold_boundary_at_threshold(self):
+        """Test sequences exactly at the 50% threshold."""
+        # Both 100bp original length, overlap 50bp (exactly 50%)
+        # Need to create sequences that actually overlap in the middle
+        seq1 = "A" * 50 + "T" * 50 + "." * 50  # 100bp + 50 terminal gaps
+        seq2 = "." * 50 + "A" * 50 + "C" * 50  # 50 terminal gaps + 100bp
+
+        distance = compute_msa_distance(seq1, seq2)
+
+        # Should return valid distance (overlap is 50bp which is exactly 50% of 100bp)
+        assert not np.isnan(distance)
+
+    def test_empty_sequence_returns_nan(self):
+        """Test that empty sequences return NaN."""
+        # All terminal gaps = empty sequence
+        seq1 = "." * 100
+        seq2 = "A" * 100
+
+        distance = compute_msa_distance(seq1, seq2)
+
+        assert np.isnan(distance)
+
+    def test_both_empty_sequences_return_nan(self):
+        """Test that two empty sequences return NaN."""
+        seq1 = "." * 100
+        seq2 = "." * 100
+
+        distance = compute_msa_distance(seq1, seq2)
+
+        assert np.isnan(distance)
+
+    def test_no_overlap_after_filtering_returns_nan(self):
+        """Test sequences with no overlap after position filtering."""
+        # Sequences don't overlap at all
+        seq1 = "A" * 100 + "." * 100
+        seq2 = "." * 100 + "A" * 100
+
+        distance = compute_msa_distance(seq1, seq2)
+
+        # Should return NaN (zero overlap)
+        assert np.isnan(distance)
+
+    def test_internal_gaps_counted_in_original_length(self):
+        """Test that internal gaps are counted in original sequence length."""
+        # Sequence with internal gaps should count gaps in original length
+        # Original length = bases + internal gaps (exclude only terminal gaps)
+
+        # 50 bases + 50 internal gaps + 100 terminal gaps = 100bp original length
+        seq1 = "A-" * 25 + "T-" * 25 + "." * 100  # 50 bases, 50 internal gaps
+        seq2 = "A-" * 25 + "T-" * 25 + "C" * 100  # 50 bases, 50 internal gaps, then 100 more bases
+
+        distance = compute_msa_distance(seq1, seq2)
+
+        # Original lengths: both have 100bp (50 bases + 50 internal gaps)
+        # Overlap after filtering should be considered
+        # Should return valid distance if overlap >= 50bp
+        assert not np.isnan(distance)
+
+    def test_diverse_sequences_with_sufficient_overlap(self):
+        """Test that diverse sequences still get scored if overlap is sufficient."""
+        # Create sequences with mutations but sufficient overlap
+        # Using real MSA alignment output format
+
+        # Run through SPOA to get realistic aligned sequences
+        sequences = [
+            "ATCGATCGATCG" * 10,  # 120bp
+            "ATCGATCGATCG" * 10,  # 120bp, identical
+        ]
+
+        aligned = run_spoa_msa(sequences)
+        if aligned is not None:
+            aligned = replace_terminal_gaps(aligned)
+            distance = compute_msa_distance(aligned[0], aligned[1])
+
+            # Identical sequences should have distance 0
+            assert not np.isnan(distance)
+            assert distance == 0.0
+
+    def test_original_length_calculation_excludes_gaps(self):
+        """Test that original length calculation correctly excludes both gap types."""
+        # Create sequences where alignment adds internal gaps
+        # Aligned sequences must be same length (as they would from SPOA)
+
+        # When original lengths are NOT provided, should count only bases (not '-' or '.')
+        # Both 72 chars total (aligned length)
+        seq1_aligned = "ATCG" + "-" * 10 + "ATCG" + "." * 50  # 8 bases, 10 internal gaps, 50 terminal = 68 chars
+        seq2_aligned = "." * 10 + "ATCGATCG" + "-" * 5 + "ATCG" + "." * 41  # 12 bases, 5 internal gaps, 51 terminal = 68 chars
+
+        # Calculated original lengths (excluding all gaps):
+        # seq1: 8 bases
+        # seq2: 12 bases
+        # min = 8, threshold = 4bp
+        # After filter_msa_positions, overlap should include the overlapping ATCG region
+        # As long as overlap >= 4bp, should pass
+
+        distance = compute_msa_distance(seq1_aligned, seq2_aligned)
+
+        # Should return valid distance (overlap sufficient relative to calculated original lengths)
+        assert not np.isnan(distance)
+
+    def test_original_length_parameter_overrides_calculation(self):
+        """Test that providing original lengths overrides calculation from aligned sequence."""
+        # Create aligned sequences
+        seq1_aligned = "ATCG" + "." * 96  # Only 4 bases visible
+        seq2_aligned = "ATCG" + "." * 96  # Only 4 bases visible
+
+        # Without original lengths: would calculate as 4bp each, threshold = 2bp, overlap = 4bp → PASS
+        # With original lengths of 100bp each: threshold = 50bp, overlap = 4bp → FAIL
+
+        # Test with provided original lengths (should fail)
+        distance_with_lengths = compute_msa_distance(
+            seq1_aligned, seq2_aligned,
+            original_len1=100,
+            original_len2=100
+        )
+        assert np.isnan(distance_with_lengths), "Should fail with 100bp original lengths (4bp < 50bp threshold)"
+
+        # Test without provided lengths (should pass)
+        distance_without_lengths = compute_msa_distance(seq1_aligned, seq2_aligned)
+        assert not np.isnan(distance_without_lengths), "Should pass when calculated as 4bp original (4bp >= 2bp threshold)"

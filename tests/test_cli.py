@@ -350,6 +350,7 @@ class TestAnalyzeCLI:
                  patch('gaphack.analyze_cli.analyze_single_cluster') as mock_analyze:
 
                 # Mock analysis function to return expected structure
+                # Use longer sequences to avoid minimum overlap failures
                 mock_analyze.return_value = {
                     'filename': 'test_cluster.fasta',
                     'n_sequences': 3,
@@ -358,7 +359,7 @@ class TestAnalyzeCLI:
                     'percentiles': {
                         'P5': 0.1, 'P25': 0.15, 'P50': 0.2, 'P75': 0.25, 'P95': 0.3
                     },
-                    'sequences': ['ATGC', 'GCTA', 'CGAT'],
+                    'sequences': ['ATCG' * 50, 'ATCG' * 50, 'GCTA' * 50],  # 200bp sequences
                     'headers': ['seq_0', 'seq_1', 'seq_2']
                 }
 

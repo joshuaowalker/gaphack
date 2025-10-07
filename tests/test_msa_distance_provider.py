@@ -219,3 +219,82 @@ class TestMSADistanceProviderIntegration:
         non_diag = matrix[np.triu_indices_from(matrix, k=1)]
         assert np.mean(non_diag) > 0.01
         assert np.mean(non_diag) < 0.99
+
+
+class TestMedianNormalization:
+    """Test median length normalization for mixed-length sequences."""
+
+    def test_median_normalization_mixed_lengths(self):
+        """Test that median normalization provides consistent distances for mixed-length sequences."""
+        # Simulate full ITS (500bp) and ITS2-only (200bp) sequences
+        # All sequences have 2 substitutions in the ITS2 region
+
+        # Create base sequence (500bp) - mixed sequence to avoid homopolymer normalization
+        base_seq = "ATCG" * 50 + "TGCA" * 75  # 200bp + 300bp = 500bp
+
+        # Variant with 2 substitutions in ITS2 region (first 200bp)
+        variant_seq = "CTCG" + "ATCG" * 49 + "CCCA" + "TGCA" * 74  # 2 substitutions at positions 0 and 200
+
+        # ITS2-only version (first 200bp only)
+        its2_base = base_seq[:200]
+        its2_variant = variant_seq[:200]
+
+        # Create mixed dataset: 3 full ITS, 1 ITS2
+        sequences = [base_seq, variant_seq, base_seq, its2_variant]
+
+        provider = MSACachedDistanceProvider(sequences)
+
+        # Check that median is at full ITS length
+        assert provider.normalization_length == 500
+
+        # Get distances
+        dist_full_full = provider.get_distance(0, 1)  # full vs full (2 edits)
+        dist_full_its2 = provider.get_distance(0, 3)  # full vs ITS2 (1 edit in overlap)
+
+        # Both should use same denominator (median = 500bp)
+        # Full vs full: ~2 edits / 500 = ~0.004
+        # Full vs ITS2: ~1 edit / 500 = ~0.002 (only 1 edit in the overlapping ITS2 region)
+        assert dist_full_full > dist_full_its2  # More edits = larger distance
+        assert 0.002 < dist_full_full < 0.006  # Approximately 2 edits / 500bp
+
+    def test_median_normalization_all_short_sequences(self):
+        """Test median normalization when all sequences are short."""
+        # All sequences are ITS2-only (200bp)
+        # Use mixed sequences to avoid homopolymer normalization
+        sequences = [
+            "ATCG" * 50,  # 200bp
+            "CTCG" + "ATCG" * 48 + "CTCG",  # 200bp, 2 substitutions (positions 0 and 196)
+            "ATCG" * 50,  # 200bp
+        ]
+
+        provider = MSACachedDistanceProvider(sequences)
+
+        # Median should be 200bp
+        assert provider.normalization_length == 200
+
+        # Distance should be approximately 1-2 edits / 200bp
+        # (adjusted-identity may normalize some edits)
+        dist = provider.get_distance(0, 1)
+        assert 0.004 < dist < 0.015  # Allow tolerance for alignment adjustments
+
+    def test_median_robust_to_outliers(self):
+        """Test that median is robust to chimeric/long outliers."""
+        # Simulate dataset with one chimera (2000bp) among full ITS (500bp)
+        sequences = [
+            "ATCG" * 125,  # 500bp
+            "ATCG" * 125,  # 500bp
+            "ATCG" * 125,  # 500bp
+            "ATCG" * 125,  # 500bp
+            "ATCG" * 500,  # 2000bp chimera/SSU+ITS
+        ]
+
+        provider = MSACachedDistanceProvider(sequences)
+
+        # Median should be 500bp (not affected by the 2000bp outlier)
+        assert provider.normalization_length == 500
+
+        # Mean would be 800bp (affected by outlier): (500+500+500+500+2000)/5 = 800
+        mean_length = int(np.mean([len(seq) for seq in sequences]))
+        assert mean_length == 800
+
+        # This demonstrates why median is better than mean

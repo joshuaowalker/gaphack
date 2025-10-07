@@ -56,6 +56,12 @@ def filter_distance_dict_triangles(distances: Dict[int, float],
             continue  # Already determined status
 
         d_i = distances[seq_i]
+
+        # Skip if this distance is NaN (failed alignment)
+        if np.isnan(d_i):
+            violations.add(seq_i)
+            continue
+
         validation_count = 0
 
         # Test against other sequences until we find a violation or enough validations
@@ -65,6 +71,10 @@ def filter_distance_dict_triangles(distances: Dict[int, float],
 
             d_j = distances[seq_j]
             d_ij = distance_provider.get_distance(seq_i, seq_j)
+
+            # Skip if any distance is NaN (failed alignment)
+            if np.isnan(d_j) or np.isnan(d_ij):
+                continue  # Don't count as violation or validation
 
             # Check triangle inequality: d_i <= d_j + d_ij
             if d_i > d_j + d_ij + violation_tolerance:
@@ -121,6 +131,12 @@ def filter_intra_cluster_triangles(cluster_indices: List[int],
                 continue  # Already determined status
 
             d_ij = distance_provider.get_distance(seq_i, seq_j)
+
+            # Skip if this distance is NaN (failed alignment)
+            if np.isnan(d_ij):
+                violations.add(pair)
+                continue
+
             validation_count = 0
 
             # Test this pair against other sequences in the cluster
@@ -130,6 +146,10 @@ def filter_intra_cluster_triangles(cluster_indices: List[int],
 
                 d_ik = distance_provider.get_distance(seq_i, seq_k)
                 d_jk = distance_provider.get_distance(seq_j, seq_k)
+
+                # Skip if any distance is NaN (failed alignment)
+                if np.isnan(d_ik) or np.isnan(d_jk):
+                    continue  # Don't count as violation or validation
 
                 # Check triangle inequality: d_ij <= d_ik + d_jk
                 if d_ij > d_ik + d_jk + violation_tolerance:
