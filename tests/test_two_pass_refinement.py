@@ -11,55 +11,9 @@ from typing import Dict, List
 from gaphack.cluster_refinement import (
     build_refinement_scope,
     execute_refinement_operations,
-    check_full_set_equivalence,
     RefinementConfig
 )
 from gaphack.cluster_graph import ClusterGraph
-
-
-class TestFullSetEquivalence:
-    """Test full cluster set equivalence checking."""
-
-    def test_identical_sets_are_equivalent(self):
-        """Test that identical cluster sets are equivalent."""
-        clusters1 = {
-            'cluster_A': ['seq1', 'seq2'],
-            'cluster_B': ['seq3', 'seq4']
-        }
-
-        clusters2 = {
-            'cluster_X': ['seq1', 'seq2'],
-            'cluster_Y': ['seq3', 'seq4']
-        }
-
-        assert check_full_set_equivalence(clusters1, clusters2)
-
-    def test_different_sets_not_equivalent(self):
-        """Test that different cluster sets are not equivalent."""
-        clusters1 = {
-            'cluster_A': ['seq1', 'seq2'],
-            'cluster_B': ['seq3', 'seq4']
-        }
-
-        clusters2 = {
-            'cluster_merged': ['seq1', 'seq2', 'seq3', 'seq4']
-        }
-
-        assert not check_full_set_equivalence(clusters1, clusters2)
-
-    def test_order_independent_full_equivalence(self):
-        """Test that full set equivalence is order-independent."""
-        clusters1 = {
-            'cluster_A': ['seq1', 'seq2'],
-            'cluster_B': ['seq3', 'seq4']
-        }
-
-        clusters2 = {
-            'cluster_Y': ['seq4', 'seq3'],  # Different order
-            'cluster_X': ['seq2', 'seq1']   # Different order
-        }
-
-        assert check_full_set_equivalence(clusters1, clusters2)
 
 
 class TestExecuteRefinementOperations:
@@ -215,30 +169,6 @@ class TestExecuteRefinementOperations:
 
 class TestEdgeCases:
     """Test edge cases for two-pass refinement."""
-
-    def test_empty_clusters_input(self):
-        """Test that empty cluster dict is handled gracefully."""
-        clusters = {}
-        assert check_full_set_equivalence(clusters, {})
-
-    def test_single_cluster_input(self):
-        """Test refinement with only one cluster."""
-        clusters = {
-            'cluster_1': ['seq1', 'seq2', 'seq3']
-        }
-
-        # Should be equivalent to itself
-        assert check_full_set_equivalence(clusters, clusters)
-
-    def test_all_singleton_clusters(self):
-        """Test refinement with all singleton clusters."""
-        clusters = {
-            f'cluster_{i}': [f'seq{i}']
-            for i in range(100)
-        }
-
-        # Should be equivalent to itself
-        assert check_full_set_equivalence(clusters, clusters)
 
     def test_immediate_convergence_detected(self):
         """Test that immediate convergence (no changes) is detected."""

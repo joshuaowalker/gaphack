@@ -91,7 +91,8 @@ class RefinementConfig:
                  close_threshold: Optional[float] = None,
                  max_iterations: int = 10,
                  k_neighbors: int = 20,
-                 search_method: str = "blast"):
+                 search_method: str = "blast",
+                 random_seed: Optional[int] = None):
         """Initialize refinement configuration.
 
         Args:
@@ -100,35 +101,19 @@ class RefinementConfig:
             max_iterations: Maximum Pass 2 iterations (default: 10)
             k_neighbors: K-NN graph parameter (default: 20)
             search_method: "blast" or "vsearch" for proximity graph
+            random_seed: Seed for randomizing seed order in Pass 2 (default: None for random seed)
         """
         self.max_full_gaphack_size = max_full_gaphack_size
         self.close_threshold = close_threshold
         self.max_iterations = max_iterations
         self.k_neighbors = k_neighbors
         self.search_method = search_method
+        self.random_seed = random_seed
 
 
 # ============================================================================
 # Helper Functions for Two-Pass Refinement
 # ============================================================================
-
-def check_full_set_equivalence(clusters1: Dict[str, List[str]],
-                               clusters2: Dict[str, List[str]]) -> bool:
-    """Check if two cluster dictionaries contain identical cluster sets.
-
-    Order-independent comparison using frozenset signatures.
-
-    Args:
-        clusters1: First cluster dictionary
-        clusters2: Second cluster dictionary
-
-    Returns:
-        True if both contain the same set of clusters (order-independent)
-    """
-    sigs1 = {frozenset(headers) for headers in clusters1.values()}
-    sigs2 = {frozenset(headers) for headers in clusters2.values()}
-    return sigs1 == sigs2
-
 
 def get_all_conflicted_cluster_ids(conflicts: Dict[str, List[str]],
                                    all_clusters: Dict[str, List[str]]) -> Set[str]:
@@ -155,6 +140,7 @@ def build_refinement_scope(
     proximity_graph: ClusterGraph,
     sequences: List[str],
     headers: List[str],
+    max_lump: float,
     close_threshold: float,
     config: RefinementConfig
 ) -> Tuple[List[str], List[str], List[str]]:
@@ -162,8 +148,8 @@ def build_refinement_scope(
 
     Constructs a refinement scope with three components:
     1. Seed clusters (core)
-    2. Neighbor clusters within close_threshold (core neighbors, merge candidates)
-    3. Context clusters beyond close_threshold (for inter-cluster distances in gap calculation)
+    2. Core scope clusters within max_lump (merge candidates)
+    3. Context clusters between max_lump and close_threshold (for inter-cluster distances in gap calculation)
 
     Uses distance-based thresholds rather than sequence counts to ensure
     density-independent behavior that remains stable as datasets grow.
@@ -174,7 +160,8 @@ def build_refinement_scope(
         proximity_graph: Graph for finding neighbors
         sequences: Full sequence list
         headers: Full header list (indices must match sequences)
-        close_threshold: Distance threshold for including core neighbors
+        max_lump: Distance threshold for core scope (merge candidates)
+        close_threshold: Outer distance threshold for context
         config: Contains max_full_gaphack_size
 
     Returns:
@@ -186,10 +173,10 @@ def build_refinement_scope(
     scope_cluster_ids = list(seed_clusters)
     current_size = sum(len(all_clusters[cid]) for cid in scope_cluster_ids if cid in all_clusters)
 
-    # Step 2: Collect all neighbors within close_threshold from all seeds
+    # Step 2: Collect all neighbors within max_lump from all seeds (core scope - merge candidates)
     core_neighbors = []
     for seed_id in seed_clusters:
-        neighbors = proximity_graph.get_neighbors_within_distance(seed_id, close_threshold)
+        neighbors = proximity_graph.get_neighbors_within_distance(seed_id, max_lump)
         for neighbor_id, distance in neighbors:
             if neighbor_id not in scope_cluster_ids:
                 core_neighbors.append((neighbor_id, distance))
@@ -202,7 +189,7 @@ def build_refinement_scope(
 
     neighbors_sorted = sorted(neighbor_dict.items(), key=lambda x: x[1])
 
-    # Step 3: Add core neighbors within close_threshold (closest first) up to max_scope_size
+    # Step 3: Add core neighbors within max_lump (closest first) up to max_scope_size
     for neighbor_id, distance in neighbors_sorted:
         if neighbor_id not in all_clusters:
             continue
@@ -215,14 +202,15 @@ def build_refinement_scope(
             logger.debug(f"Scope size limit reached while adding core neighbors at distance {distance:.4f}")
             break
 
-    # Step 4: Add context clusters beyond close_threshold (for gap calculation)
-    # Search all neighbors beyond close_threshold, add closest first up to max_scope_size
+    # Step 4: Add context clusters between max_lump and close_threshold (for gap calculation)
+    # Search all neighbors within close_threshold, filter to those beyond max_lump
     context_candidates = []
     for seed_id in seed_clusters:
-        # Use k_nearest_neighbors to get all available neighbors
-        all_neighbors = proximity_graph.get_k_nearest_neighbors(seed_id, k=30)
+        # Get all neighbors within close_threshold
+        all_neighbors = proximity_graph.get_neighbors_within_distance(seed_id, close_threshold)
         for neighbor_id, distance in all_neighbors:
-            if (distance > close_threshold and
+            # Keep only those beyond max_lump (context zone)
+            if (distance > max_lump and
                 neighbor_id not in scope_cluster_ids and
                 neighbor_id in all_clusters):
                 context_candidates.append((neighbor_id, distance))
@@ -489,34 +477,26 @@ def pass1_resolve_and_split(
         conflicted_cluster_ids = set()
     timing['conflict_resolution'] = time.time() - conflict_start
 
-    # Step 2: Build proximity graph for context selection
-    graph_start = time.time()
-    logger.info("Building proximity graph for individual refinement...")
-    proximity_graph = ClusterGraph(
-        clusters_after_conflicts, sequences, headers,
-        k_neighbors=config.k_neighbors,
-        search_method=config.search_method,
-        show_progress=True,
-        close_threshold=max_lump  # Include all neighbors within max_lump
-    )
-    timing['proximity_graph'] = time.time() - graph_start
-
-    # Step 3: Individually refine every non-conflicted cluster
+    # Step 2: Individually refine every non-conflicted cluster in isolation (no neighbors, no context)
+    # This allows splitting of non-cohesive clusters
     refinement_start = time.time()
     final_clusters = clusters_after_conflicts.copy()
     non_conflicted_count = len(clusters_after_conflicts) - len(conflicted_cluster_ids)
     total_clusters = len(clusters_after_conflicts)  # Total for progress counter
 
-    logger.info(f"Individually refining {non_conflicted_count} non-conflicted clusters...")
+    logger.info(f"Individually refining {non_conflicted_count} non-conflicted clusters in isolation...")
 
-    clusters_processed = 0  # Track cumulative input clusters, not operations
+    # Map headers to indices for sequence extraction
+    header_to_idx = {h: i for i, h in enumerate(headers)}
+
+    clusters_processed = 0  # Track cumulative input clusters
     for cluster_id in sorted(clusters_after_conflicts.keys()):
         if cluster_id in conflicted_cluster_ids:
             continue  # Already refined during conflict resolution
 
-        # Skip if cluster was already processed as part of another scope
+        # Skip if cluster was already processed
         if cluster_id not in final_clusters:
-            logger.debug(f"Skipping {cluster_id} - already processed in another scope")
+            logger.debug(f"Skipping {cluster_id} - already processed")
             continue
 
         # Skip if cluster is empty (shouldn't happen, but defensive check)
@@ -524,32 +504,25 @@ def pass1_resolve_and_split(
             logger.warning(f"Skipping {cluster_id} - empty cluster")
             continue
 
-        # Refine this cluster individually with context
-        scope_clusters, scope_sequences, scope_headers = build_refinement_scope(
-            seed_clusters=[cluster_id],
-            all_clusters=final_clusters,
-            proximity_graph=proximity_graph,
-            sequences=sequences,
-            headers=headers,
-            close_threshold=max_lump,  # Use max_lump as threshold for Pass 1
-            config=config
-        )
+        # Extract sequences for this cluster only (isolated refinement)
+        cluster_headers = final_clusters[cluster_id]
+        cluster_sequences = [sequences[header_to_idx[h]] for h in cluster_headers]
 
-        # Apply full gapHACk to scope and get metadata
+        # Apply full gapHACk to this cluster in isolation
         refined_clusters, metadata = apply_full_gaphack_to_scope_with_metadata(
-            scope_sequences, scope_headers,
+            cluster_sequences, cluster_headers,
             min_split, max_lump, target_percentile,
             cluster_id_generator=cluster_id_generator,
             quiet=True
         )
 
         # Extract gap info and compute AMI for logging
-        num_input = len(scope_clusters)
+        num_input = 1  # Always 1 cluster input in isolated mode
         num_output = len(refined_clusters)
         gap_size = metadata.get('gap_size', float('-inf'))
 
         # Compute AMI between input and output
-        ami = compute_ami_for_refinement(set(scope_clusters), refined_clusters, final_clusters)
+        ami = compute_ami_for_refinement({cluster_id}, refined_clusters, final_clusters)
 
         # Format gap info
         gap_info_str = ""
@@ -564,15 +537,12 @@ def pass1_resolve_and_split(
         elif gap_size > float('-inf'):
             gap_info_str = f"Gap {gap_size:.4f}"
 
-        # Replace original cluster(s) with refined result
-        for old_id in scope_clusters:
-            if old_id in final_clusters:
-                del final_clusters[old_id]
-
+        # Replace original cluster with refined result
+        del final_clusters[cluster_id]
         for new_id, new_headers in refined_clusters.items():
             final_clusters[new_id] = new_headers
 
-        clusters_processed += num_input
+        clusters_processed += 1
         logger.info(f"Pass 1 ({clusters_processed} of {total_clusters}): "
                    f"{num_input} -> {num_output} clusters.  {gap_info_str}.  AMI {ami:.3f}")
 
@@ -590,7 +560,6 @@ def pass1_resolve_and_split(
     logger.info(f"Pass 1 complete: {len(all_clusters)} clusters → {len(final_clusters)} clusters "
                f"({len(final_clusters) - len(all_clusters):+d}).  AMI {pass1_ami:.3f}")
     logger.info(f"Pass 1 timing: conflict={timing['conflict_resolution']:.1f}s, "
-               f"graph={timing['proximity_graph']:.1f}s, "
                f"refinement={timing['individual_refinement']:.1f}s, "
                f"total={timing['total']:.1f}s")
 
@@ -639,7 +608,7 @@ def execute_refinement_operations(
         inputs_still_exist = all(cid in next_clusters for cid in input_cluster_ids)
 
         if not inputs_still_exist:
-            logger.debug(f"Skipping operation for seed {seed_id} - inputs already consumed")
+            logger.info(f"Skipping operation for seed {seed_id} - inputs already consumed")
             continue
 
         # Check convergence: AMI == 1.0 means perfect agreement (no changes)
@@ -713,6 +682,18 @@ def pass2_iterative_merge(
     logger.info(f"Starting with {len(all_clusters)} clusters")
     logger.info(f"Close threshold: {close_threshold:.4f}, Max iterations: {max_iterations}")
 
+    # Initialize random number generator with seed (generate random seed if not provided)
+    import random
+    if config.random_seed is not None:
+        seed = config.random_seed
+        logger.info(f"Seed order randomization: using provided seed {seed}")
+    else:
+        # Generate truly random seed
+        seed = random.randint(0, 2**31 - 1)
+        logger.info(f"Seed order randomization: using random seed {seed}")
+
+    rng = random.Random(seed)
+
     pass2_start = time.time()
     timing = {
         'iterations': [],  # Per-iteration timing
@@ -751,20 +732,26 @@ def pass2_iterative_merge(
 
         # Track statistics for iteration summary
         iteration_stats = {
-            'total_input_clusters': 0,
-            'total_output_clusters': 0,
             'best_gap': float('-inf'),
             'best_gap_info': None
         }
 
-        # Every cluster serves as seed (deterministic ID-based order)
+        # Every cluster serves as seed (randomized order)
         refinement_start = time.time()
         seed_list = sorted(current_clusters.keys())
+
+        # Shuffle seed order with seeded RNG
+        rng.shuffle(seed_list)
+
         total_clusters = len(seed_list)  # Total for progress counter
-        clusters_processed = 0  # Track cumulative input clusters, not operations
+        seeds_processed = 0  # Track seeds processed (1 per seed, whether executed or skipped)
 
         for seed_id in seed_list:
+            seeds_processed += 1  # Increment for every seed
+
             if seed_id in processed_this_iteration:
+                logger.info(f"Pass 2 Iter {global_iteration} ({seeds_processed} of {total_clusters}): "
+                          f"Skipping seed {seed_id} - dependencies changed (already processed)")
                 continue  # Already processed as part of another seed's scope
 
             # Build refinement scope (seed + neighbors + context)
@@ -774,6 +761,7 @@ def pass2_iterative_merge(
                 proximity_graph=proximity_graph,
                 sequences=sequences,
                 headers=headers,
+                max_lump=max_lump,
                 close_threshold=close_threshold,
                 config=config
             )
@@ -781,7 +769,8 @@ def pass2_iterative_merge(
             # Check if this scope has already converged (use sequence set as signature)
             scope_signature = frozenset(scope_headers)
             if scope_signature in converged_scopes:
-                logger.debug(f"Skipping converged scope: {len(scope_signature)} sequences")
+                logger.info(f"Pass 2 Iter {global_iteration} ({seeds_processed} of {total_clusters}): "
+                          f"Skipping seed {seed_id} - prior convergence detected ({len(scope_signature)} sequences)")
                 processed_this_iteration.update(scope_cluster_ids)
                 continue
 
@@ -800,10 +789,6 @@ def pass2_iterative_merge(
 
             # Compute AMI between input and output
             ami = compute_ami_for_refinement(set(scope_cluster_ids), refined_clusters, current_clusters)
-
-            # Update iteration statistics
-            iteration_stats['total_input_clusters'] += num_input
-            iteration_stats['total_output_clusters'] += num_output
 
             # Extract gap details from metadata
             gap_info_str = ""
@@ -830,8 +815,7 @@ def pass2_iterative_merge(
                         }
 
             # Log individual refinement
-            clusters_processed += num_input
-            logger.info(f"Pass 2 Iter {global_iteration} ({clusters_processed} of {total_clusters}): "
+            logger.info(f"Pass 2 Iter {global_iteration} ({seeds_processed} of {total_clusters}): "
                        f"{num_input} -> {num_output} clusters.  {gap_info_str}.  AMI {ami:.3f}")
 
             # Store operation for batch execution
@@ -872,16 +856,10 @@ def pass2_iterative_merge(
         logger.info(f"Pass 2 Iter {global_iteration} Summary: {len(current_clusters)} -> "
                    f"{len(next_clusters)} clusters.  AMI {iteration_ami:.3f}")
 
-        # Check convergence: no changes made in this full pass
-        if not changes_made:
-            logger.info(f"Convergence achieved at iteration {global_iteration} (no changes)")
-            tracking_info.summary_stats = {'convergence_reason': 'no_changes'}
-            break
-
-        # Alternative: Check full set equivalence (stricter)
-        if check_full_set_equivalence(current_clusters, next_clusters):
-            logger.info(f"Convergence achieved at iteration {global_iteration} (set equivalence)")
-            tracking_info.summary_stats = {'convergence_reason': 'set_equivalence'}
+        # Check convergence: AMI = 1.0 means perfect agreement (identical clustering)
+        if iteration_ami == 1.0:
+            logger.info(f"Convergence achieved at iteration {global_iteration} (AMI = 1.0)")
+            tracking_info.summary_stats = {'convergence_reason': 'ami_convergence'}
             break
 
         current_clusters = next_clusters

@@ -601,6 +601,8 @@ def main():
                        help='Run only Pass 2 (close cluster refinement), skip Pass 1 (assumes MECE input)')
     parser.add_argument('--max-iterations', type=int, default=10,
                        help='Maximum Pass 2 iterations before stopping (default: 10)')
+    parser.add_argument('--random-seed', type=int, default=None,
+                       help='Random seed for Pass 2 seed ordering (default: None for random)')
 
     # Algorithm parameters
     parser.add_argument('--min-split', type=float, default=0.005,
@@ -732,7 +734,8 @@ def main():
             close_threshold=args.refine_close_clusters if args.refine_close_clusters > 0.0 else None,
             max_iterations=args.max_iterations,
             k_neighbors=args.knn_neighbors,
-            search_method=args.search_method
+            search_method=args.search_method,
+            random_seed=args.random_seed
         )
 
         refinement_id_generator = ClusterIDGenerator(stage_name="refined", refinement_count=0)
