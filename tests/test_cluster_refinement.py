@@ -12,20 +12,11 @@ import numpy as np
 
 from gaphack.cluster_refinement import (
     RefinementConfig,
-    ExpandedScope,
     find_conflict_components,
     apply_full_gaphack_to_scope,
     apply_full_gaphack_to_scope_with_metadata,
     resolve_conflicts,
-    find_connected_close_components,
-    needs_minimal_context_for_gap_calculation,
-    add_context_at_distance_threshold,
-    expand_context_for_gap_optimization,
-    refine_close_clusters,
-    verify_no_conflicts,
-    MAX_FULL_GAPHACK_SIZE,
-    PREFERRED_SCOPE_SIZE,
-    EXPANSION_SIZE_BUFFER
+    verify_no_conflicts
 )
 
 
@@ -37,48 +28,29 @@ class TestRefinementConfig:
         config = RefinementConfig()
 
         assert config.max_full_gaphack_size == 300
-        assert config.preferred_scope_size == 250
-        assert config.expansion_size_buffer == 50
-        assert config.conflict_expansion_threshold is None
-        assert config.close_cluster_expansion_threshold is None
-        assert config.incremental_search_distance is None
-        assert config.max_closest_clusters == 5
+        assert config.context_threshold_multiplier == 2.0
+        assert config.close_threshold is None
+        assert config.max_iterations == 10
+        assert config.k_neighbors == 20
+        assert config.search_method == "blast"
 
     def test_custom_initialization(self):
         """Test RefinementConfig with custom parameters."""
         config = RefinementConfig(
             max_full_gaphack_size=500,
-            preferred_scope_size=400,
-            expansion_size_buffer=100,
-            conflict_expansion_threshold=0.03,
-            close_cluster_expansion_threshold=0.025,
-            incremental_search_distance=0.05,
-            max_closest_clusters=10
+            context_threshold_multiplier=3.0,
+            close_threshold=0.025,
+            max_iterations=15,
+            k_neighbors=30,
+            search_method="vsearch"
         )
 
         assert config.max_full_gaphack_size == 500
-        assert config.preferred_scope_size == 400
-        assert config.expansion_size_buffer == 100
-        assert config.conflict_expansion_threshold == 0.03
-        assert config.close_cluster_expansion_threshold == 0.025
-        assert config.incremental_search_distance == 0.05
-        assert config.max_closest_clusters == 10
-
-
-class TestExpandedScope:
-    """Test suite for ExpandedScope class."""
-
-    def test_expanded_scope_creation(self):
-        """Test ExpandedScope creation and attributes."""
-        sequences = ["ATCG", "GCTA", "CGAT"]
-        headers = ["seq_0", "seq_1", "seq_2"]
-        cluster_ids = ["cluster_1", "cluster_2"]
-
-        scope = ExpandedScope(sequences, headers, cluster_ids)
-
-        assert scope.sequences == sequences
-        assert scope.headers == headers
-        assert scope.cluster_ids == cluster_ids
+        assert config.context_threshold_multiplier == 3.0
+        assert config.close_threshold == 0.025
+        assert config.max_iterations == 15
+        assert config.k_neighbors == 30
+        assert config.search_method == "vsearch"
 
 
 class TestConflictComponents:
@@ -131,109 +103,6 @@ class TestConflictComponents:
         components = find_conflict_components(conflicts, all_clusters)
 
         assert components == []
-
-    def test_find_connected_close_components_linear(self):
-        """Test close component finding with linear connections."""
-        close_pairs = [
-            ("cluster_A", "cluster_B", 0.01),
-            ("cluster_B", "cluster_C", 0.015),
-            ("cluster_D", "cluster_E", 0.012)
-        ]
-
-        components = find_connected_close_components(close_pairs)
-
-        assert len(components) == 2
-        component_sets = [set(comp) for comp in components]
-        assert {"cluster_A", "cluster_B", "cluster_C"} in component_sets
-        assert {"cluster_D", "cluster_E"} in component_sets
-
-    def test_find_connected_close_components_empty(self):
-        """Test close component finding with no close pairs."""
-        close_pairs = []
-
-        components = find_connected_close_components(close_pairs)
-
-        assert components == []
-
-
-class TestScopeExpansion:
-    """Test suite for scope expansion algorithms."""
-
-    def setup_method(self):
-        """Set up test fixtures."""
-        self.test_clusters = {
-            "cluster_1": ["seq_1", "seq_2"],
-            "cluster_2": ["seq_3", "seq_4"],
-            "cluster_3": ["seq_5", "seq_6"],
-            "cluster_4": ["seq_7", "seq_8"]
-        }
-
-    def test_needs_minimal_context_single_cluster(self):
-        """Test minimal context detection with single cluster."""
-        mock_graph = Mock()
-
-        result = needs_minimal_context_for_gap_calculation(
-            ["cluster_1"], self.test_clusters, mock_graph, max_lump=0.02
-        )
-
-        assert result is True  # Single cluster always needs context
-
-    def test_needs_minimal_context_distant_clusters(self):
-        """Test minimal context detection with distant clusters."""
-        mock_graph = Mock()
-        mock_graph.get_neighbors_within_distance.return_value = []  # No neighbors within 2*max_lump
-
-        result = needs_minimal_context_for_gap_calculation(
-            ["cluster_1", "cluster_2"], self.test_clusters, mock_graph, max_lump=0.02
-        )
-
-        assert result is False  # Distant clusters don't need context
-
-    def test_needs_minimal_context_close_clusters(self):
-        """Test minimal context detection with close clusters."""
-        mock_graph = Mock()
-        mock_graph.get_neighbors_within_distance.return_value = [("cluster_2", 0.01)]
-
-        result = needs_minimal_context_for_gap_calculation(
-            ["cluster_1", "cluster_2"], self.test_clusters, mock_graph, max_lump=0.02
-        )
-
-        assert result is True  # Close clusters need context
-
-    def test_add_context_at_distance_threshold_success(self):
-        """Test successful context addition at distance threshold."""
-        current_cluster_ids = {"cluster_1"}
-
-        mock_graph = Mock()
-        mock_graph.get_k_nearest_neighbors.return_value = [
-            ("cluster_2", 0.025),  # Beyond threshold
-            ("cluster_3", 0.035)   # Further beyond threshold
-        ]
-
-        success, cluster_id, distance = add_context_at_distance_threshold(
-            current_cluster_ids, self.test_clusters, mock_graph,
-            distance_threshold=0.02, max_scope_size=10
-        )
-
-        assert success is True
-        assert cluster_id == "cluster_2"
-        assert distance == 0.025
-
-    def test_add_context_at_distance_threshold_size_limit(self):
-        """Test context addition failure due to size limit."""
-        current_cluster_ids = {"cluster_1"}
-
-        mock_graph = Mock()
-        mock_graph.get_k_nearest_neighbors.return_value = [("cluster_2", 0.025)]
-
-        success, cluster_id, distance = add_context_at_distance_threshold(
-            current_cluster_ids, self.test_clusters, mock_graph,
-            distance_threshold=0.02, max_scope_size=3  # Too small for cluster_2
-        )
-
-        assert success is False
-        assert cluster_id == ""
-        assert distance == 0.0
 
 
 class TestFullGapHACkApplication:
@@ -370,158 +239,6 @@ class TestConflictResolution:
         assert component_info['skipped_reason'] == 'oversized'
 
 
-class TestCloseClusterRefinement:
-    """Test suite for close cluster refinement algorithms."""
-
-    def setup_method(self):
-        """Set up test fixtures."""
-        self.test_clusters = {
-            "cluster_1": ["seq_1", "seq_2"],
-            "cluster_2": ["seq_3", "seq_4"],
-            "cluster_3": ["seq_5", "seq_6"]
-        }
-        self.test_sequences = ["ATCGATCG", "ATCGATCC", "TTTTGGGG", "TTTTGGCC", "GGGGCCCC", "GGGGCCCT"]
-        self.test_headers = ["seq_1", "seq_2", "seq_3", "seq_4", "seq_5", "seq_6"]
-
-    @patch('gaphack.cluster_refinement.expand_context_for_gap_optimization')
-    def test_refine_close_clusters_basic(self, mock_expand_context):
-        """Test basic close cluster refinement."""
-        # Mock proximity graph
-        mock_graph = Mock()
-        mock_graph.find_close_pairs.return_value = [("cluster_1", "cluster_2", 0.015)]
-
-        # Mock expansion result
-        mock_scope = ExpandedScope(
-            sequences=["seq_1", "seq_2", "seq_3", "seq_4"],
-            headers=["seq_1", "seq_2", "seq_3", "seq_4"],
-            cluster_ids=["cluster_1", "cluster_2"]
-        )
-        mock_result = {
-            "refined_1": ["seq_1", "seq_2", "seq_3"],
-            "refined_2": ["seq_4"]
-        }
-        mock_expand_context.return_value = (mock_scope, mock_result)
-
-        updated_clusters, tracking_info = refine_close_clusters(
-            self.test_clusters, self.test_sequences, self.test_headers,
-            mock_graph, close_threshold=0.02
-        )
-
-        # Should replace close clusters with refined result
-        assert "cluster_1" not in updated_clusters
-        assert "cluster_2" not in updated_clusters
-        assert "cluster_3" in updated_clusters  # Not close, preserved
-        assert "refined_1" in updated_clusters
-        assert "refined_2" in updated_clusters
-
-        # Verify tracking info
-        assert tracking_info.stage_name == "Close Cluster Refinement"
-        assert tracking_info.summary_stats['close_pairs_found'] == 1
-
-    def test_refine_close_clusters_no_close_pairs(self):
-        """Test close cluster refinement with no close pairs."""
-        mock_graph = Mock()
-        mock_graph.find_close_pairs.return_value = []
-
-        updated_clusters, tracking_info = refine_close_clusters(
-            self.test_clusters, self.test_sequences, self.test_headers,
-            mock_graph
-        )
-
-        # Should return unchanged clusters
-        assert updated_clusters == self.test_clusters
-        assert tracking_info.summary_stats['close_pairs_found'] == 0
-
-    def test_refine_close_clusters_insufficient_clusters(self):
-        """Test close cluster refinement with insufficient clusters."""
-        single_cluster = {"cluster_1": ["seq_1", "seq_2"]}
-
-        mock_graph = Mock()
-        updated_clusters, tracking_info = refine_close_clusters(
-            single_cluster, self.test_sequences, self.test_headers,
-            mock_graph
-        )
-
-        assert updated_clusters == single_cluster
-        assert tracking_info.summary_stats['components_processed_count'] == 0
-
-
-class TestContextExpansion:
-    """Test suite for context expansion algorithms."""
-
-    def setup_method(self):
-        """Set up test fixtures."""
-        self.test_clusters = {
-            "cluster_1": ["seq_1", "seq_2"],
-            "cluster_2": ["seq_3", "seq_4"],
-            "cluster_3": ["seq_5", "seq_6"]
-        }
-        # Provide actual sequences and headers for mapping
-        self.test_headers = ["seq_1", "seq_2", "seq_3", "seq_4", "seq_5", "seq_6"]
-        self.test_sequences = ["ACGT", "ACGG", "TTTT", "TTTG", "GGGG", "GGGC"]
-
-    @patch('gaphack.cluster_refinement.apply_full_gaphack_to_scope_with_metadata')
-    def test_expand_context_for_gap_optimization_success(self, mock_full_gaphack):
-        """Test successful context expansion for gap optimization."""
-        # Mock distance provider
-        mock_distance_provider = Mock()
-
-        # Mock proximity graph
-        mock_graph = Mock()
-        # First iteration context distance = max_lump * 1.5 = 0.02 * 1.5 = 0.03
-        # Second iteration context distance = max_lump * 2.0 = 0.04
-        mock_graph.get_k_nearest_neighbors.return_value = [
-            ("cluster_2", 0.025),  # Too close for first iteration (< 0.03)
-            ("cluster_3", 0.035)   # Suitable for first iteration (> 0.03)
-        ]
-
-        # Mock full gapHACk results - first call fails, second succeeds
-        mock_full_gaphack.side_effect = [
-            ({}, {'gap_size': -0.001}),  # First iteration: negative gap
-            ({"result_1": ["seq_1", "seq_2"]}, {'gap_size': 0.005})  # Second: positive gap
-        ]
-
-        core_cluster_ids = ["cluster_1"]
-
-        scope, result = expand_context_for_gap_optimization(
-            core_cluster_ids, self.test_clusters, self.test_sequences, self.test_headers,
-            mock_graph,
-            expansion_threshold=0.03, max_scope_size=10,
-            max_lump=0.02, min_split=0.005, target_percentile=95,
-            target_gap=0.001, max_iterations=3
-        )
-
-        assert result == {"result_1": ["seq_1", "seq_2"]}
-        assert "cluster_3" in scope.cluster_ids  # Context was added (beyond 0.03 threshold)
-
-    @patch('gaphack.cluster_refinement.apply_full_gaphack_to_scope_with_metadata')
-    def test_expand_context_for_gap_optimization_max_iterations(self, mock_full_gaphack):
-        """Test context expansion hitting max iterations."""
-        mock_distance_provider = Mock()
-
-        mock_graph = Mock()
-        mock_graph.get_k_nearest_neighbors.return_value = [
-            ("cluster_2", 0.025),
-            ("cluster_3", 0.035)
-        ]
-
-        # Mock full gapHACk to always return negative gap
-        mock_full_gaphack.return_value = ({"result_1": ["seq_1"]}, {'gap_size': -0.001})
-
-        core_cluster_ids = ["cluster_1"]
-
-        scope, result = expand_context_for_gap_optimization(
-            core_cluster_ids, self.test_clusters, self.test_sequences, self.test_headers,
-            mock_graph,
-            expansion_threshold=0.03, max_scope_size=10,
-            max_lump=0.02, min_split=0.005, target_percentile=95,
-            target_gap=0.001, max_iterations=2
-        )
-
-        # Should return best result even if target not achieved
-        assert result == {"result_1": ["seq_1"]}
-
-
 class TestConflictVerification:
     """Test suite for conflict verification algorithms."""
 
@@ -588,16 +305,6 @@ class TestConflictVerification:
         assert result['verification_context'] == "final"
 
 
-class TestConstants:
-    """Test suite for module constants."""
-
-    def test_module_constants(self):
-        """Test that module constants are properly defined."""
-        assert MAX_FULL_GAPHACK_SIZE == 300
-        assert PREFERRED_SCOPE_SIZE == 250
-        assert EXPANSION_SIZE_BUFFER == 50
-
-
 class TestPropertyBasedRefinement:
     """Property-based tests for refinement algorithms."""
 
@@ -643,62 +350,9 @@ class TestPropertyBasedRefinement:
         for count in cluster_counts.values():
             assert count == 1
 
-    @given(
-        close_pairs=st.lists(
-            st.tuples(
-                st.text(alphabet="cluster_", min_size=8, max_size=15),
-                st.text(alphabet="cluster_", min_size=8, max_size=15),
-                st.floats(min_value=0.001, max_value=0.1)
-            ).filter(lambda x: x[0] != x[1]),  # Ensure different cluster IDs
-            min_size=1, max_size=10
-        )
-    )
-    @settings(deadline=500)
-    def test_find_connected_close_components_properties(self, close_pairs):
-        """Property-based test for close component finding."""
-        components = find_connected_close_components(close_pairs)
-
-        # Property: All clusters in close pairs should appear in exactly one component
-        all_clusters = set()
-        for cluster1, cluster2, _ in close_pairs:
-            all_clusters.add(cluster1)
-            all_clusters.add(cluster2)
-
-        found_clusters = set()
-        for component in components:
-            found_clusters.update(component)
-
-        assert found_clusters == all_clusters
-
-        # Property: No cluster appears in multiple components
-        cluster_counts = defaultdict(int)
-        for component in components:
-            for cluster_id in component:
-                cluster_counts[cluster_id] += 1
-
-        for count in cluster_counts.values():
-            assert count == 1
-
 
 class TestEdgeCases:
     """Test suite for edge cases and error conditions."""
-
-    def test_context_expansion_no_available_clusters(self):
-        """Test context expansion when no clusters are available."""
-        current_cluster_ids = {"cluster_1"}
-        all_clusters = {"cluster_1": ["seq_1"]}
-
-        mock_graph = Mock()
-        mock_graph.get_k_nearest_neighbors.return_value = []  # No neighbors
-
-        success, cluster_id, distance = add_context_at_distance_threshold(
-            current_cluster_ids, all_clusters, mock_graph,
-            distance_threshold=0.02, max_scope_size=10
-        )
-
-        assert success is False
-        assert cluster_id == ""
-        assert distance == 0.0
 
     def test_verify_conflicts_empty_clusters(self):
         """Test conflict verification with empty cluster dictionary."""

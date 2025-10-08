@@ -17,7 +17,7 @@ from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
 from .cluster_refinement import (
-    resolve_conflicts, refine_close_clusters,
+    two_pass_refinement,
     RefinementConfig, verify_no_conflicts
 )
 from .cluster_graph import ClusterGraph
@@ -231,7 +231,7 @@ def generate_refinement_summary(
     final_state: Dict,
     timing: Dict
 ) -> str:
-    """Generate detailed summary report.
+    """Generate detailed summary report for two-pass refinement.
 
     Returns formatted summary text for refine_summary.txt
     """
@@ -279,85 +279,71 @@ def generate_refinement_summary(
         lines.append(f"knn_neighbors: {parameters.get('knn_neighbors', 20)}")
     lines.append("")
 
-    # Stage 1: Conflict Resolution
-    lines.append("Stage 1: Conflict Resolution")
+    # Pass 1: Conflict Resolution + Individual Refinement
+    lines.append("Pass 1: Conflict Resolution + Individual Refinement")
     lines.append("-" * 60)
-    if stage1_info and stage1_info.summary_stats.get('conflicts_count', 0) > 0:
-        lines.append("Status: APPLIED (conflicts detected)")
-        lines.append("Method: Full gapHACk with minimal scope (no expansion)")
+    if stage1_info:
+        lines.append("Status: APPLIED")
+        lines.append("Purpose: Establish MECE property and split over-lumped clusters")
+        lines.append("Tendency: Increases cluster count (splits)")
         lines.append("")
 
-        components = stage1_info.components_processed
-        lines.append(f"Conflict Components Processed: {len(components)}")
-        for comp in components:
-            if comp.get('processed', False):
-                lines.append(f"  Component {comp['component_index'] + 1}: "
-                           f"{comp['clusters_before_count']} clusters "
-                           f"({comp['sequences_count']} sequences) → "
-                           f"{comp['clusters_after_count']} clusters")
+        conflicts_resolved = stage1_info.summary_stats.get('conflicts_resolved', 0)
+        individual_refinements = stage1_info.summary_stats.get('individual_refinements', 0)
 
+        if conflicts_resolved > 0:
+            lines.append(f"Conflicts resolved: {conflicts_resolved} sequences")
+        lines.append(f"Individual refinements: {individual_refinements} clusters")
         lines.append("")
-        lines.append(f"Clusters before: {stage1_info.summary_stats['clusters_before_count']}")
-        lines.append(f"Clusters after: {stage1_info.summary_stats['clusters_after_count']}")
 
-        conflicts_before = stage1_info.summary_stats.get('conflicts_count', 0)
-        conflicts_after = stage1_info.summary_stats.get('remaining_conflicts_count', 0)
-        if conflicts_before > 0:
-            resolution_rate = ((conflicts_before - conflicts_after) / conflicts_before) * 100
-            lines.append(f"Conflicts resolved: {conflicts_before} → {conflicts_after} ({resolution_rate:.1f}% resolution)")
+        clusters_before = stage1_info.summary_stats.get('clusters_before', 0)
+        clusters_after = stage1_info.summary_stats.get('clusters_after', 0)
+        cluster_change = clusters_after - clusters_before
 
+        lines.append(f"Clusters before: {clusters_before}")
+        lines.append(f"Clusters after: {clusters_after}")
+        lines.append(f"Change: {cluster_change:+d} clusters ({'split' if cluster_change > 0 else 'unchanged'})")
         lines.append(f"Duration: {timing.get('stage1', 0):.1f} seconds")
     else:
-        lines.append("Status: SKIPPED (no conflicts detected)")
-        lines.append(f"Duration: {timing.get('stage1', 0):.1f} seconds")
+        lines.append("Status: SKIPPED (--pass2-only used)")
     lines.append("")
 
-    # Stage 2: Close Cluster Refinement
-    lines.append("Stage 2: Close Cluster Refinement")
+    # Pass 2: Iterative Close Cluster Refinement
+    lines.append("Pass 2: Iterative Close Cluster Refinement")
     lines.append("-" * 60)
     if stage2_info:
-        close_threshold = stage2_info.summary_stats.get('close_threshold', 0.0)
-        lines.append(f"Status: APPLIED (--refine-close-clusters {close_threshold})")
-        lines.append(f"Threshold: {close_threshold:.4f}")
-
-        expansion_threshold = parameters.get('expansion_threshold')
-        if expansion_threshold:
-            lines.append(f"Expansion threshold: {expansion_threshold:.4f}")
-
-        lines.append("")
-        lines.append(f"Proximity graph construction:")
-        lines.append(f"  K-NN neighbors per cluster: {parameters.get('knn_neighbors', 20)}")
-        lines.append(f"  Search method: {parameters.get('search_method', 'blast').upper()}")
-        lines.append(f"  Graph construction time: {timing.get('proximity_graph', 0):.1f} seconds")
+        lines.append("Status: APPLIED")
+        lines.append("Purpose: Merge under-split clusters and optimize boundaries")
+        lines.append("Tendency: Decreases cluster count (merges)")
         lines.append("")
 
-        close_pairs = stage2_info.summary_stats.get('close_pairs_found', 0)
-        lines.append(f"Close pairs found: {close_pairs} pairs")
+        iterations = stage2_info.summary_stats.get('iterations', 0)
+        max_iterations = parameters.get('max_iterations', 10)
+        convergence_reason = stage2_info.summary_stats.get('convergence_reason', 'unknown')
+        converged_scopes = stage2_info.summary_stats.get('converged_scopes_count', 0)
 
-        components = stage2_info.components_processed
-        lines.append(f"Connected components: {len(components)}")
+        lines.append(f"Iterations: {iterations} (max: {max_iterations})")
+
+        # Format convergence reason
+        reason_display = {
+            'no_changes': 'No changes made in full pass',
+            'set_equivalence': 'Full set equivalence achieved',
+            'iteration_limit': f'Reached iteration limit ({max_iterations})'
+        }
+        lines.append(f"Convergence: {reason_display.get(convergence_reason, convergence_reason)}")
+        lines.append(f"Converged scopes: {converged_scopes}")
         lines.append("")
 
-        if components:
-            lines.append(f"Close Cluster Components Processed: {len(components)}")
-            for comp in components:
-                if comp.get('processed', False):
-                    lines.append(f"  Component {comp['component_index'] + 1}: "
-                               f"{comp['clusters_before_count']} clusters "
-                               f"({comp.get('sequences_count', 0)} sequences) → "
-                               f"{comp['clusters_after_count']} clusters")
+        clusters_before = stage2_info.summary_stats.get('clusters_before', 0)
+        clusters_after = stage2_info.summary_stats.get('clusters_after', 0)
+        cluster_change = clusters_after - clusters_before
 
-        lines.append("")
-        lines.append(f"Clusters before: {stage2_info.summary_stats['clusters_before_count']}")
-        lines.append(f"Clusters after: {stage2_info.summary_stats['clusters_after_count']}")
-
-        cluster_change = stage2_info.summary_stats.get('cluster_count_change', 0)
-        if cluster_change < 0:
-            lines.append(f"Clusters merged: {abs(cluster_change)}")
-
+        lines.append(f"Clusters before: {clusters_before}")
+        lines.append(f"Clusters after: {clusters_after}")
+        lines.append(f"Change: {cluster_change:+d} clusters ({'merged' if cluster_change < 0 else 'unchanged'})")
         lines.append(f"Duration: {timing.get('stage2', 0):.1f} seconds")
     else:
-        lines.append("Status: SKIPPED (--refine-close-clusters not specified or 0.0)")
+        lines.append("Status: SKIPPED (--pass1-only used or --refine-close-clusters not specified)")
     lines.append("")
 
     # Final Verification
@@ -609,6 +595,12 @@ def main():
     # Refinement stage controls
     parser.add_argument('--refine-close-clusters', type=float, default=0.0,
                        help='Enable close cluster refinement with distance threshold (default: 0.0, disabled)')
+    parser.add_argument('--pass1-only', action='store_true',
+                       help='Run only Pass 1 (conflict resolution + individual refinement), skip Pass 2')
+    parser.add_argument('--pass2-only', action='store_true',
+                       help='Run only Pass 2 (close cluster refinement), skip Pass 1 (assumes MECE input)')
+    parser.add_argument('--max-iterations', type=int, default=10,
+                       help='Maximum Pass 2 iterations before stopping (default: 10)')
 
     # Algorithm parameters
     parser.add_argument('--min-split', type=float, default=0.005,
@@ -621,8 +613,10 @@ def main():
     # Advanced refinement parameters
     parser.add_argument('--max-scope-size', type=int, default=300,
                        help='Maximum sequences for full gapHACk refinement (default: 300)')
+    parser.add_argument('--context-threshold-multiplier', type=float, default=2.0,
+                       help='Context distance multiplier (context = close_threshold × this, default: 2.0)')
     parser.add_argument('--expansion-threshold', type=float, default=None,
-                       help='Distance threshold for scope expansion (default: 1.2 × close_threshold)')
+                       help='(Legacy) Distance threshold for scope expansion (default: 1.2 × close_threshold)')
 
     # Proximity graph parameters
     parser.add_argument('--search-method', choices=['blast', 'vsearch'], default='blast',
@@ -649,6 +643,14 @@ def main():
                        default='INFO', help='Logging verbosity (default: INFO)')
 
     args = parser.parse_args()
+
+    # Validate flag combinations
+    if args.pass2_only and args.refine_close_clusters <= 0.0:
+        print("ERROR: --pass2-only requires --refine-close-clusters > 0.0", file=sys.stderr)
+        sys.exit(1)
+
+    if args.pass1_only and args.refine_close_clusters > 0.0:
+        print("WARNING: --refine-close-clusters is ignored with --pass1-only", file=sys.stderr)
 
     # Configure logging
     logging.basicConfig(
@@ -712,100 +714,85 @@ def main():
         current_clusters = clusters.copy()
         stage1_clusters = None
         stage2_clusters = None
-
-        # Stage 1: Conflict Resolution (always applied if conflicts exist)
         stage1_info = None
-        if conflicts:
-            logger.info(f"Stage 1: Resolving {len(conflicts)} conflicts")
-            stage1_start = time.time()
+        stage2_info = None
 
-            config = RefinementConfig(max_full_gaphack_size=args.max_scope_size)
-            conflict_id_generator = ClusterIDGenerator(stage_name="deconflicted")
+        # TWO-PASS REFINEMENT
+        logger.info("Using two-pass refinement mode (radius-based with convergence)")
 
-            current_clusters, stage1_info = resolve_conflicts(
-                conflicts=conflicts,
-                all_clusters=current_clusters,
-                sequences=sequences,
-                headers=headers,
-                config=config,
-                min_split=args.min_split,
-                max_lump=args.max_lump,
-                target_percentile=args.target_percentile,
-                cluster_id_generator=conflict_id_generator
-            )
+        # Determine which passes to run
+        run_pass1 = not args.pass2_only
+        run_pass2 = args.refine_close_clusters > 0.0 and not args.pass1_only
 
-            stage1_clusters = current_clusters.copy()
-            timing['stage1'] = time.time() - stage1_start
+        if args.pass1_only and args.pass2_only:
+            logger.error("Cannot specify both --pass1-only and --pass2-only")
+            sys.exit(1)
 
-            remaining_conflicts = stage1_info.summary_stats.get('remaining_conflicts_count', 0)
-            if remaining_conflicts > 0:
-                logger.warning(f"Stage 1 complete: {remaining_conflicts} conflicts remain unresolved")
-            else:
-                logger.info(f"Stage 1 complete: All conflicts resolved")
-            logger.info(f"  {len(clusters)} → {len(current_clusters)} clusters ({timing['stage1']:.1f}s)")
+        # Configure refinement
+        config = RefinementConfig(
+            max_full_gaphack_size=args.max_scope_size,
+            context_threshold_multiplier=args.context_threshold_multiplier,
+            close_threshold=args.refine_close_clusters if args.refine_close_clusters > 0.0 else None,
+            max_iterations=args.max_iterations,
+            k_neighbors=args.knn_neighbors,
+            search_method=args.search_method
+        )
+
+        refinement_id_generator = ClusterIDGenerator(stage_name="refined", refinement_count=0)
+
+        refinement_start = time.time()
+        current_clusters, tracking_stages = two_pass_refinement(
+            all_clusters=current_clusters,
+            sequences=sequences,
+            headers=headers,
+            conflicts=conflicts,
+            min_split=args.min_split,
+            max_lump=args.max_lump,
+            target_percentile=args.target_percentile,
+            config=config,
+            run_pass1=run_pass1,
+            run_pass2=run_pass2,
+            cluster_id_generator=refinement_id_generator,
+            show_progress=args.show_progress
+        )
+        timing['refinement_total'] = time.time() - refinement_start
+
+        # Extract stage info and timing from tracking
+        if len(tracking_stages) >= 1 and run_pass1:
+            stage1_info = tracking_stages[0]
+            stage1_clusters = stage1_info.clusters_after.copy() if stage1_info.clusters_after else None
+            # Use detailed timing from Pass 1
+            pass1_timing = stage1_info.summary_stats.get('timing', {})
+            timing['stage1'] = pass1_timing.get('total', timing['refinement_total'])
+            timing['stage1_conflict'] = pass1_timing.get('conflict_resolution', 0.0)
+            timing['stage1_graph'] = pass1_timing.get('proximity_graph', 0.0)
+            timing['stage1_refinement'] = pass1_timing.get('individual_refinement', 0.0)
         else:
-            logger.info("Stage 1: Skipped (no conflicts detected)")
             timing['stage1'] = 0.0
 
-        # Stage 2: Close Cluster Refinement (optional)
-        stage2_info = None
-        if args.refine_close_clusters > 0.0:
-            logger.info(f"Stage 2: Refining close clusters (threshold={args.refine_close_clusters:.4f})")
-
-            # Build proximity graph
-            proximity_start = time.time()
-            logger.info(f"Building {args.search_method.upper()} K-NN proximity graph (K={args.knn_neighbors})")
-
-            proximity_graph = ClusterGraph(
-                clusters=current_clusters,
-                sequences=sequences,
-                headers=headers,
-                k_neighbors=args.knn_neighbors,
-                blast_evalue=args.blast_evalue,
-                blast_identity=args.min_identity or 90.0,
-                search_method=args.search_method,
-                show_progress=args.show_progress
-            )
-            timing['proximity_graph'] = time.time() - proximity_start
-            logger.info(f"  Proximity graph built ({timing['proximity_graph']:.1f}s)")
-
-            # Apply close cluster refinement
-            stage2_start = time.time()
-
-            expansion_threshold = args.expansion_threshold
-            if expansion_threshold is None:
-                expansion_threshold = args.refine_close_clusters * 1.2
-
-            config = RefinementConfig(
-                max_full_gaphack_size=args.max_scope_size,
-                close_cluster_expansion_threshold=expansion_threshold
-            )
-
-            refinement_id_generator = ClusterIDGenerator(stage_name="refined", refinement_count=0)
-
-            current_clusters, stage2_info = refine_close_clusters(
-                all_clusters=current_clusters,
-                sequences=sequences,
-                headers=headers,
-                proximity_graph=proximity_graph,
-                config=config,
-                min_split=args.min_split,
-                max_lump=args.max_lump,
-                target_percentile=args.target_percentile,
-                close_threshold=args.refine_close_clusters,
-                cluster_id_generator=refinement_id_generator
-            )
-
-            stage2_clusters = current_clusters.copy()
-            timing['stage2'] = time.time() - stage2_start
-
-            clusters_before = stage2_info.summary_stats['clusters_before_count']
-            clusters_after = stage2_info.summary_stats['clusters_after_count']
-            logger.info(f"Stage 2 complete: {clusters_before} → {clusters_after} clusters ({timing['stage2']:.1f}s)")
+        if len(tracking_stages) >= 2 and run_pass2:
+            stage2_info = tracking_stages[1] if run_pass1 else tracking_stages[0]
+            stage2_clusters = stage2_info.clusters_after.copy() if stage2_info.clusters_after else None
+            # Use detailed timing from Pass 2
+            pass2_timing = stage2_info.summary_stats.get('timing', {})
+            timing['stage2'] = pass2_timing.get('total', timing['refinement_total'])
+            timing['stage2_avg_iteration'] = pass2_timing.get('avg_iteration', 0.0)
+            timing['stage2_avg_graph'] = pass2_timing.get('avg_graph', 0.0)
+            timing['stage2_avg_refinement'] = pass2_timing.get('avg_refinement', 0.0)
+        elif len(tracking_stages) == 1 and not run_pass1 and run_pass2:
+            stage2_info = tracking_stages[0]
+            stage2_clusters = stage2_info.clusters_after.copy() if stage2_info.clusters_after else None
+            pass2_timing = stage2_info.summary_stats.get('timing', {})
+            timing['stage2'] = pass2_timing.get('total', timing['refinement_total'])
+            timing['stage2_avg_iteration'] = pass2_timing.get('avg_iteration', 0.0)
+            timing['stage2_avg_graph'] = pass2_timing.get('avg_graph', 0.0)
+            timing['stage2_avg_refinement'] = pass2_timing.get('avg_refinement', 0.0)
         else:
-            logger.info("Stage 2: Skipped (--refine-close-clusters not specified or 0.0)")
             timing['stage2'] = 0.0
-            timing['proximity_graph'] = 0.0
+
+        timing['proximity_graph'] = timing.get('stage1_graph', 0.0) + timing.get('stage2_avg_graph', 0.0)
+
+        logger.info(f"Two-pass refinement complete: {len(clusters)} → {len(current_clusters)} clusters ({timing['refinement_total']:.1f}s)")
 
         # Final verification
         logger.info("Performing final conflict verification")
@@ -888,6 +875,7 @@ def main():
             'expansion_threshold': args.expansion_threshold or (args.refine_close_clusters * 1.2 if args.refine_close_clusters > 0 else None),
             'search_method': args.search_method,
             'knn_neighbors': args.knn_neighbors,
+            'max_iterations': args.max_iterations,
             'renumber': renumber
         }
 

@@ -136,8 +136,9 @@ def test_refine_report_generation():
 
         # Verify key sections exist in report
         assert "gaphack-refine Summary Report" in report_content, "Report should have title"
-        assert "Stage 1: Conflict Resolution" in report_content, "Report should have conflict resolution section"
-        assert "Stage 2: Close Cluster Refinement" in report_content, "Report should have close cluster refinement section"
+        # New two-pass mode uses different section names
+        assert ("Pass 1" in report_content or "Stage 1" in report_content), "Report should have Pass 1/Stage 1 section"
+        assert ("Pass 2" in report_content or "Stage 2" in report_content), "Report should have Pass 2/Stage 2 section"
 
         print("✓ Refine report generation test completed!")
 

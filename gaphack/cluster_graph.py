@@ -87,6 +87,9 @@ class ClusterGraph:
         Returns:
             Global index of medoid sequence
         """
+        if len(cluster_headers) == 0:
+            raise ValueError("Cannot find medoid of empty cluster")
+
         if len(cluster_headers) == 1:
             return self.headers.index(cluster_headers[0])
 

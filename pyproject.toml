@@ -77,5 +77,6 @@ markers = [
     "performance: marks tests as performance benchmarks",
     "memory: marks tests that monitor memory usage",
     "scalability: marks tests that validate scaling properties",
-    "quality: marks tests that validate clustering quality"
+    "quality: marks tests that validate clustering quality",
+    "slow: marks tests that take a long time to run (>60s)"
 ]
