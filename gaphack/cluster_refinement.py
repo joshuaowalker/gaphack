@@ -115,23 +115,6 @@ class RefinementConfig:
 # Helper Functions for Two-Pass Refinement
 # ============================================================================
 
-def compute_all_signatures(clusters: Dict[str, List[str]]) -> Dict[str, frozenset]:
-    """Compute frozenset signatures for all clusters.
-
-    Signatures are order-independent representations used for equivalence checking.
-
-    Args:
-        clusters: Dict mapping cluster_id -> list of sequence headers
-
-    Returns:
-        Dict mapping cluster_id -> frozenset(headers)
-    """
-    return {
-        cluster_id: frozenset(headers)
-        for cluster_id, headers in clusters.items()
-    }
-
-
 def check_full_set_equivalence(clusters1: Dict[str, List[str]],
                                clusters2: Dict[str, List[str]]) -> bool:
     """Check if two cluster dictionaries contain identical cluster sets.
@@ -148,36 +131,6 @@ def check_full_set_equivalence(clusters1: Dict[str, List[str]],
     sigs1 = {frozenset(headers) for headers in clusters1.values()}
     sigs2 = {frozenset(headers) for headers in clusters2.values()}
     return sigs1 == sigs2
-
-
-def check_cluster_set_equivalence(
-    input_cluster_ids: Set[str],
-    output_clusters: Dict[str, List[str]],
-    current_clusters: Dict[str, List[str]],
-    cluster_signatures: Dict[str, frozenset]
-) -> bool:
-    """Check if output clusters are equivalent to input clusters.
-
-    Equivalence means: same set of sequence clusters (order-independent).
-
-    Args:
-        input_cluster_ids: Set of input cluster IDs
-        output_clusters: Dict of output cluster_id -> headers
-        current_clusters: Current cluster state (for looking up inputs)
-        cluster_signatures: Pre-computed signatures for current clusters
-
-    Returns:
-        True if refinement produced no changes (converged)
-    """
-    # Get input signatures
-    input_signatures = {cluster_signatures[cid] for cid in input_cluster_ids
-                       if cid in cluster_signatures}
-
-    # Get output signatures
-    output_signatures = {frozenset(headers) for headers in output_clusters.values()}
-
-    # Check set equivalence
-    return input_signatures == output_signatures
 
 
 def get_all_conflicted_cluster_ids(conflicts: Dict[str, List[str]],
@@ -688,15 +641,13 @@ def pass1_resolve_and_split(
 
 def execute_refinement_operations(
     current_clusters: Dict[str, List[str]],
-    operations: List[Dict],
-    cluster_signatures: Dict[str, frozenset]
+    operations: List[Dict]
 ) -> Tuple[Dict[str, List[str]], bool, Set[frozenset]]:
     """Execute all refinement operations, handling overlaps and tracking changes.
 
     Args:
         current_clusters: Current cluster state
         operations: List of refinement operations to apply
-        cluster_signatures: Mapping of cluster_id → frozenset(headers)
 
     Returns:
         Tuple of (next_clusters, changes_made, new_converged_scopes)
@@ -710,6 +661,7 @@ def execute_refinement_operations(
         input_cluster_ids = op['input_cluster_ids']
         output_clusters = op['output_clusters']
         scope_signature = op['scope_signature']
+        ami = op['ami']
 
         # Check if all input clusters still exist (not consumed by earlier op)
         inputs_still_exist = all(cid in next_clusters for cid in input_cluster_ids)
@@ -718,18 +670,11 @@ def execute_refinement_operations(
             logger.debug(f"Skipping operation for seed {seed_id} - inputs already consumed")
             continue
 
-        # Check equivalence: are outputs identical to inputs?
-        is_unchanged = check_cluster_set_equivalence(
-            input_cluster_ids=input_cluster_ids,
-            output_clusters=output_clusters,
-            current_clusters=next_clusters,
-            cluster_signatures=cluster_signatures
-        )
-
-        if is_unchanged:
+        # Check convergence: AMI == 1.0 means perfect agreement (no changes)
+        if ami == 1.0:
             # No changes - mark scope as converged
             new_converged_scopes.add(scope_signature)
-            logger.debug(f"Scope converged: {scope_signature}")
+            logger.debug(f"Scope converged (AMI=1.0): {len(scope_signature)} sequences")
             continue
 
         # Apply refinement: remove inputs, add outputs
@@ -806,11 +751,8 @@ def pass2_iterative_merge(
     current_clusters = all_clusters.copy()
     global_iteration = 0
 
-    # Track cluster signatures for equivalence checking
-    cluster_signatures = compute_all_signatures(current_clusters)
-
-    # Track converged scopes (sets of clusters that refined to themselves)
-    converged_scopes = set()  # Set[frozenset[cluster_id]]
+    # Track converged scopes (sets of sequences that refined to themselves)
+    converged_scopes = set()  # Set[frozenset[sequence_id]]
 
     while global_iteration < max_iterations:
         iteration_start = time.time()
@@ -863,10 +805,10 @@ def pass2_iterative_merge(
                 config=config
             )
 
-            # Check if this scope has already converged
-            scope_signature = frozenset(scope_cluster_ids)
+            # Check if this scope has already converged (use sequence set as signature)
+            scope_signature = frozenset(scope_headers)
             if scope_signature in converged_scopes:
-                logger.debug(f"Skipping converged scope: {scope_signature}")
+                logger.debug(f"Skipping converged scope: {len(scope_signature)} sequences")
                 processed_this_iteration.update(scope_cluster_ids)
                 continue
 
@@ -924,7 +866,8 @@ def pass2_iterative_merge(
                 'seed_id': seed_id,
                 'input_cluster_ids': set(scope_cluster_ids),
                 'output_clusters': refined_clusters,
-                'scope_signature': scope_signature
+                'scope_signature': scope_signature,
+                'ami': ami
             })
 
             # Mark all input clusters as processed
@@ -936,15 +879,11 @@ def pass2_iterative_merge(
         # Execute all refinement operations and track changes
         next_clusters, changes_made, new_converged = execute_refinement_operations(
             current_clusters=current_clusters,
-            operations=refinement_operations,
-            cluster_signatures=cluster_signatures
+            operations=refinement_operations
         )
 
         # Update converged scopes
         converged_scopes.update(new_converged)
-
-        # Update cluster signatures for next iteration
-        cluster_signatures = compute_all_signatures(next_clusters)
 
         iteration_time = time.time() - iteration_start
         timing['iterations'].append(iteration_time)
