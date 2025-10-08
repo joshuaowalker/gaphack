@@ -613,8 +613,6 @@ def main():
     # Advanced refinement parameters
     parser.add_argument('--max-scope-size', type=int, default=300,
                        help='Maximum sequences for full gapHACk refinement (default: 300)')
-    parser.add_argument('--context-threshold-multiplier', type=float, default=2.0,
-                       help='Context distance multiplier (context = close_threshold × this, default: 2.0)')
     parser.add_argument('--expansion-threshold', type=float, default=None,
                        help='(Legacy) Distance threshold for scope expansion (default: 1.2 × close_threshold)')
 
@@ -731,7 +729,6 @@ def main():
         # Configure refinement
         config = RefinementConfig(
             max_full_gaphack_size=args.max_scope_size,
-            context_threshold_multiplier=args.context_threshold_multiplier,
             close_threshold=args.refine_close_clusters if args.refine_close_clusters > 0.0 else None,
             max_iterations=args.max_iterations,
             k_neighbors=args.knn_neighbors,

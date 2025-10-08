@@ -31,19 +31,22 @@ class ClusterGraph:
                  headers: List[str], k_neighbors: int = 20,
                  blast_evalue: float = 1e-5, blast_identity: float = 90.0,
                  cache_dir: Optional[Path] = None, search_method: str = "blast",
-                 show_progress: bool = False):
+                 show_progress: bool = False, close_threshold: Optional[float] = None):
         """Initialize K-NN proximity graph.
 
         Args:
             clusters: Dictionary mapping cluster_id -> list of sequence headers
             sequences: Full sequence list
             headers: Full header list (indices must match sequences)
-            k_neighbors: Number of nearest neighbors to maintain per cluster
+            k_neighbors: Minimum number of nearest neighbors per cluster (default: 20)
             blast_evalue: BLAST e-value threshold for similarity detection
             blast_identity: Minimum BLAST/vsearch identity percentage (0-100)
             cache_dir: Directory for database caching
             search_method: Search method for K-NN: 'blast' or 'vsearch' (default: 'blast')
             show_progress: Whether to show progress bars (default: False)
+            close_threshold: Distance threshold for including all neighbors (optional).
+                            If set, stores ALL edges within threshold (minimum k_neighbors).
+                            If None, stores exactly k_neighbors edges.
         """
         self.clusters = clusters
         self.sequences = sequences
@@ -54,6 +57,7 @@ class ClusterGraph:
         self.cache_dir = cache_dir or Path(tempfile.gettempdir()) / "gaphack_knn_cache"
         self.search_method = search_method
         self.show_progress = show_progress
+        self.close_threshold = close_threshold
 
         # Initialize data structures
         self.medoid_cache: Dict[str, int] = {}
@@ -63,7 +67,11 @@ class ClusterGraph:
         # Build the K-NN graph
         self._build_knn_graph()
 
-        logger.info(f"Initialized {search_method.upper()} K-NN ProximityGraph with {len(clusters)} clusters, K={k_neighbors}")
+        if close_threshold is not None:
+            logger.info(f"Initialized {search_method.upper()} proximity graph with {len(clusters)} clusters, "
+                       f"threshold={close_threshold:.4f} (min K={k_neighbors})")
+        else:
+            logger.info(f"Initialized {search_method.upper()} K-NN ProximityGraph with {len(clusters)} clusters, K={k_neighbors}")
 
     def _compute_all_medoids(self) -> None:
         """Compute medoids for all clusters and cache them."""
@@ -191,11 +199,12 @@ class ClusterGraph:
         logger.debug(f"Running batch {self.search_method.upper()} queries for {len(batch_queries)} unique medoid sequences")
 
         # Run batched search with progress bar
+        # Use max_targets=100 to ensure we capture all neighbors in dense regions
         if self.show_progress:
             with tqdm(total=1, desc=f"Running {self.search_method.upper()} K-NN search", unit="batch") as pbar:
                 search_results = self.neighborhood_finder._get_candidates_for_sequences(
                     query_sequences=batch_queries,
-                    max_targets=self.k_neighbors + 10,  # Get extra hits to account for filtering
+                    max_targets=100,  # Sufficient for dense regions (was k_neighbors + 10)
                     e_value_threshold=self.blast_evalue,
                     min_identity=self.blast_identity
                 )
@@ -203,7 +212,7 @@ class ClusterGraph:
         else:
             search_results = self.neighborhood_finder._get_candidates_for_sequences(
                 query_sequences=batch_queries,
-                max_targets=self.k_neighbors + 10,  # Get extra hits to account for filtering
+                max_targets=100,  # Sufficient for dense regions (was k_neighbors + 10)
                 e_value_threshold=self.blast_evalue,
                 min_identity=self.blast_identity
             )
@@ -304,11 +313,31 @@ class ClusterGraph:
                 neighbors = [(subject_id, dist) for subject_id, dist in subject_distances
                            if subject_id != query_cluster_id]
 
-                # Sort by distance and keep K nearest neighbors
+                # Sort by distance
                 neighbors.sort(key=lambda x: x[1])
-                self.knn_graph[query_cluster_id] = neighbors[:self.k_neighbors]
 
-        logger.debug(f"Built K-NN graph with average {np.mean([len(neighbors) for neighbors in self.knn_graph.values()]):.1f} neighbors per cluster")
+                # Apply threshold-based filtering if close_threshold is set
+                if self.close_threshold is not None:
+                    within_threshold = [n for n in neighbors if n[1] <= self.close_threshold]
+                    if len(within_threshold) >= self.k_neighbors:
+                        # Dense region: use all neighbors within threshold
+                        self.knn_graph[query_cluster_id] = within_threshold
+                        logger.debug(f"Cluster {query_cluster_id}: {len(within_threshold)} neighbors within threshold "
+                                   f"(>= min K={self.k_neighbors})")
+                    else:
+                        # Sparse region: use at least k_neighbors for connectivity
+                        self.knn_graph[query_cluster_id] = neighbors[:self.k_neighbors]
+                        logger.debug(f"Cluster {query_cluster_id}: {len(within_threshold)} neighbors within threshold, "
+                                   f"using min K={self.k_neighbors} for connectivity")
+                else:
+                    # Original behavior: exactly K neighbors
+                    self.knn_graph[query_cluster_id] = neighbors[:self.k_neighbors]
+
+        neighbor_counts = [len(neighbors) for neighbors in self.knn_graph.values()]
+        if neighbor_counts:
+            logger.debug(f"Built K-NN graph: min={min(neighbor_counts)}, "
+                        f"max={max(neighbor_counts)}, "
+                        f"avg={np.mean(neighbor_counts):.1f} neighbors per cluster")
 
 
     def get_neighbors_within_distance(self, cluster_id: str, max_distance: float) -> List[Tuple[str, float]]:

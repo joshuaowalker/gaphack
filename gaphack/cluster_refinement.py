@@ -88,7 +88,6 @@ class RefinementConfig:
 
     def __init__(self,
                  max_full_gaphack_size: int = 300,
-                 context_threshold_multiplier: float = 2.0,
                  close_threshold: Optional[float] = None,
                  max_iterations: int = 10,
                  k_neighbors: int = 20,
@@ -97,14 +96,12 @@ class RefinementConfig:
 
         Args:
             max_full_gaphack_size: Hard limit for gapHACk input size (default: 300)
-            context_threshold_multiplier: Context distance = close_threshold × this (default: 2.0)
             close_threshold: Distance threshold for "close" clusters (default: max_lump)
             max_iterations: Maximum Pass 2 iterations (default: 10)
             k_neighbors: K-NN graph parameter (default: 20)
             search_method: "blast" or "vsearch" for proximity graph
         """
         self.max_full_gaphack_size = max_full_gaphack_size
-        self.context_threshold_multiplier = context_threshold_multiplier
         self.close_threshold = close_threshold
         self.max_iterations = max_iterations
         self.k_neighbors = k_neighbors
@@ -165,8 +162,8 @@ def build_refinement_scope(
 
     Constructs a refinement scope with three components:
     1. Seed clusters (core)
-    2. Neighbor clusters within close_threshold (core neighbors)
-    3. Context clusters between close_threshold and context_threshold (for gap calculation)
+    2. Neighbor clusters within close_threshold (core neighbors, merge candidates)
+    3. Context clusters beyond close_threshold (for inter-cluster distances in gap calculation)
 
     Uses distance-based thresholds rather than sequence counts to ensure
     density-independent behavior that remains stable as datasets grow.
@@ -178,13 +175,12 @@ def build_refinement_scope(
         sequences: Full sequence list
         headers: Full header list (indices must match sequences)
         close_threshold: Distance threshold for including core neighbors
-        config: Contains max_full_gaphack_size, context_threshold_multiplier
+        config: Contains max_full_gaphack_size
 
     Returns:
         Tuple of (scope_cluster_ids, scope_sequences, scope_headers)
     """
     max_scope_size = config.max_full_gaphack_size
-    context_threshold = close_threshold * config.context_threshold_multiplier  # Default: 2.0× close_threshold
 
     # Step 1: Start with seed cluster(s)
     scope_cluster_ids = list(seed_clusters)
@@ -219,15 +215,16 @@ def build_refinement_scope(
             logger.debug(f"Scope size limit reached while adding core neighbors at distance {distance:.4f}")
             break
 
-    # Step 4: Add context clusters beyond close_threshold up to context_threshold
-    # This ensures inter-cluster distances for gap calculation
+    # Step 4: Add context clusters beyond close_threshold (for gap calculation)
+    # Search all neighbors beyond close_threshold, add closest first up to max_scope_size
     context_candidates = []
     for seed_id in seed_clusters:
-        # Get neighbors between close_threshold and context_threshold
-        neighbors = proximity_graph.get_neighbors_within_distance(seed_id, context_threshold)
-        for neighbor_id, distance in neighbors:
+        # Use k_nearest_neighbors to get all available neighbors
+        all_neighbors = proximity_graph.get_k_nearest_neighbors(seed_id, k=30)
+        for neighbor_id, distance in all_neighbors:
             if (distance > close_threshold and
-                neighbor_id not in scope_cluster_ids):
+                neighbor_id not in scope_cluster_ids and
+                neighbor_id in all_clusters):
                 context_candidates.append((neighbor_id, distance))
 
     # Deduplicate and sort by distance
@@ -252,33 +249,7 @@ def build_refinement_scope(
             # Would exceed max size - stop adding context
             break
 
-    # Step 5: Ensure at least one context cluster for gap calculation
-    # If we have core neighbors but no context, gap calculation may fail
-    if context_added == 0 and len(neighbors_sorted) > 0:
-        # We have core neighbors but no context - try to add at least one
-        # Look for any neighbor beyond context_threshold (relaxed distance requirement)
-        extended_candidates = []
-        for seed_id in seed_clusters:
-            all_neighbors = proximity_graph.get_k_nearest_neighbors(seed_id, k=30)
-            for neighbor_id, distance in all_neighbors:
-                if (distance > close_threshold and
-                    neighbor_id not in scope_cluster_ids and
-                    neighbor_id in all_clusters):
-                    extended_candidates.append((neighbor_id, distance))
-
-        if extended_candidates:
-            # Sort by distance and try to add closest available context
-            extended_sorted = sorted(extended_candidates, key=lambda x: x[1])
-            for context_id, distance in extended_sorted:
-                context_size = len(all_clusters[context_id])
-                if current_size + context_size <= max_scope_size:
-                    scope_cluster_ids.append(context_id)
-                    current_size += context_size
-                    context_added += 1
-                    logger.debug(f"Added extended context at distance {distance:.4f} to ensure gap calculation")
-                    break  # Just need one
-
-    # Step 6: Extract sequences and headers for scope
+    # Step 5: Extract sequences and headers for scope
     scope_headers_set = set()
     for cluster_id in scope_cluster_ids:
         if cluster_id in all_clusters:
@@ -525,7 +496,8 @@ def pass1_resolve_and_split(
         clusters_after_conflicts, sequences, headers,
         k_neighbors=config.k_neighbors,
         search_method=config.search_method,
-        show_progress=True
+        show_progress=True,
+        close_threshold=max_lump  # Include all neighbors within max_lump
     )
     timing['proximity_graph'] = time.time() - graph_start
 
@@ -765,7 +737,8 @@ def pass2_iterative_merge(
             current_clusters, sequences, headers,
             k_neighbors=config.k_neighbors,
             search_method=config.search_method,
-            show_progress=True
+            show_progress=True,
+            close_threshold=close_threshold  # Include all neighbors within close_threshold
         )
         graph_time = time.time() - graph_start
         timing['proximity_graphs'].append(graph_time)
@@ -998,7 +971,6 @@ def two_pass_refinement(
     logger.info(f"Initial clusters: {len(all_clusters)}")
     logger.info(f"Conflicts: {len(conflicts)}")
     logger.info(f"Config: max_scope={config.max_full_gaphack_size}, "
-               f"context_multiplier={config.context_threshold_multiplier}, "
                f"max_iterations={config.max_iterations}")
 
     # Pass 1: Conflict resolution + individual refinement

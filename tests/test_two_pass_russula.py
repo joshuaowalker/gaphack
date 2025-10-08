@@ -102,7 +102,6 @@ class TestTwoPassRussulaIntegration:
         # Run two-pass refinement
         config = RefinementConfig(
             max_full_gaphack_size=300,
-            context_threshold_multiplier=2.0,
             max_iterations=10,
             k_neighbors=20,
             search_method="blast"
@@ -173,7 +172,6 @@ class TestTwoPassRussulaIntegration:
         # Run Pass 1 only
         config = RefinementConfig(
             max_full_gaphack_size=300,
-            context_threshold_multiplier=2.0,
             max_iterations=10,
             k_neighbors=20,
             search_method="blast"
@@ -233,7 +231,6 @@ class TestTwoPassRussulaIntegration:
         # Run Pass 2 only (assume Pass 1 already done and MECE)
         config = RefinementConfig(
             max_full_gaphack_size=300,
-            context_threshold_multiplier=2.0,
             close_threshold=0.02,  # Use max_lump as threshold
             max_iterations=10,
             k_neighbors=20,

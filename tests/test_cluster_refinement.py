@@ -28,7 +28,6 @@ class TestRefinementConfig:
         config = RefinementConfig()
 
         assert config.max_full_gaphack_size == 300
-        assert config.context_threshold_multiplier == 2.0
         assert config.close_threshold is None
         assert config.max_iterations == 10
         assert config.k_neighbors == 20
@@ -38,7 +37,6 @@ class TestRefinementConfig:
         """Test RefinementConfig with custom parameters."""
         config = RefinementConfig(
             max_full_gaphack_size=500,
-            context_threshold_multiplier=3.0,
             close_threshold=0.025,
             max_iterations=15,
             k_neighbors=30,
@@ -46,7 +44,6 @@ class TestRefinementConfig:
         )
 
         assert config.max_full_gaphack_size == 500
-        assert config.context_threshold_multiplier == 3.0
         assert config.close_threshold == 0.025
         assert config.max_iterations == 15
         assert config.k_neighbors == 30
