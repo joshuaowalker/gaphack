@@ -173,14 +173,17 @@ class TestConflictResolution:
         }
         self.conflicts = {"seq_1": ["cluster_A", "cluster_B"]}
 
-    @patch('gaphack.cluster_refinement.apply_full_gaphack_to_scope')
+    @patch('gaphack.cluster_refinement.apply_full_gaphack_to_scope_with_metadata')
     def test_resolve_conflicts_simple(self, mock_full_gaphack):
         """Test simple conflict resolution."""
-        # Mock full gapHACk result
-        mock_full_gaphack.return_value = {
-            "classic_1": ["seq_0", "seq_1"],
-            "classic_2": ["seq_2"]
-        }
+        # Mock full gapHACk result - returns tuple (clusters, metadata)
+        mock_full_gaphack.return_value = (
+            {
+                "classic_1": ["seq_0", "seq_1"],
+                "classic_2": ["seq_2"]
+            },
+            {'gap_size': 0.01, 'metadata': {}}
+        )
 
         updated_clusters, tracking_info = resolve_conflicts(
             self.conflicts, self.test_clusters, self.test_sequences,

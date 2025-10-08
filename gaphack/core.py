@@ -708,7 +708,7 @@ class GapOptimizedClustering:
         
         # If no gap was ever calculated, use current clustering state
         if best_config['gap_size'] == -1:
-            self.logger.warning(f"Gap optimization found no gaps within thresholds. Using current clustering state with {len(clusters)} clusters.")
+            self.logger.info(f"Gap optimization found no gaps within thresholds. Using current clustering state with {len(clusters)} clusters.")
             best_config['clusters'] = clusters
             best_config['merge_distance'] = self.max_lump
             # Try to calculate a gap for the current configuration
@@ -718,7 +718,7 @@ class GapOptimizedClustering:
                     best_config['gap_size'] = gap_metrics[f'p{self.target_percentile}']['gap_size']
                     best_config['gap_metrics'] = gap_metrics
                 except Exception as e:
-                    self.logger.warning(f"Could not calculate gap metrics for final configuration: {e}")
+                    self.logger.info(f"Could not calculate gap metrics for final configuration: {e}")
                     best_config['gap_size'] = 0.0
         
         # Convert best configuration to required format, sorted by cluster size

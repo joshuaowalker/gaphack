@@ -7,9 +7,11 @@ conflicts, refine close clusters, and handle incremental updates.
 
 import logging
 import copy
+import warnings
 from collections import defaultdict
 from typing import List, Dict, Tuple, Set, Optional, Union
 import numpy as np
+from sklearn.metrics import adjusted_mutual_info_score
 
 from .cluster_graph import ClusterGraph
 from .distance_providers import DistanceProvider
@@ -17,7 +19,63 @@ from .core import GapOptimizedClustering
 from .decompose import DecomposeResults
 from .utils import calculate_distance_matrix
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("gaphack.refine")
+
+
+def compute_ami_for_refinement(input_clusters: Set[str], output_clusters: Dict[str, List[str]],
+                                all_clusters: Dict[str, List[str]]) -> float:
+    """Compute adjusted mutual information between input and output clusters.
+
+    Args:
+        input_clusters: Set of input cluster IDs
+        output_clusters: Dict of output cluster_id -> headers
+        all_clusters: Dict containing all clusters (for looking up input clusters)
+
+    Returns:
+        AMI score (0-1, where 1 is perfect agreement)
+    """
+    # Collect all headers involved
+    all_headers = set()
+    for cid in input_clusters:
+        if cid in all_clusters:
+            all_headers.update(all_clusters[cid])
+
+    for headers in output_clusters.values():
+        all_headers.update(headers)
+
+    if len(all_headers) < 2:
+        return 1.0  # Perfect agreement for trivial cases
+
+    # Create sorted header list for consistent indexing
+    header_list = sorted(all_headers)
+    header_to_idx = {h: i for i, h in enumerate(header_list)}
+
+    # Create label arrays
+    input_labels = np.full(len(header_list), -1, dtype=int)
+    output_labels = np.full(len(header_list), -1, dtype=int)
+
+    # Assign input cluster labels
+    for cluster_idx, cid in enumerate(input_clusters):
+        if cid in all_clusters:
+            for header in all_clusters[cid]:
+                if header in header_to_idx:
+                    input_labels[header_to_idx[header]] = cluster_idx
+
+    # Assign output cluster labels
+    for cluster_idx, (_, headers) in enumerate(output_clusters.items()):
+        for header in headers:
+            if header in header_to_idx:
+                output_labels[header_to_idx[header]] = cluster_idx
+
+    # Only compute AMI for sequences present in both
+    valid_mask = (input_labels >= 0) & (output_labels >= 0)
+    if valid_mask.sum() < 2:
+        return 1.0  # Perfect agreement if too few sequences
+
+    # Suppress sklearn warning about many clusters looking like regression
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', category=UserWarning, module='sklearn')
+        return adjusted_mutual_info_score(input_labels[valid_mask], output_labels[valid_mask])
 
 
 class RefinementConfig:
@@ -331,7 +389,8 @@ def find_conflict_components(conflicts: Dict[str, List[str]],
 
 def apply_full_gaphack_to_scope_with_metadata(scope_sequences: List[str], scope_headers: List[str],
                                               min_split: float = 0.005, max_lump: float = 0.02,
-                                              target_percentile: int = 95, cluster_id_generator=None) -> Tuple[Dict[str, List[str]], Dict]:
+                                              target_percentile: int = 95, cluster_id_generator=None,
+                                              quiet: bool = True) -> Tuple[Dict[str, List[str]], Dict]:
     """Apply full gapHACk clustering to a scope of sequences, returning clusters and metadata.
 
     Args:
@@ -340,6 +399,8 @@ def apply_full_gaphack_to_scope_with_metadata(scope_sequences: List[str], scope_
         min_split: Minimum distance to split clusters
         max_lump: Maximum distance to lump clusters
         target_percentile: Percentile for gap optimization
+        cluster_id_generator: Optional cluster ID generator
+        quiet: If True, suppress verbose logging (default: True)
 
     Returns:
         Tuple of (cluster_dict, metadata_dict) where metadata includes gap_size
@@ -352,13 +413,20 @@ def apply_full_gaphack_to_scope_with_metadata(scope_sequences: List[str], scope_
     # Build distance matrix from MSA
     distance_matrix = msa_provider.build_distance_matrix()
 
+    # Create a custom logger that suppresses INFO logs if quiet mode is enabled
+    if quiet:
+        quiet_logger = logging.getLogger(__name__ + ".quiet")
+        quiet_logger.setLevel(logging.WARNING)
+    else:
+        quiet_logger = logger
+
     # Apply full gapHACk clustering
     clusterer = GapOptimizedClustering(
         min_split=min_split,
         max_lump=max_lump,
         target_percentile=target_percentile,
-        show_progress=True,  # Disable progress for scope-limited clustering
-        logger=logger
+        show_progress=False,  # Disable progress for scope-limited clustering
+        logger=quiet_logger
     )
 
     # Get clustering result with metadata
@@ -398,7 +466,8 @@ def apply_full_gaphack_to_scope_with_metadata(scope_sequences: List[str], scope_
 
 
 def apply_full_gaphack_to_scope(scope_sequences: List[str], scope_headers: List[str], min_split: float = 0.005,
-                                max_lump: float = 0.02, target_percentile: int = 95, cluster_id_generator=None) -> Dict[str, List[str]]:
+                                max_lump: float = 0.02, target_percentile: int = 95, cluster_id_generator=None,
+                                quiet: bool = True) -> Dict[str, List[str]]:
     """Apply full gapHACk clustering to a scope of sequences.
 
     Args:
@@ -407,13 +476,15 @@ def apply_full_gaphack_to_scope(scope_sequences: List[str], scope_headers: List[
         min_split: Minimum distance to split clusters
         max_lump: Maximum distance to lump clusters
         target_percentile: Percentile for gap optimization
+        cluster_id_generator: Optional cluster ID generator
+        quiet: If True, suppress verbose logging (default: True)
 
     Returns:
         Dict mapping cluster_id -> list of sequence headers
     """
     # Use the metadata version and just return the clusters
     clusters, _ = apply_full_gaphack_to_scope_with_metadata(scope_sequences, scope_headers, min_split, max_lump,
-                                                            target_percentile, cluster_id_generator)
+                                                            target_percentile, cluster_id_generator, quiet)
     return clusters
 
 
@@ -500,7 +571,8 @@ def pass1_resolve_and_split(
     proximity_graph = ClusterGraph(
         clusters_after_conflicts, sequences, headers,
         k_neighbors=config.k_neighbors,
-        search_method=config.search_method
+        search_method=config.search_method,
+        show_progress=True
     )
     timing['proximity_graph'] = time.time() - graph_start
 
@@ -508,10 +580,11 @@ def pass1_resolve_and_split(
     refinement_start = time.time()
     final_clusters = clusters_after_conflicts.copy()
     non_conflicted_count = len(clusters_after_conflicts) - len(conflicted_cluster_ids)
+    total_clusters = len(clusters_after_conflicts)  # Total for progress counter
 
     logger.info(f"Individually refining {non_conflicted_count} non-conflicted clusters...")
 
-    refined_count = 0
+    clusters_processed = 0  # Track cumulative input clusters, not operations
     for cluster_id in sorted(clusters_after_conflicts.keys()):
         if cluster_id in conflicted_cluster_ids:
             continue  # Already refined during conflict resolution
@@ -537,12 +610,34 @@ def pass1_resolve_and_split(
             config=config
         )
 
-        # Apply full gapHACk to scope
-        refined_clusters = apply_full_gaphack_to_scope(
+        # Apply full gapHACk to scope and get metadata
+        refined_clusters, metadata = apply_full_gaphack_to_scope_with_metadata(
             scope_sequences, scope_headers,
             min_split, max_lump, target_percentile,
-            cluster_id_generator=cluster_id_generator
+            cluster_id_generator=cluster_id_generator,
+            quiet=True
         )
+
+        # Extract gap info and compute AMI for logging
+        num_input = len(scope_clusters)
+        num_output = len(refined_clusters)
+        gap_size = metadata.get('gap_size', float('-inf'))
+
+        # Compute AMI between input and output
+        ami = compute_ami_for_refinement(set(scope_clusters), refined_clusters, final_clusters)
+
+        # Format gap info
+        gap_info_str = ""
+        best_config = metadata.get('metadata', {}).get('best_config', {})
+        gap_metrics = best_config.get('gap_metrics')
+        if gap_metrics:
+            target_key = f'p{target_percentile}'
+            if target_key in gap_metrics:
+                intra = gap_metrics[target_key].get('intra_upper', 0.0)
+                inter = gap_metrics[target_key].get('inter_lower', 0.0)
+                gap_info_str = f"Gap {gap_size:.4f} (intra≤{intra:.4f}, inter≥{inter:.4f})"
+        elif gap_size > float('-inf'):
+            gap_info_str = f"Gap {gap_size:.4f}"
 
         # Replace original cluster(s) with refined result
         for old_id in scope_clusters:
@@ -552,16 +647,23 @@ def pass1_resolve_and_split(
         for new_id, new_headers in refined_clusters.items():
             final_clusters[new_id] = new_headers
 
-        refined_count += 1
-        if refined_count % 10 == 0:
-            logger.debug(f"Progress: {refined_count}/{non_conflicted_count} clusters refined")
+        clusters_processed += num_input
+        logger.info(f"Pass 1 ({clusters_processed} of {total_clusters}): "
+                   f"{num_input} -> {num_output} clusters.  {gap_info_str}.  AMI {ami:.3f}")
 
     timing['individual_refinement'] = time.time() - refinement_start
     timing['individual_refinement_avg'] = timing['individual_refinement'] / non_conflicted_count if non_conflicted_count > 0 else 0.0
     timing['total'] = time.time() - pass1_start
 
+    # Compute AMI between input and output clusters
+    pass1_ami = compute_ami_for_refinement(
+        set(all_clusters.keys()),
+        final_clusters,
+        all_clusters
+    )
+
     logger.info(f"Pass 1 complete: {len(all_clusters)} clusters → {len(final_clusters)} clusters "
-               f"({len(final_clusters) - len(all_clusters):+d})")
+               f"({len(final_clusters) - len(all_clusters):+d}).  AMI {pass1_ami:.3f}")
     logger.info(f"Pass 1 timing: conflict={timing['conflict_resolution']:.1f}s, "
                f"graph={timing['proximity_graph']:.1f}s, "
                f"refinement={timing['individual_refinement']:.1f}s, "
@@ -720,7 +822,8 @@ def pass2_iterative_merge(
         proximity_graph = ClusterGraph(
             current_clusters, sequences, headers,
             k_neighbors=config.k_neighbors,
-            search_method=config.search_method
+            search_method=config.search_method,
+            show_progress=True
         )
         graph_time = time.time() - graph_start
         timing['proximity_graphs'].append(graph_time)
@@ -731,19 +834,22 @@ def pass2_iterative_merge(
         # Collect all refinement operations for this iteration
         refinement_operations = []
 
+        # Track statistics for iteration summary
+        iteration_stats = {
+            'total_input_clusters': 0,
+            'total_output_clusters': 0,
+            'best_gap': float('-inf'),
+            'best_gap_info': None
+        }
+
         # Every cluster serves as seed (deterministic ID-based order)
         refinement_start = time.time()
         seed_list = sorted(current_clusters.keys())
-
-        if show_progress:
-            pbar = tqdm(total=len(seed_list),
-                       desc=f"Pass 2 Iteration {global_iteration}",
-                       unit=" seeds")
+        total_clusters = len(seed_list)  # Total for progress counter
+        clusters_processed = 0  # Track cumulative input clusters, not operations
 
         for seed_id in seed_list:
             if seed_id in processed_this_iteration:
-                if show_progress:
-                    pbar.update(1)
                 continue  # Already processed as part of another seed's scope
 
             # Build refinement scope (seed + neighbors + context)
@@ -764,12 +870,54 @@ def pass2_iterative_merge(
                 processed_this_iteration.update(scope_cluster_ids)
                 continue
 
-            # Apply full gapHACk to scope
-            refined_clusters = apply_full_gaphack_to_scope(
+            # Apply full gapHACk to scope and get metadata
+            refined_clusters, metadata = apply_full_gaphack_to_scope_with_metadata(
                 scope_sequences, scope_headers,
                 min_split, max_lump, target_percentile,
-                cluster_id_generator=cluster_id_generator
+                cluster_id_generator=cluster_id_generator,
+                quiet=True
             )
+
+            # Track statistics for this refinement
+            num_input = len(scope_cluster_ids)
+            num_output = len(refined_clusters)
+            gap_size = metadata.get('gap_size', float('-inf'))
+
+            # Compute AMI between input and output
+            ami = compute_ami_for_refinement(set(scope_cluster_ids), refined_clusters, current_clusters)
+
+            # Update iteration statistics
+            iteration_stats['total_input_clusters'] += num_input
+            iteration_stats['total_output_clusters'] += num_output
+
+            # Extract gap details from metadata
+            gap_info_str = ""
+            best_config = metadata.get('metadata', {}).get('best_config', {})
+            gap_metrics = best_config.get('gap_metrics')
+            if gap_metrics:
+                target_key = f'p{target_percentile}'
+                if target_key in gap_metrics:
+                    intra = gap_metrics[target_key].get('intra_upper', 0.0)
+                    inter = gap_metrics[target_key].get('inter_lower', 0.0)
+                    gap_info_str = f"Gap {gap_size:.4f} (intra≤{intra:.4f}, inter≥{inter:.4f})"
+            elif gap_size > float('-inf'):
+                gap_info_str = f"Gap {gap_size:.4f}"
+
+            # Track best gap for this iteration
+            if gap_size > iteration_stats['best_gap']:
+                iteration_stats['best_gap'] = gap_size
+                if gap_metrics:
+                    target_key = f'p{target_percentile}'
+                    if target_key in gap_metrics:
+                        iteration_stats['best_gap_info'] = {
+                            'intra_upper': gap_metrics[target_key].get('intra_upper', 0.0),
+                            'inter_lower': gap_metrics[target_key].get('inter_lower', 0.0)
+                        }
+
+            # Log individual refinement
+            clusters_processed += num_input
+            logger.info(f"Pass 2 Iter {global_iteration} ({clusters_processed} of {total_clusters}): "
+                       f"{num_input} -> {num_output} clusters.  {gap_info_str}.  AMI {ami:.3f}")
 
             # Store operation for batch execution
             refinement_operations.append({
@@ -781,12 +929,6 @@ def pass2_iterative_merge(
 
             # Mark all input clusters as processed
             processed_this_iteration.update(scope_cluster_ids)
-
-            if show_progress:
-                pbar.update(1)
-
-        if show_progress:
-            pbar.close()
 
         refinement_time = time.time() - refinement_start
         timing['refinements'].append(refinement_time)
@@ -807,10 +949,16 @@ def pass2_iterative_merge(
         iteration_time = time.time() - iteration_start
         timing['iterations'].append(iteration_time)
 
-        logger.info(f"Iteration {global_iteration}: {len(current_clusters)} → {len(next_clusters)} clusters "
-                   f"({len(next_clusters) - len(current_clusters):+d}), "
-                   f"{len(new_converged)} scopes converged, "
-                   f"time={iteration_time:.1f}s (graph={graph_time:.1f}s, refinement={refinement_time:.1f}s)")
+        # Compute AMI between clusters before and after this iteration
+        iteration_ami = compute_ami_for_refinement(
+            set(current_clusters.keys()),
+            next_clusters,
+            current_clusters
+        )
+
+        # Log concise iteration summary
+        logger.info(f"Pass 2 Iter {global_iteration} Summary: {len(current_clusters)} -> "
+                   f"{len(next_clusters)} clusters.  AMI {iteration_ami:.3f}")
 
         # Check convergence: no changes made in this full pass
         if not changes_made:
@@ -1022,15 +1170,17 @@ def resolve_conflicts(conflicts: Dict[str, List[str]],
 
     # Step 1: Group conflicts by connected components
     conflict_components = find_conflict_components(conflicts, all_clusters)
-    logger.debug(f"Found {len(conflict_components)} connected conflict components")
+    logger.info(f"Found {len(conflict_components)} connected conflict components")
 
     updated_clusters = all_clusters.copy()
+    total_components = len(conflict_components)
+
+    # Calculate total clusters in conflicts for progress tracking
+    total_conflict_clusters = sum(len(comp) for comp in conflict_components)
+    clusters_processed = 0  # Track cumulative input clusters
 
     # Process each conflict component
     for component_idx, component_clusters in enumerate(conflict_components):
-        logger.debug(f"Processing conflict component {component_idx+1}/{len(conflict_components)} "
-                    f"with {len(component_clusters)} clusters")
-
         # Step 2: Extract scope sequences (minimal scope - only conflicted clusters)
         scope_headers_set = set()
         for cluster_id in component_clusters:
@@ -1049,22 +1199,43 @@ def resolve_conflicts(conflicts: Dict[str, List[str]],
 
         # Step 3: Apply full gapHACk to minimal conflict scope (no expansion)
         if len(scope_headers_set) == 0:
-            logger.warning(f"Skipping conflict component {component_idx+1} - empty scope")
+            logger.warning(f"Pass 1 Conflict Resolution ({component_idx+1} of {total_components}): "
+                         f"Skipping empty scope")
             component_info['processed'] = False
             component_info['clusters_after'] = []
             component_info['clusters_after_count'] = 0
-            components_processed.append(component_info)
+            tracking_info.components_processed.append(component_info)
             continue
 
         if len(scope_headers_set) <= config.max_full_gaphack_size:
-            logger.debug(f"Applying full gapHACk to minimal conflict scope of {len(scope_headers_set)} sequences")
-
             # Map headers to actual sequences
             header_to_idx = {h: i for i, h in enumerate(headers)}
             scope_sequence_list = [sequences[header_to_idx[h]] for h in scope_headers]
 
-            full_result = apply_full_gaphack_to_scope(scope_sequence_list, scope_headers, min_split, max_lump,
-                                                      target_percentile, cluster_id_generator)
+            # Apply full gapHACk and get metadata
+            full_result, metadata = apply_full_gaphack_to_scope_with_metadata(
+                scope_sequence_list, scope_headers, min_split, max_lump,
+                target_percentile, cluster_id_generator, quiet=True
+            )
+
+            # Extract gap info and compute AMI for logging
+            gap_size = metadata.get('gap_size', float('-inf'))
+
+            # Compute AMI between input and output
+            ami = compute_ami_for_refinement(set(component_clusters), full_result, all_clusters)
+
+            # Format gap info
+            gap_info_str = ""
+            best_config = metadata.get('metadata', {}).get('best_config', {})
+            gap_metrics = best_config.get('gap_metrics')
+            if gap_metrics:
+                target_key = f'p{target_percentile}'
+                if target_key in gap_metrics:
+                    intra = gap_metrics[target_key].get('intra_upper', 0.0)
+                    inter = gap_metrics[target_key].get('inter_lower', 0.0)
+                    gap_info_str = f"Gap {gap_size:.4f} (intra≤{intra:.4f}, inter≥{inter:.4f})"
+            elif gap_size > float('-inf'):
+                gap_info_str = f"Gap {gap_size:.4f}"
 
             # Step 4: Replace original conflicted clusters with classic result
             for cluster_id in component_clusters:
@@ -1082,13 +1253,15 @@ def resolve_conflicts(conflicts: Dict[str, List[str]],
                 'processed': True
             })
 
-            logger.info(f"Resolved conflict component: {len(component_clusters)} clusters → "
-                       f"{len(full_result)} clusters")
+            clusters_processed += len(component_clusters)
+            logger.info(f"Pass 1 Conflict ({clusters_processed} of {total_conflict_clusters}): "
+                       f"{len(component_clusters)} -> {len(full_result)} clusters.  {gap_info_str}.  AMI {ami:.3f}")
 
         else:
             # Fallback: skip oversized components with warning
-            logger.warning(f"Skipping conflict component with {len(scope_headers_set)} sequences "
-                          f"(exceeds limit of {config.max_full_gaphack_size})")
+            logger.warning(f"Pass 1 Conflict Resolution ({component_idx+1} of {total_components}): "
+                         f"Skipping oversized component with {len(scope_headers_set)} sequences "
+                         f"(exceeds limit of {config.max_full_gaphack_size})")
             component_info.update({
                 'clusters_after': list(component_clusters),  # Unchanged
                 'clusters_after_count': len(component_clusters),
