@@ -681,18 +681,7 @@ def pass2_iterative_merge(
     logger.info(f"=== Pass 2: Iterative Merge ===")
     logger.info(f"Starting with {len(all_clusters)} clusters")
     logger.info(f"Close threshold: {close_threshold:.4f}, Max iterations: {max_iterations}")
-
-    # Initialize random number generator with seed (generate random seed if not provided)
-    import random
-    if config.random_seed is not None:
-        seed = config.random_seed
-        logger.info(f"Seed order randomization: using provided seed {seed}")
-    else:
-        # Generate truly random seed
-        seed = random.randint(0, 2**31 - 1)
-        logger.info(f"Seed order randomization: using random seed {seed}")
-
-    rng = random.Random(seed)
+    logger.info(f"Seed prioritization: per-sequence reclustering counts (deterministic)")
 
     pass2_start = time.time()
     timing = {
@@ -706,6 +695,9 @@ def pass2_iterative_merge(
 
     # Track converged scopes (sets of sequences that refined to themselves)
     converged_scopes = set()  # Set[frozenset[sequence_id]]
+
+    # Track per-sequence reclustering counts for prioritization
+    sequence_recluster_count = defaultdict(int)  # sequence_id -> count
 
     while global_iteration < max_iterations:
         iteration_start = time.time()
@@ -733,15 +725,39 @@ def pass2_iterative_merge(
         # Track statistics for iteration summary
         iteration_stats = {
             'best_gap': float('-inf'),
-            'best_gap_info': None
+            'best_gap_info': None,
+            'seeds_processed': 0,
+            'seeds_skipped_dependency': 0,
+            'seeds_skipped_convergence': 0,
+            'seeds_skipped_other': 0
         }
 
-        # Every cluster serves as seed (randomized order)
+        # Calculate cluster priorities based on minimum per-sequence reclustering count
         refinement_start = time.time()
-        seed_list = sorted(current_clusters.keys())
+        cluster_priorities = {}
+        for cluster_id, cluster_headers in current_clusters.items():
+            if cluster_headers:
+                # Priority = minimum reclustering count across all sequences in cluster
+                min_count = min(sequence_recluster_count[h] for h in cluster_headers)
+                cluster_priorities[cluster_id] = min_count
+            else:
+                cluster_priorities[cluster_id] = 0
 
-        # Shuffle seed order with seeded RNG
-        rng.shuffle(seed_list)
+        # Sort seeds by priority (lowest count first), with cluster size as tiebreaker
+        seed_list = sorted(
+            current_clusters.keys(),
+            key=lambda cid: (
+                cluster_priorities[cid],
+                -len(current_clusters[cid])  # Larger clusters first for ties
+            )
+        )
+
+        # Log priority distribution for diagnostics
+        priority_counts = defaultdict(int)
+        for priority in cluster_priorities.values():
+            priority_counts[priority] += 1
+        priority_dist = ", ".join(f"{k}:{v}" for k, v in sorted(priority_counts.items())[:10])
+        logger.debug(f"Priority distribution (count:clusters): {priority_dist}")
 
         total_clusters = len(seed_list)  # Total for progress counter
         seeds_processed = 0  # Track seeds processed (1 per seed, whether executed or skipped)
@@ -750,11 +766,12 @@ def pass2_iterative_merge(
             seeds_processed += 1  # Increment for every seed
 
             if seed_id in processed_this_iteration:
+                iteration_stats['seeds_skipped_dependency'] += 1
                 logger.info(f"Pass 2 Iter {global_iteration} ({seeds_processed} of {total_clusters}): "
-                          f"Skipping seed {seed_id} - dependencies changed (already processed)")
+                          f"Skipping seed {seed_id} - seed already processed")
                 continue  # Already processed as part of another seed's scope
 
-            # Build refinement scope (seed + neighbors + context)
+            # Build refinement scope (seed + neighbors + context) using COMPLETE neighborhood
             scope_cluster_ids, scope_sequences, scope_headers = build_refinement_scope(
                 seed_clusters=[seed_id],
                 all_clusters=current_clusters,
@@ -766,12 +783,22 @@ def pass2_iterative_merge(
                 config=config
             )
 
+            # Check if ANY cluster in the scope has been processed this iteration
+            # If so, skip because the proximity graph is stale for this neighborhood
+            scope_has_processed_clusters = any(cid in processed_this_iteration for cid in scope_cluster_ids)
+            if scope_has_processed_clusters:
+                iteration_stats['seeds_skipped_dependency'] += 1
+                logger.info(f"Pass 2 Iter {global_iteration} ({seeds_processed} of {total_clusters}): "
+                          f"Skipping seed {seed_id} - neighborhood changed")
+                continue
+
             # Check if this scope has already converged (use sequence set as signature)
             scope_signature = frozenset(scope_headers)
             if scope_signature in converged_scopes:
+                iteration_stats['seeds_skipped_convergence'] += 1
                 logger.info(f"Pass 2 Iter {global_iteration} ({seeds_processed} of {total_clusters}): "
                           f"Skipping seed {seed_id} - prior convergence detected ({len(scope_signature)} sequences)")
-                processed_this_iteration.update(scope_cluster_ids)
+                # Don't mark as processed - we didn't actually process anything
                 continue
 
             # Apply full gapHACk to scope and get metadata
@@ -827,11 +854,27 @@ def pass2_iterative_merge(
                 'ami': ami
             })
 
+            # Update reclustering counts for all sequences in this scope
+            for header in scope_headers:
+                sequence_recluster_count[header] += 1
+
             # Mark all input clusters as processed
             processed_this_iteration.update(scope_cluster_ids)
 
+            # Increment processed counter
+            iteration_stats['seeds_processed'] += 1
+
         refinement_time = time.time() - refinement_start
         timing['refinements'].append(refinement_time)
+
+        # Log reclustering count statistics for diagnostics
+        if sequence_recluster_count:
+            counts = list(sequence_recluster_count.values())
+            min_count = min(counts)
+            max_count = max(counts)
+            mean_count = sum(counts) / len(counts)
+            logger.info(f"Pass 2 Iter {global_iteration} Reclustering stats: "
+                       f"min={min_count}, max={max_count}, mean={mean_count:.1f}")
 
         # Execute all refinement operations and track changes
         next_clusters, changes_made, new_converged = execute_refinement_operations(
@@ -852,9 +895,24 @@ def pass2_iterative_merge(
             current_clusters
         )
 
-        # Log concise iteration summary
-        logger.info(f"Pass 2 Iter {global_iteration} Summary: {len(current_clusters)} -> "
-                   f"{len(next_clusters)} clusters.  AMI {iteration_ami:.3f}")
+        # Validate tracking counts
+        total_seeds = total_clusters
+        accounted_seeds = (iteration_stats['seeds_processed'] +
+                          iteration_stats['seeds_skipped_dependency'] +
+                          iteration_stats['seeds_skipped_convergence'])
+        iteration_stats['seeds_skipped_other'] = total_seeds - accounted_seeds
+
+        # Log comprehensive iteration summary
+        logger.info(f"Pass 2 Iter {global_iteration} Summary:")
+        logger.info(f"  Clusters: {len(current_clusters)} -> {len(next_clusters)} "
+                   f"({len(next_clusters) - len(current_clusters):+d})")
+        logger.info(f"  AMI: {iteration_ami:.3f}")
+        logger.info(f"  Seeds: {total_seeds} total")
+        logger.info(f"    - Processed: {iteration_stats['seeds_processed']}")
+        logger.info(f"    - Skipped (dependency): {iteration_stats['seeds_skipped_dependency']}")
+        logger.info(f"    - Skipped (convergence): {iteration_stats['seeds_skipped_convergence']}")
+        if iteration_stats['seeds_skipped_other'] != 0:
+            logger.warning(f"    - Skipped (other/ERROR): {iteration_stats['seeds_skipped_other']}")
 
         # Check convergence: AMI = 1.0 means perfect agreement (identical clustering)
         if iteration_ami == 1.0:
