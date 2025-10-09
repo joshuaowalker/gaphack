@@ -188,7 +188,7 @@ def _prune_neighborhood_by_distance(self, ...):
 **Benefits**:
 - All neighborhood sequences share alignment context
 - ~8x faster for typical neighborhood of 100-200 sequences
-- Eliminates triangle inequality violations within neighborhood
+- Provides consistent alignment context across all pairwise distances
 
 ### 4. Target Clustering (New Implementation)
 **Location**: `target_clustering.py:298, 357, 365`
@@ -272,12 +272,6 @@ def _build_graph_from_blast(...):
 
 **Note**: This requires more significant refactoring - may be lower priority
 
-### 8. Triangle Inequality Filtering (Potentially Remove)
-**Location**: `triangle_filtering.py`
-**Current**: Detects and filters alignment failures
-**Proposed**: May become unnecessary with MSA-based approach
-**Action**: Monitor and potentially deprecate after validation
-
 ## Experimental Parameters
 
 All distance computations (both MSA-based and pairwise fallback) use the experimental parameters:
@@ -346,7 +340,7 @@ These are enforced in both `compute_pairwise_distance()` and `compute_msa_distan
 11. **Quality validation**:
     - Test on Russula dataset
     - Verify clustering quality metrics maintained or improved
-    - Confirm reduction in triangle inequality violations
+    - Verify consistent distance calculations across contexts
 
 12. **Documentation**:
     - Update CLAUDE.md with new architecture
@@ -403,7 +397,7 @@ These are enforced in both `compute_pairwise_distance()` and `compute_msa_distan
 
 1. **Performance**: ≥5x speedup for neighborhood operations (target: 8x)
 2. **Quality**: Clustering metrics (ARI, homogeneity, completeness) maintained or improved
-3. **Consistency**: Reduction in triangle inequality violations
+3. **Consistency**: Distance calculations consistent across different contexts
 4. **Reliability**: Graceful fallback works in all failure cases
 5. **Test Coverage**: All new code covered by unit and integration tests
 

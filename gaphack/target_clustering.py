@@ -14,7 +14,6 @@ from tqdm import tqdm
 
 from .core import DistanceCache, GapCalculator
 from .distance_providers import DistanceProvider
-from .triangle_filtering import filter_distance_dict_triangles, filter_intra_cluster_triangles
 
 
 class TargetModeClustering:
@@ -289,21 +288,13 @@ class TargetModeClustering:
         for seq_idx in remaining:
             # Get distances from this sequence to all target cluster members
             distances_to_cluster = distance_provider.get_distances_from_sequence(seq_idx, target_cluster)
-            
-            # Calculate p95 linkage distance to target cluster with outlier detection
+
+            # Calculate p95 linkage distance to target cluster
             import numpy as np
 
-            # Filter outliers using triangle inequality violation detection
-            filtered_distances_dict = filter_distance_dict_triangles(distances_to_cluster, distance_provider, context=f"Seq {seq_idx}")
-
-            # Use p95 of filtered distances (consistent with gap calculation)
-            if filtered_distances_dict:
-                filtered_distances = list(filtered_distances_dict.values())
-                p95_distance_to_cluster = np.percentile(filtered_distances, 95)
-            else:
-                # Fallback to original if all distances were filtered (shouldn't happen normally)
-                cluster_distances = list(distances_to_cluster.values())
-                p95_distance_to_cluster = np.percentile(cluster_distances, 95)
+            # Use p95 of distances (consistent with gap calculation)
+            cluster_distances = list(distances_to_cluster.values())
+            p95_distance_to_cluster = np.percentile(cluster_distances, 95)
 
             # Track minimum of the p95 distances (p95 linkage)
             if p95_distance_to_cluster < min_distance:
@@ -335,20 +326,14 @@ class TargetModeClustering:
                 'p90': {'gap_size': 0.0, 'gap_exists': False, 'intra_upper': 0.0, 'inter_lower': 0.0}
             }
 
-        # Get intra-cluster distances (within target cluster) with outlier filtering
+        # Get intra-cluster distances (within target cluster)
         intra_distances = []
         target_list = list(target_cluster)
 
-        # Filter intra-cluster outliers using triangle inequality
-        outlier_pairs = filter_intra_cluster_triangles(target_list, distance_provider)
-        outlier_pairs_set = set(outlier_pairs) | set((j, i) for i, j in outlier_pairs)  # Both directions
-
         for i in range(len(target_list)):
             for j in range(i + 1, len(target_list)):
-                # Skip pairs identified as triangle inequality violations
-                if (target_list[i], target_list[j]) not in outlier_pairs_set:
-                    distance = distance_provider.get_distance(target_list[i], target_list[j])
-                    intra_distances.append(distance)
+                distance = distance_provider.get_distance(target_list[i], target_list[j])
+                intra_distances.append(distance)
 
         # Get inter-cluster distances (from target cluster to remaining sequences)
         inter_distances = []

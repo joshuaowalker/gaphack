@@ -14,7 +14,6 @@ from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor
 import os
 
-from .triangle_filtering import filter_distance_matrix_triangles, add_nan_filtering_to_distance_list, DEFAULT_ENABLE_FILTERING, DEFAULT_VIOLATION_TOLERANCE
 
 
 class PersistentWorker:
@@ -502,9 +501,7 @@ class GapOptimizedClustering:
                  show_progress: bool = True,
                  logger: Optional[logging.Logger] = None,
                  num_threads: Optional[int] = None,
-                 single_process: bool = False,
-                 enable_triangle_filtering: bool = DEFAULT_ENABLE_FILTERING,
-                 triangle_tolerance: float = DEFAULT_VIOLATION_TOLERANCE):
+                 single_process: bool = False):
         """
         Initialize the gap-optimized clustering algorithm.
         
@@ -516,8 +513,6 @@ class GapOptimizedClustering:
             logger: Optional logger instance for output; uses default logging if None
             num_threads: Number of threads for parallel processing (default: auto-detect)
             single_process: If True, run entirely in single process for library usage (default False)
-            enable_triangle_filtering: If True, filter alignment failures using triangle inequality (default True)
-            triangle_tolerance: Error tolerance for triangle inequality filtering (default 0.05)
         """
         self.min_split = min_split
         self.max_lump = max_lump
@@ -526,8 +521,6 @@ class GapOptimizedClustering:
         self.logger = logger or logging.getLogger(__name__)
         self.num_threads = num_threads
         self.single_process = single_process
-        self.enable_triangle_filtering = enable_triangle_filtering
-        self.triangle_tolerance = triangle_tolerance
         
     def cluster(self, distance_matrix: np.ndarray) -> Tuple[List[List[int]], List[int], Dict]:
         """
@@ -543,15 +536,6 @@ class GapOptimizedClustering:
             - gap_history is Dict containing optimization history
         """
         n = len(distance_matrix)
-
-        # Apply triangle inequality filtering if enabled
-        if self.enable_triangle_filtering:
-            self.logger.info("Applying triangle inequality filtering to distance matrix")
-            distance_matrix = filter_distance_matrix_triangles(
-                distance_matrix,
-                violation_tolerance=self.triangle_tolerance,
-                show_progress=self.show_progress
-            )
 
         # Initialize each sequence as its own cluster
         clusters = [{i} for i in range(n)]

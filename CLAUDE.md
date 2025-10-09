@@ -21,7 +21,6 @@ This file contains development notes and future considerations for the gapHACk p
 - **Scoped operations**: `scoped_distances.py` (ScopedDistanceProvider for refinement)
 - **Cluster proximity**: `cluster_graph.py` (ClusterGraph with BLAST K-NN)
 - **BLAST integration**: `blast_neighborhood.py`
-- **Outlier detection**: `triangle_filtering.py`
 
 ### Testing
 - **317 passing tests**, 18,958 lines of test code
@@ -195,13 +194,6 @@ The `DecomposeResults` dataclass (`decompose.py:45-63`) provides comprehensive t
 - Enables efficient "expand context" operations by quickly finding nearby clusters
 - Scalable to 100K+ sequences with thousands of clusters
 
-### Triangle Inequality Filtering Details
-The triangle inequality outlier detection (`triangle_filtering.py`) uses a **5% tolerance (0.05)** when checking violations:
-- Accounts for the fact that adjusted identity distances may not strictly satisfy metric properties
-- Allows minor deviations while catching clear alignment failures
-- Applied consistently across traditional mode, target mode, and decompose mode
-- Uses maximum distance heuristic: largest distance in violating triangle marked as failure
-
 ## Testing Infrastructure
 
 ### Comprehensive Test Suite
@@ -303,11 +295,7 @@ The refinement system includes infrastructure for incremental/streaming clusteri
    - Sparse datasets might benefit from lower K
    - Could adapt K based on dataset characteristics
 
-3. **Triangle inequality tolerance**: Fixed 5% tolerance
-   - Could be dataset-dependent (ITS vs COI vs 16S)
-   - Consider making this configurable parameter
-
-4. **Target percentile consistency**: Hardcoded 95th in `target_clustering.py:309`
+3. **Target percentile consistency**: Hardcoded 95th in `target_clustering.py:309`
    - Should respect `target_percentile` parameter
    - Simple fix but affects behavior with non-default percentiles
 
