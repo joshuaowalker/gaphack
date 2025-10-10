@@ -817,10 +817,18 @@ def pass2_iterative_merge(
             'best_gap': float('-inf'),
             'best_gap_info': None,
             'seeds_processed': 0,
-            'seeds_skipped_dependency': 0,
+            'seeds_skipped_already_processed': 0,  # Seed was in a processed scope
+            'seeds_skipped_neighborhood_changed': 0,  # Neighborhood modified this iteration
             'seeds_skipped_convergence': 0,
             'seeds_skipped_other': 0
         }
+
+        # Track unique clusters and sequences in each category
+        # These are sets to avoid double-counting
+        unique_clusters_processed = set()
+        unique_sequences_processed = set()
+        unique_sequences_converged = set()
+        unique_sequences_neighborhood_changed = set()
 
         # Calculate cluster priorities based on minimum per-sequence reclustering count
         refinement_start = time.time()
@@ -856,7 +864,9 @@ def pass2_iterative_merge(
             seeds_processed += 1  # Increment for every seed
 
             if seed_id in processed_this_iteration:
-                iteration_stats['seeds_skipped_dependency'] += 1
+                iteration_stats['seeds_skipped_already_processed'] += 1
+                # Note: sequences from this seed are already in unique_sequences_processed
+                # from when the seed was processed as part of another scope
                 logger.info(f"Pass 2 Iter {global_iteration} ({seeds_processed} of {total_clusters}): "
                           f"Skipping seed {seed_id} - seed already processed")
                 continue  # Already processed as part of another seed's scope
@@ -877,7 +887,9 @@ def pass2_iterative_merge(
             # If so, skip because the proximity graph is stale for this neighborhood
             scope_has_processed_clusters = any(cid in processed_this_iteration for cid in scope_cluster_ids)
             if scope_has_processed_clusters:
-                iteration_stats['seeds_skipped_dependency'] += 1
+                iteration_stats['seeds_skipped_neighborhood_changed'] += 1
+                # Track sequences in this scope (will be deduplicated against processed later)
+                unique_sequences_neighborhood_changed.update(scope_headers)
                 logger.info(f"Pass 2 Iter {global_iteration} ({seeds_processed} of {total_clusters}): "
                           f"Skipping seed {seed_id} - neighborhood changed")
                 continue
@@ -886,6 +898,8 @@ def pass2_iterative_merge(
             scope_signature = frozenset(scope_headers)
             if scope_signature in converged_scopes:
                 iteration_stats['seeds_skipped_convergence'] += 1
+                # Track sequences in this converged scope
+                unique_sequences_converged.update(scope_headers)
                 logger.info(f"Pass 2 Iter {global_iteration} ({seeds_processed} of {total_clusters}): "
                           f"Skipping seed {seed_id} - prior convergence detected ({len(scope_signature)} sequences)")
                 # Don't mark as processed - we didn't actually process anything
@@ -951,7 +965,11 @@ def pass2_iterative_merge(
             # Mark all input clusters as processed
             processed_this_iteration.update(scope_cluster_ids)
 
-            # Increment processed counter
+            # Track unique clusters and sequences in processed scopes
+            unique_clusters_processed.update(scope_cluster_ids)
+            unique_sequences_processed.update(scope_headers)
+
+            # Increment seed counter
             iteration_stats['seeds_processed'] += 1
 
         refinement_time = time.time() - refinement_start
@@ -988,9 +1006,38 @@ def pass2_iterative_merge(
         # Validate tracking counts
         total_seeds = total_clusters
         accounted_seeds = (iteration_stats['seeds_processed'] +
-                          iteration_stats['seeds_skipped_dependency'] +
+                          iteration_stats['seeds_skipped_already_processed'] +
+                          iteration_stats['seeds_skipped_neighborhood_changed'] +
                           iteration_stats['seeds_skipped_convergence'])
         iteration_stats['seeds_skipped_other'] = total_seeds - accounted_seeds
+
+        # Compute unique counts with precedence: processed > converged > neighborhood_changed
+        # Remove sequences that appear in higher-priority categories
+        unique_sequences_converged_only = unique_sequences_converged - unique_sequences_processed
+        unique_sequences_neighborhood_changed_only = (unique_sequences_neighborhood_changed -
+                                                      unique_sequences_processed -
+                                                      unique_sequences_converged)
+
+        # Store final counts in iteration_stats
+        iteration_stats['clusters_processed'] = len(unique_clusters_processed)
+        iteration_stats['clusters_skipped_already_processed'] = iteration_stats['seeds_skipped_already_processed']
+        iteration_stats['clusters_skipped_neighborhood_changed'] = iteration_stats['seeds_skipped_neighborhood_changed']
+        iteration_stats['clusters_skipped_convergence'] = iteration_stats['seeds_skipped_convergence']
+        iteration_stats['sequences_processed'] = len(unique_sequences_processed)
+        iteration_stats['sequences_skipped_convergence'] = len(unique_sequences_converged_only)
+        iteration_stats['sequences_skipped_neighborhood_changed'] = len(unique_sequences_neighborhood_changed_only)
+        # Note: sequences_skipped_already_processed is always 0 (those sequences are in processed)
+        iteration_stats['sequences_skipped_already_processed'] = 0
+
+        # Verify all sequences are accounted for
+        total_sequences_in_clusters = sum(len(headers) for headers in current_clusters.values())
+        accounted_sequences = (iteration_stats['sequences_processed'] +
+                              iteration_stats['sequences_skipped_convergence'] +
+                              iteration_stats['sequences_skipped_neighborhood_changed'] +
+                              iteration_stats['sequences_skipped_already_processed'])
+        if accounted_sequences != total_sequences_in_clusters:
+            logger.warning(f"Sequence accounting mismatch: {accounted_sequences} accounted, "
+                          f"{total_sequences_in_clusters} total in clusters")
 
         # Log comprehensive iteration summary
         logger.info(f"Pass 2 Iter {global_iteration} Summary:")
@@ -998,9 +1045,18 @@ def pass2_iterative_merge(
                    f"({len(next_clusters) - len(current_clusters):+d})")
         logger.info(f"  AMI: {iteration_ami:.3f}")
         logger.info(f"  Seeds: {total_seeds} total")
-        logger.info(f"    - Processed: {iteration_stats['seeds_processed']}")
-        logger.info(f"    - Skipped (dependency): {iteration_stats['seeds_skipped_dependency']}")
-        logger.info(f"    - Skipped (convergence): {iteration_stats['seeds_skipped_convergence']}")
+        logger.info(f"    - Processed: {iteration_stats['seeds_processed']} seeds, "
+                   f"{iteration_stats['clusters_processed']} clusters, "
+                   f"{iteration_stats['sequences_processed']} sequences")
+        logger.info(f"    - Skipped (already processed): {iteration_stats['seeds_skipped_already_processed']} seeds, "
+                   f"{iteration_stats['clusters_skipped_already_processed']} clusters, "
+                   f"{iteration_stats['sequences_skipped_already_processed']} sequences")
+        logger.info(f"    - Skipped (neighborhood changed): {iteration_stats['seeds_skipped_neighborhood_changed']} seeds, "
+                   f"{iteration_stats['clusters_skipped_neighborhood_changed']} clusters, "
+                   f"{iteration_stats['sequences_skipped_neighborhood_changed']} sequences")
+        logger.info(f"    - Skipped (convergence): {iteration_stats['seeds_skipped_convergence']} seeds, "
+                   f"{iteration_stats['clusters_skipped_convergence']} clusters, "
+                   f"{iteration_stats['sequences_skipped_convergence']} sequences")
         if iteration_stats['seeds_skipped_other'] != 0:
             logger.warning(f"    - Skipped (other/ERROR): {iteration_stats['seeds_skipped_other']}")
 
