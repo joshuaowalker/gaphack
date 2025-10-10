@@ -603,6 +603,8 @@ def main():
                        help='Maximum Pass 2 iterations before stopping (default: 10)')
     parser.add_argument('--random-seed', type=int, default=None,
                        help='Random seed for Pass 2 seed ordering (default: None for random)')
+    parser.add_argument('--checkpoint-frequency', type=int, default=1,
+                       help='Checkpoint every N iterations (0=disabled, default: 1)')
 
     # Algorithm parameters
     parser.add_argument('--min-split', type=float, default=0.005,
@@ -677,6 +679,16 @@ def main():
         if len(clusters) < 2:
             logger.error(f"At least 2 clusters required for refinement (found {len(clusters)})")
             sys.exit(1)
+
+        # Check for state.json for auto-resume
+        state_json_path = args.input_dir / "state.json"
+        resume_state = None
+        if state_json_path.exists():
+            logger.info(f"Found state.json in input directory - auto-resuming from checkpoint")
+            import json
+            with open(state_json_path) as f:
+                resume_state = json.load(f)
+            logger.info(f"Resuming from iteration {resume_state.get('iteration', 0)}")
 
         # Detect conflicts
         conflicts = detect_conflicts(clusters)
@@ -753,7 +765,11 @@ def main():
             run_pass1=run_pass1,
             run_pass2=run_pass2,
             cluster_id_generator=refinement_id_generator,
-            show_progress=args.show_progress
+            show_progress=args.show_progress,
+            checkpoint_frequency=args.checkpoint_frequency,
+            checkpoint_output_dir=args.output_dir,
+            header_mapping=header_mapping,
+            resume_state=resume_state
         )
         timing['refinement_total'] = time.time() - refinement_start
 
@@ -807,7 +823,7 @@ def main():
             final_output_dir = args.output_dir
         else:
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            final_output_dir = args.output_dir / timestamp
+            final_output_dir = args.output_dir / f"{timestamp}_final"
 
         final_output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -832,8 +848,8 @@ def main():
             latest_symlink = args.output_dir / "latest"
             if latest_symlink.exists() or latest_symlink.is_symlink():
                 latest_symlink.unlink()
-            latest_symlink.symlink_to(timestamp, target_is_directory=True)
-            logger.info(f"Created symlink: latest -> {timestamp}/")
+            latest_symlink.symlink_to(f"{timestamp}_final", target_is_directory=True)
+            logger.info(f"Created symlink: latest -> {timestamp}_final/")
 
         # Generate cluster mapping report
         final_clusters = {id_mapping.get(cid, cid): headers for cid, headers in current_clusters.items()}

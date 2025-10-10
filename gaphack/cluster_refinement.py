@@ -8,6 +8,9 @@ conflicts, refine close clusters, and handle incremental updates.
 import logging
 import copy
 import warnings
+import json
+import datetime
+from pathlib import Path
 from collections import defaultdict
 from typing import List, Dict, Tuple, Set, Optional, Union
 import numpy as np
@@ -76,6 +79,77 @@ def compute_ami_for_refinement(input_clusters: Set[str], output_clusters: Dict[s
     with warnings.catch_warnings():
         warnings.filterwarnings('ignore', category=UserWarning, module='sklearn')
         return adjusted_mutual_info_score(input_labels[valid_mask], output_labels[valid_mask])
+
+
+def checkpoint_iteration(
+    iteration: int,
+    current_clusters: Dict[str, List[str]],
+    sequences: List[str],
+    headers: List[str],
+    header_mapping: Dict[str, str],
+    sequence_recluster_count: Dict[str, int],
+    converged_scopes: Set[frozenset],
+    iteration_stats: Dict,
+    timing: Dict,
+    base_output_dir: Path
+) -> Path:
+    """Checkpoint current iteration state to timestamped directory.
+
+    Creates a complete snapshot of the current iteration that can be:
+    - Loaded for post-mortem analysis
+    - Used as input for resuming refinement
+
+    Args:
+        iteration: Current iteration number
+        current_clusters: Current cluster assignments
+        sequences: Full sequence list
+        headers: Full header list
+        header_mapping: Dict mapping sequence ID to full header (ID + description)
+        sequence_recluster_count: Per-sequence reclustering counts
+        converged_scopes: Set of converged scope signatures
+        iteration_stats: Summary statistics for this iteration
+        timing: Timing information for this iteration
+        base_output_dir: Base output directory (parent of timestamped directories)
+
+    Returns:
+        Path to checkpoint directory
+    """
+    # Import here to avoid circular dependency
+    from .refine_cli import write_output_clusters
+
+    # Create timestamped directory with iteration suffix
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    checkpoint_dir = base_output_dir / f"{timestamp}_iter{iteration:03d}"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write cluster FASTA files (reuse existing function)
+    write_output_clusters(
+        clusters=current_clusters,
+        sequences=sequences,
+        headers=headers,
+        unassigned_headers=[],  # Don't checkpoint unassigned
+        output_dir=checkpoint_dir,
+        header_mapping=header_mapping,
+        renumber=False  # Keep IDs stable across iterations
+    )
+
+    # Write iteration state
+    state = {
+        "iteration": iteration,
+        "timestamp": timestamp,
+        "summary": iteration_stats,
+        "reclustering_counts": dict(sequence_recluster_count),
+        # Note: converged_scopes omitted - they're a performance optimization
+        # that gets rebuilt on resume. Can't reconstruct frozensets from hashes.
+        "timing": timing
+    }
+
+    state_file = checkpoint_dir / "state.json"
+    with open(state_file, 'w') as f:
+        json.dump(state, f, indent=2)
+
+    logger.info(f"Checkpointed iteration {iteration} to {checkpoint_dir.name}")
+    return checkpoint_dir
 
 
 class RefinementConfig:
@@ -642,7 +716,11 @@ def pass2_iterative_merge(
     max_iterations: int,
     config: RefinementConfig,
     cluster_id_generator=None,
-    show_progress: bool = False
+    show_progress: bool = False,
+    checkpoint_frequency: int = 0,
+    checkpoint_output_dir: Optional[Path] = None,
+    header_mapping: Optional[Dict[str, str]] = None,
+    resume_state: Optional[Dict] = None
 ) -> Tuple[Dict[str, List[str]], 'ProcessingStageInfo']:
     """Pass 2: Iteratively refine close clusters using radius-based seeding.
 
@@ -661,6 +739,10 @@ def pass2_iterative_merge(
         config: Configuration for refinement parameters
         cluster_id_generator: Optional cluster ID generator
         show_progress: Show progress bar for each iteration
+        checkpoint_frequency: Checkpoint every N iterations (0=disabled, default: 0)
+        checkpoint_output_dir: Base output directory for checkpoints
+        header_mapping: Mapping of sequence IDs to full headers (for checkpointing)
+        resume_state: Optional state to resume from (loaded from state.json)
 
     Returns:
         Tuple of (refined_clusters, tracking_info)
@@ -691,13 +773,21 @@ def pass2_iterative_merge(
     }
 
     current_clusters = all_clusters.copy()
-    global_iteration = 0
 
-    # Track converged scopes (sets of sequences that refined to themselves)
-    converged_scopes = set()  # Set[frozenset[sequence_id]]
-
-    # Track per-sequence reclustering counts for prioritization
-    sequence_recluster_count = defaultdict(int)  # sequence_id -> count
+    # Initialize or resume iteration state
+    if resume_state:
+        global_iteration = resume_state.get('iteration', 0)
+        logger.info(f"Resuming from iteration {global_iteration}")
+        # Restore reclustering counts
+        sequence_recluster_count = defaultdict(int, resume_state.get('reclustering_counts', {}))
+        # Restore converged scopes (convert hashes back to set, though we don't have full signatures)
+        # For now, start fresh with converged scopes on resume
+        converged_scopes = set()
+        logger.info(f"Restored {len(sequence_recluster_count)} reclustering counts")
+    else:
+        global_iteration = 0
+        sequence_recluster_count = defaultdict(int)  # sequence_id -> count
+        converged_scopes = set()  # Set[frozenset[sequence_id]]
 
     while global_iteration < max_iterations:
         iteration_start = time.time()
@@ -914,6 +1004,33 @@ def pass2_iterative_merge(
         if iteration_stats['seeds_skipped_other'] != 0:
             logger.warning(f"    - Skipped (other/ERROR): {iteration_stats['seeds_skipped_other']}")
 
+        # Checkpoint if enabled and at checkpoint interval
+        if checkpoint_frequency > 0 and global_iteration % checkpoint_frequency == 0:
+            if checkpoint_output_dir and header_mapping:
+                # Add summary stats for checkpointing
+                iteration_stats['clusters_before'] = len(current_clusters)
+                iteration_stats['clusters_after'] = len(next_clusters)
+                iteration_stats['ami'] = iteration_ami
+
+                checkpoint_timing = {
+                    'graph_build': graph_time,
+                    'refinement': refinement_time,
+                    'total': iteration_time
+                }
+
+                checkpoint_iteration(
+                    iteration=global_iteration,
+                    current_clusters=next_clusters,  # Checkpoint the NEW state
+                    sequences=sequences,
+                    headers=headers,
+                    header_mapping=header_mapping,
+                    sequence_recluster_count=sequence_recluster_count,
+                    converged_scopes=converged_scopes,
+                    iteration_stats=iteration_stats,
+                    timing=checkpoint_timing,
+                    base_output_dir=checkpoint_output_dir
+                )
+
         # Check convergence: AMI = 1.0 means perfect agreement (identical clustering)
         if iteration_ami == 1.0:
             logger.info(f"Convergence achieved at iteration {global_iteration} (AMI = 1.0)")
@@ -965,7 +1082,11 @@ def two_pass_refinement(
     run_pass1: bool = True,
     run_pass2: bool = True,
     cluster_id_generator=None,
-    show_progress: bool = False
+    show_progress: bool = False,
+    checkpoint_frequency: int = 0,
+    checkpoint_output_dir: Optional[Path] = None,
+    header_mapping: Optional[Dict[str, str]] = None,
+    resume_state: Optional[Dict] = None
 ) -> Tuple[Dict[str, List[str]], List['ProcessingStageInfo']]:
     """Two-pass cluster refinement: resolve conflicts, split, then merge.
 
@@ -1044,7 +1165,11 @@ def two_pass_refinement(
             max_iterations=config.max_iterations,
             config=config,
             cluster_id_generator=cluster_id_generator,
-            show_progress=show_progress
+            show_progress=show_progress,
+            checkpoint_frequency=checkpoint_frequency,
+            checkpoint_output_dir=checkpoint_output_dir,
+            header_mapping=header_mapping,
+            resume_state=resume_state
         )
         tracking_stages.append(pass2_tracking)
         current_clusters = clusters_after_pass2
