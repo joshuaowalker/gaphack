@@ -61,6 +61,7 @@ class ClusterGraph:
 
         # Initialize data structures
         self.medoid_cache: Dict[str, int] = {}
+        self.medoid_computation_cache: Dict[frozenset, int] = {}  # Cache: frozenset(headers) -> medoid_idx
         self.knn_graph: Dict[str, List[Tuple[str, float]]] = {}
         self.neighborhood_finder: Optional[NeighborhoodFinder] = None
 
@@ -101,6 +102,11 @@ class ClusterGraph:
         if len(cluster_headers) == 1:
             return self.headers.index(cluster_headers[0])
 
+        # Check cache first
+        cache_key = frozenset(cluster_headers)
+        if cache_key in self.medoid_computation_cache:
+            return self.medoid_computation_cache[cache_key]
+
         cluster_indices = [self.headers.index(h) for h in cluster_headers]
 
         # For clusters with multiple sequences, use MSA-based distance calculation
@@ -127,6 +133,8 @@ class ClusterGraph:
                 min_total_distance = total_distance
                 medoid_idx = global_candidate_idx
 
+        # Cache the result
+        self.medoid_computation_cache[cache_key] = medoid_idx
         return medoid_idx
 
 

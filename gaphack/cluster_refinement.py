@@ -25,6 +25,227 @@ from .utils import calculate_distance_matrix
 logger = logging.getLogger("gaphack.refine")
 
 
+# Global gap metric configuration
+# Number of nearest neighbor clusters to use for inter-cluster distance calculation
+# Higher K provides more robust estimates but increases computation
+GLOBAL_GAP_K_NEIGHBORS = 3
+
+# Cache for per-cluster gap computations
+# Key: (frozenset(cluster_headers), tuple(sorted(frozenset(neighbor_headers))), target_percentile)
+# Value: gap value (float)
+_global_gap_cache: Dict[Tuple[frozenset, Tuple[frozenset, ...], int], float] = {}
+
+
+def compute_global_gap_metrics(
+    clusters: Dict[str, List[str]],
+    proximity_graph: 'ClusterGraph',
+    sequences: List[str],
+    headers: List[str],
+    target_percentile: int = 95,
+    show_progress: bool = True
+) -> Dict[str, float]:
+    """Compute global gap metrics across all clusters for convergence tracking.
+
+    Calculates per-cluster barcode gaps using K nearest neighbor clusters for
+    inter-cluster distances, then aggregates into global metrics.
+
+    Creates MSA-based distance providers for each cluster's minimal scope
+    (cluster + K neighbors) to avoid cost-prohibitive global MSA.
+
+    Args:
+        clusters: Dict mapping cluster_id -> list of sequence headers
+        proximity_graph: K-NN graph for finding nearest neighbor clusters
+        sequences: Full sequence list
+        headers: Full header list (indices must match sequences)
+        target_percentile: Percentile for gap calculation (default: 95)
+        show_progress: Show progress bar during computation (default: True)
+
+    Returns:
+        Dict with global gap metrics:
+        - 'mean_gap': Mean gap across all clusters (unweighted)
+        - 'weighted_gap': Mean gap weighted by cluster size
+        - 'gap_coverage': Fraction of clusters with positive gap
+        - 'gap_coverage_sequences': Fraction of sequences in positive-gap clusters
+    """
+    from .distance_providers import MSACachedDistanceProvider
+    from tqdm import tqdm
+
+    # Map headers to indices
+    header_to_idx = {h: i for i, h in enumerate(headers)}
+
+    # Track per-cluster gaps and sizes
+    per_cluster_gaps = []
+    per_cluster_sizes = []
+    positive_gap_clusters = 0
+    positive_gap_sequences = 0
+    total_sequences = 0
+
+    # Track clusters with issues for debugging
+    nan_gap_count = 0
+    skipped_no_neighbors = 0
+    cache_hits = 0
+    cache_misses = 0
+
+    cluster_iter = tqdm(clusters.items(), desc="Computing global gap metrics", unit="cluster", disable=not show_progress)
+
+    for cluster_id, cluster_headers in cluster_iter:
+        cluster_size = len(cluster_headers)
+        total_sequences += cluster_size
+
+        # Get K nearest neighbor clusters
+        k_nearest = proximity_graph.get_k_nearest_neighbors(cluster_id, GLOBAL_GAP_K_NEIGHBORS)
+
+        # Build minimal scope: cluster + K neighbors
+        scope_headers = list(cluster_headers)  # Start with current cluster
+        neighbor_cluster_ids = []
+
+        for neighbor_id, _ in k_nearest:
+            if neighbor_id in clusters:
+                neighbor_cluster_ids.append(neighbor_id)
+                scope_headers.extend(clusters[neighbor_id])
+
+        # Skip if no neighbors found
+        if not neighbor_cluster_ids:
+            skipped_no_neighbors += 1
+            logger.debug(f"Cluster {cluster_id} has no neighbors for gap calculation")
+            continue
+
+        # Check cache before expensive MSA computation
+        cache_key = (
+            frozenset(cluster_headers),
+            tuple(sorted(frozenset(clusters[nid]) for nid in neighbor_cluster_ids)),
+            target_percentile
+        )
+
+        if cache_key in _global_gap_cache:
+            # Cache hit - reuse computed gap
+            gap = _global_gap_cache[cache_key]
+            cache_hits += 1
+
+            # Track statistics
+            per_cluster_gaps.append(gap)
+            per_cluster_sizes.append(cluster_size)
+
+            if gap > 0:
+                positive_gap_clusters += 1
+                positive_gap_sequences += cluster_size
+
+            continue  # Skip expensive computation
+
+        # Cache miss - need to compute gap
+        cache_misses += 1
+
+        # Create scoped MSA-based distance provider for this cluster + neighbors
+        scope_sequences = [sequences[header_to_idx[h]] for h in scope_headers]
+        scope_distance_provider = MSACachedDistanceProvider(scope_sequences, scope_headers)
+
+        # Build local header-to-scope-index mapping
+        scope_header_to_idx = {h: i for i, h in enumerate(scope_headers)}
+
+        # 1. Compute intra-cluster distances
+        intra_distances = []
+        if cluster_size > 1:
+            # All pairwise distances within cluster
+            for i in range(len(cluster_headers)):
+                for j in range(i + 1, len(cluster_headers)):
+                    scope_i = scope_header_to_idx[cluster_headers[i]]
+                    scope_j = scope_header_to_idx[cluster_headers[j]]
+                    dist = scope_distance_provider.get_distance(scope_i, scope_j)
+                    # Filter out NaN distances
+                    if not np.isnan(dist):
+                        intra_distances.append(dist)
+
+        # Singleton case: intra = 0 (perfect cohesion)
+        if not intra_distances:
+            intra_upper = 0.0
+        else:
+            intra_upper = np.percentile(intra_distances, target_percentile)
+            # Check for NaN in percentile result
+            if np.isnan(intra_upper):
+                logger.warning(f"Cluster {cluster_id}: NaN intra_upper from {len(intra_distances)} distances")
+                intra_upper = 0.0
+
+        # 2. Compute inter-cluster distances to K nearest neighbors
+        inter_distances = []
+
+        for neighbor_id in neighbor_cluster_ids:
+            neighbor_headers = clusters[neighbor_id]
+
+            # All pairwise distances between clusters
+            for cluster_h in cluster_headers:
+                for neighbor_h in neighbor_headers:
+                    scope_i = scope_header_to_idx[cluster_h]
+                    scope_j = scope_header_to_idx[neighbor_h]
+                    dist = scope_distance_provider.get_distance(scope_i, scope_j)
+                    # Filter out NaN distances
+                    if not np.isnan(dist):
+                        inter_distances.append(dist)
+
+        # Compute inter-cluster lower bound
+        if not inter_distances:
+            logger.debug(f"Cluster {cluster_id} has no valid inter-cluster distances")
+            continue
+
+        inter_lower = np.percentile(inter_distances, 100 - target_percentile)
+
+        # Check for NaN in percentile result
+        if np.isnan(inter_lower):
+            logger.warning(f"Cluster {cluster_id}: NaN inter_lower from {len(inter_distances)} distances")
+            continue
+
+        # 3. Compute gap for this cluster
+        gap = inter_lower - intra_upper
+
+        # Final NaN check
+        if np.isnan(gap):
+            nan_gap_count += 1
+            logger.warning(f"Cluster {cluster_id}: NaN gap (intra={intra_upper:.4f}, inter={inter_lower:.4f})")
+            continue
+
+        # Store in cache for future iterations
+        _global_gap_cache[cache_key] = gap
+
+        per_cluster_gaps.append(gap)
+        per_cluster_sizes.append(cluster_size)
+
+        if gap > 0:
+            positive_gap_clusters += 1
+            positive_gap_sequences += cluster_size
+
+    # Log debug statistics if there were issues
+    if nan_gap_count > 0 or skipped_no_neighbors > 0:
+        logger.info(f"Global gap computation: skipped {skipped_no_neighbors} clusters (no neighbors), "
+                   f"{nan_gap_count} clusters (NaN gaps)")
+
+    # Aggregate into global metrics
+    if not per_cluster_gaps:
+        # No gaps computed - return zeros
+        logger.warning("No valid gaps computed - all clusters skipped")
+        return {
+            'mean_gap': 0.0,
+            'weighted_gap': 0.0,
+            'gap_coverage': 0.0,
+            'gap_coverage_sequences': 0.0
+        }
+
+    mean_gap = np.mean(per_cluster_gaps)
+    weighted_gap = np.average(per_cluster_gaps, weights=per_cluster_sizes)
+    gap_coverage = positive_gap_clusters / len(per_cluster_gaps)
+    gap_coverage_sequences = positive_gap_sequences / total_sequences if total_sequences > 0 else 0.0
+
+    # Final sanity check for NaN in aggregated metrics
+    if np.isnan(mean_gap) or np.isnan(weighted_gap):
+        logger.error(f"NaN in final metrics! mean_gap={mean_gap}, weighted_gap={weighted_gap}, "
+                    f"gaps computed: {len(per_cluster_gaps)}")
+
+    return {
+        'mean_gap': float(mean_gap),
+        'weighted_gap': float(weighted_gap),
+        'gap_coverage': float(gap_coverage),
+        'gap_coverage_sequences': float(gap_coverage_sequences)
+    }
+
+
 def compute_ami_for_refinement(input_clusters: Set[str], output_clusters: Dict[str, List[str]],
                                 all_clusters: Dict[str, List[str]]) -> float:
     """Compute adjusted mutual information between input and output clusters.
@@ -806,6 +1027,29 @@ def pass2_iterative_merge(
         graph_time = time.time() - graph_start
         timing['proximity_graphs'].append(graph_time)
 
+        # Compute global gap metrics at start of iteration (using fresh graph)
+        gap_metrics_start = time.time()
+        global_gap_metrics = compute_global_gap_metrics(
+            clusters=current_clusters,
+            proximity_graph=proximity_graph,
+            sequences=sequences,
+            headers=headers,
+            target_percentile=target_percentile,
+            show_progress=show_progress
+        )
+        gap_metrics_time = time.time() - gap_metrics_start
+
+        # Log global gap metrics (pre-refinement)
+        mean_gap = global_gap_metrics['mean_gap']
+        weighted_gap = global_gap_metrics['weighted_gap']
+        gap_coverage = global_gap_metrics['gap_coverage']
+        gap_coverage_sequences = global_gap_metrics['gap_coverage_sequences']
+        total_sequences_in_clusters = sum(len(headers_list) for headers_list in current_clusters.values())
+        positive_gap_sequence_count = int(gap_coverage_sequences * total_sequences_in_clusters)
+
+        logger.info(f"Global gap (pre-refinement): mean={mean_gap:.4f}, weighted={weighted_gap:.4f}, "
+                   f"coverage={gap_coverage*100:.1f}% ({positive_gap_sequence_count}/{total_sequences_in_clusters} seqs)")
+
         # Track which clusters have been processed this iteration
         processed_this_iteration = set()
 
@@ -816,6 +1060,7 @@ def pass2_iterative_merge(
         iteration_stats = {
             'best_gap': float('-inf'),
             'best_gap_info': None,
+            'global_gap_metrics': global_gap_metrics,  # Store for checkpointing
             'seeds_processed': 0,
             'seeds_skipped_already_processed': 0,  # Seed was in a processed scope
             'seeds_skipped_neighborhood_changed': 0,  # Neighborhood modified this iteration
