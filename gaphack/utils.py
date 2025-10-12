@@ -230,6 +230,94 @@ def replace_terminal_gaps(aligned_sequences: List[str]) -> List[str]:
     return processed
 
 
+# Coverage threshold for alignment trimming
+MSA_COVERAGE_THRESHOLD = 0.5
+
+
+class MSAAlignmentError(Exception):
+    """Raised when MSA alignment processing fails."""
+    pass
+
+
+def trim_alignment_by_coverage(aligned_sequences: List[str],
+                               coverage_threshold: float = MSA_COVERAGE_THRESHOLD) -> List[str]:
+    """Trim alignment to region where sufficient sequences have data.
+
+    Finds the leftmost and rightmost positions where at least
+    coverage_threshold fraction of sequences have non-terminal-gap
+    characters (bases or internal gaps '-'), then trims all sequences
+    to this region. Terminal gaps ('.' characters) indicate missing data.
+
+    This addresses issues where different noisy sequence tails cause
+    SPOA to open large gaps, which penalizes pairwise distances between
+    sequences with different tail patterns.
+
+    Args:
+        aligned_sequences: List of aligned sequences with terminal gaps marked as '.'
+        coverage_threshold: Minimum fraction of sequences that must have data at
+                          a position for it to be included (default: 0.5)
+
+    Returns:
+        Trimmed aligned sequences
+
+    Raises:
+        MSAAlignmentError: If no positions meet the coverage threshold
+    """
+    if not aligned_sequences:
+        raise MSAAlignmentError("Cannot trim empty alignment")
+
+    n_sequences = len(aligned_sequences)
+    alignment_length = len(aligned_sequences[0])
+    min_coverage = int(coverage_threshold * n_sequences)
+
+    # Count sequences with data (non-terminal-gap) at each position
+    coverage_counts = []
+    for pos in range(alignment_length):
+        count = sum(1 for seq in aligned_sequences if seq[pos] != '.')
+        coverage_counts.append(count)
+
+    # Find first position that meets threshold
+    first_valid = None
+    for pos in range(alignment_length):
+        if coverage_counts[pos] >= min_coverage:
+            first_valid = pos
+            break
+
+    # Find last position that meets threshold
+    last_valid = None
+    for pos in range(alignment_length - 1, -1, -1):
+        if coverage_counts[pos] >= min_coverage:
+            last_valid = pos
+            break
+
+    # Check if we found a valid region
+    if first_valid is None or last_valid is None or first_valid > last_valid:
+        raise MSAAlignmentError(
+            f"No alignment region with >={coverage_threshold:.0%} coverage found. "
+            f"Alignment has {n_sequences} sequences with {alignment_length}bp length, "
+            f"requiring >={min_coverage} sequences with data at each position. "
+            f"This indicates extremely divergent sequences with insufficient overlap."
+        )
+
+    # Trim all sequences to the valid region
+    trimmed_sequences = [seq[first_valid:last_valid + 1] for seq in aligned_sequences]
+
+    # Log trimming information
+    original_length = alignment_length
+    trimmed_length = last_valid - first_valid + 1
+    left_trim = first_valid
+    right_trim = original_length - last_valid - 1
+
+    logging.debug(
+        f"Trimmed alignment from {original_length}bp to {trimmed_length}bp "
+        f"({original_length - trimmed_length}bp removed: "
+        f"{left_trim}bp left, {right_trim}bp right) "
+        f"using {coverage_threshold:.0%} coverage threshold"
+    )
+
+    return trimmed_sequences
+
+
 def filter_msa_positions(seq1_aligned: str, seq2_aligned: str) -> Tuple[str, str]:
     """Remove positions unsuitable for pairwise scoring from MSA.
 
@@ -399,6 +487,9 @@ def calculate_distance_matrix(sequences: List[str],
 
     # Replace terminal gaps with '.'
     aligned_sequences = replace_terminal_gaps(aligned_sequences)
+
+    # Trim alignment to region with sufficient coverage
+    aligned_sequences = trim_alignment_by_coverage(aligned_sequences)
 
     # Compute median sequence length for distance normalization
     sequence_lengths = [len(seq) for seq in sequences]

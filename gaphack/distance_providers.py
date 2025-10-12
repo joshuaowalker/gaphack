@@ -4,13 +4,9 @@ import logging
 from abc import ABC, abstractmethod
 from typing import List, Dict, Set, Tuple, Optional
 import numpy as np
+from .utils import MSAAlignmentError
 
 logger = logging.getLogger(__name__)
-
-
-class MSAAlignmentError(Exception):
-    """Raised when SPOA multiple sequence alignment fails."""
-    pass
 
 
 class DistanceProvider(ABC):
@@ -50,7 +46,7 @@ class MSACachedDistanceProvider(DistanceProvider):
         Raises:
             MSAAlignmentError: If SPOA fails to create alignment
         """
-        from .utils import run_spoa_msa, replace_terminal_gaps
+        from .utils import run_spoa_msa, replace_terminal_gaps, trim_alignment_by_coverage
         import numpy as np
 
         self.sequences = sequences
@@ -80,7 +76,8 @@ class MSACachedDistanceProvider(DistanceProvider):
 
         # SPOA succeeded - use MSA-based scoring
         self.aligned_sequences = replace_terminal_gaps(aligned)
-        logger.debug(f"MSA created successfully, alignment length: {len(aligned[0])}")
+        self.aligned_sequences = trim_alignment_by_coverage(self.aligned_sequences)
+        logger.debug(f"MSA created successfully, alignment length: {len(self.aligned_sequences[0])}")
 
     def get_distance(self, idx1: int, idx2: int) -> float:
         """Get distance between two sequences using cached MSA."""
