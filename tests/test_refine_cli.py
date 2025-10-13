@@ -419,8 +419,6 @@ class TestGenerateClusterMappingReport:
 
         generate_cluster_mapping_report(
             original_clusters=original_clusters,
-            stage1_clusters=None,
-            stage2_clusters=None,
             final_clusters=final_clusters,
             output_path=output_path
         )
@@ -454,8 +452,6 @@ class TestGenerateClusterMappingReport:
 
         generate_cluster_mapping_report(
             original_clusters=original_clusters,
-            stage1_clusters=None,
-            stage2_clusters=None,
             final_clusters=final_clusters,
             output_path=output_path
         )

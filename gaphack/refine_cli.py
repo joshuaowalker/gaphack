@@ -1,7 +1,7 @@
 """Command-line interface for gaphack-refine.
 
-Standalone tool for applying conflict resolution and close cluster refinement
-to existing cluster assignments from any clustering tool.
+Standalone tool for iterative neighborhood-based refinement of existing
+cluster assignments from any clustering tool.
 """
 
 import argparse
@@ -20,7 +20,6 @@ from .cluster_refinement import (
     refine_clusters,
     RefinementConfig, verify_no_conflicts
 )
-from .cluster_graph import ClusterGraph
 from .refinement_types import ClusterIDGenerator, ProcessingStageInfo
 from . import __version__
 
@@ -150,8 +149,6 @@ def detect_conflicts(clusters: Dict[str, List[str]]) -> Dict[str, List[str]]:
 
 def generate_cluster_mapping_report(
     original_clusters: Dict[str, List[str]],
-    stage1_clusters: Optional[Dict[str, List[str]]],
-    stage2_clusters: Optional[Dict[str, List[str]]],
     final_clusters: Dict[str, List[str]],
     output_path: Path
 ) -> None:
@@ -159,8 +156,6 @@ def generate_cluster_mapping_report(
 
     Args:
         original_clusters: Initial input clusters
-        stage1_clusters: After conflict resolution (None if skipped)
-        stage2_clusters: After close cluster refinement (None if skipped)
         final_clusters: Final renumbered clusters
         output_path: Path to write mapping file
     """
@@ -168,8 +163,8 @@ def generate_cluster_mapping_report(
     lines.append("# gaphack-refine cluster ID mapping")
     lines.append(f"# Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append(f"# ")
-    lines.append("# Shows cluster ID transformations through refinement stages:")
-    lines.append("# Original_ID → [Deconflicted_ID] → [Refined_ID] → Final_ID")
+    lines.append("# Shows cluster ID transformations through refinement:")
+    lines.append("# Original_ID → Final_ID")
     lines.append("")
 
     # Build reverse mapping: final_id -> original sequences
@@ -226,12 +221,11 @@ def generate_refinement_summary(
     output_dir: Path,
     parameters: Dict,
     initial_state: Dict,
-    stage1_info: Optional[ProcessingStageInfo],
-    stage2_info: Optional[ProcessingStageInfo],
+    refinement_info: Optional[ProcessingStageInfo],
     final_state: Dict,
     timing: Dict
 ) -> str:
-    """Generate detailed summary report for two-pass refinement.
+    """Generate detailed summary report for iterative refinement.
 
     Returns formatted summary text for refine_summary.txt
     """
@@ -282,14 +276,14 @@ def generate_refinement_summary(
     # Iterative Refinement
     lines.append("Iterative Refinement")
     lines.append("-" * 60)
-    if stage2_info:
+    if refinement_info:
         lines.append("Purpose: Optimize cluster boundaries using neighborhood-based refinement")
         lines.append("")
 
-        iterations = stage2_info.summary_stats.get('iterations', 0)
+        iterations = refinement_info.summary_stats.get('iterations', 0)
         max_iterations = parameters.get('max_iterations', 10)
-        convergence_reason = stage2_info.summary_stats.get('convergence_reason', 'unknown')
-        converged_scopes = stage2_info.summary_stats.get('converged_scopes_count', 0)
+        convergence_reason = refinement_info.summary_stats.get('convergence_reason', 'unknown')
+        converged_scopes = refinement_info.summary_stats.get('converged_scopes_count', 0)
 
         lines.append(f"Iterations: {iterations} (max: {max_iterations})")
 
@@ -302,8 +296,8 @@ def generate_refinement_summary(
         lines.append(f"Converged scopes: {converged_scopes}")
         lines.append("")
 
-        clusters_before = stage2_info.summary_stats.get('clusters_before', 0)
-        clusters_after = stage2_info.summary_stats.get('clusters_after', 0)
+        clusters_before = refinement_info.summary_stats.get('clusters_before', 0)
+        clusters_after = refinement_info.summary_stats.get('clusters_after', 0)
         cluster_change = clusters_after - clusters_before
 
         lines.append(f"Clusters before: {clusters_before}")
@@ -543,7 +537,7 @@ Examples:
 def main():
     """Main entry point for gaphack-refine CLI."""
     parser = argparse.ArgumentParser(
-        description="Refine existing clusters using conflict resolution and close cluster refinement",
+        description="Refine existing clusters using iterative neighborhood-based refinement",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=USAGE_EXAMPLES
     )
@@ -575,18 +569,12 @@ def main():
     # Advanced refinement parameters
     parser.add_argument('--max-scope-size', type=int, default=300,
                        help='Maximum sequences for full gapHACk refinement (default: 300)')
-    parser.add_argument('--expansion-threshold', type=float, default=None,
-                       help='(Legacy) Distance threshold for scope expansion (default: 1.2 × close_threshold)')
 
     # Proximity graph parameters
     parser.add_argument('--search-method', choices=['blast', 'vsearch'], default='blast',
                        help='Search method for proximity graph (default: blast)')
     parser.add_argument('--knn-neighbors', type=int, default=20,
                        help='K for K-NN cluster graph (default: 20)')
-    parser.add_argument('--blast-evalue', type=float, default=1e-5,
-                       help='BLAST e-value threshold (default: 1e-5)')
-    parser.add_argument('--min-identity', type=float, default=None,
-                       help='Minimum sequence identity %% (default: auto)')
 
     # Output options
     parser.add_argument('--renumber', action='store_true', default=True,
@@ -655,7 +643,8 @@ def main():
             'duplicate_headers': duplicate_headers,
             'input_clusters': len(clusters),
             'unassigned_count': len(unassigned_headers),
-            'conflicts_count': len(conflicts)
+            'conflicts_count': len(conflicts),
+            'conflicted_clusters': len(set(cid for cluster_ids in conflicts.values() for cid in cluster_ids)) if conflicts else 0
         }
 
         logger.info(f"Loaded {len(clusters)} clusters with {len(headers)} sequences ({unique_headers} unique headers)")
@@ -754,8 +743,6 @@ def main():
 
         generate_cluster_mapping_report(
             original_clusters=clusters,
-            stage1_clusters=None,
-            stage2_clusters=None,
             final_clusters=final_clusters,
             output_path=final_output_dir / "cluster_mapping.txt"
         )
@@ -786,7 +773,6 @@ def main():
             'max_lump': args.max_lump,
             'target_percentile': args.target_percentile,
             'max_scope_size': args.max_scope_size,
-            'expansion_threshold': args.expansion_threshold or (args.close_threshold * 1.2 if args.close_threshold > 0 else None),
             'search_method': args.search_method,
             'knn_neighbors': args.knn_neighbors,
             'max_iterations': args.max_iterations,
@@ -798,8 +784,7 @@ def main():
             output_dir=final_output_dir,
             parameters=parameters,
             initial_state=initial_state,
-            stage1_info=None,
-            stage2_info=refinement_info,
+            refinement_info=refinement_info,
             final_state=final_state,
             timing=timing
         )
