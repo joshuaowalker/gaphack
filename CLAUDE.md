@@ -7,13 +7,13 @@ This file contains development notes and future considerations for the gapHACk p
 ### Architecture Overview
 - **Distance Provider Architecture**: Three-tier system (global cache, scoped providers, precomputed) - see [Performance Considerations](#performance-considerations)
 - **Cluster Graph**: BLAST K-NN graph for O(K) proximity queries - see [Cluster Graph Infrastructure](#cluster-graph-infrastructure)
-- **Conflict Resolution**: DFS component analysis for conflict resolution - see [Conflict Resolution Architecture](#conflict-resolution-architecture)
+- **Iterative Refinement**: Neighborhood-based refinement with convergence tracking - see [Refinement Implementation](#refinement-implementation)
 - **Result Tracking**: Comprehensive refinement tracking via ProcessingStageInfo - see [Result Tracking and Reproducibility](#result-tracking-and-reproducibility)
 
 ### Key Files by Functionality
 - **Core clustering**: `core.py` (main algorithm + DistanceCache)
 - **Target mode**: `target_clustering.py`
-- **Refinement orchestration**: `cluster_refinement.py` (two-pass refinement, conflict resolution, close cluster refinement)
+- **Refinement orchestration**: `cluster_refinement.py` (iterative neighborhood-based refinement)
 - **Refinement types**: `refinement_types.py` (ClusterIDGenerator, ProcessingStageInfo, cluster ID utilities)
 - **CLI entry points**: `cli.py` (main gaphack), `refine_cli.py` (gaphack-refine), `analyze_cli.py` (gaphack-analyze)
 - **Distance computation**: `lazy_distances.py` (LazyDistanceProvider, PrecomputedDistanceProvider)
@@ -98,36 +98,49 @@ The multiprocessing implementation uses a specialized `DistanceCache` class (`co
 
 ## Refinement Implementation
 
-### Conflict Resolution Architecture
-**Purpose**: Ensures mutually exclusive and collectively exhaustive (MECE) clustering
+### Iterative Refinement Architecture
+**Purpose**: Optimize clustering quality through iterative neighborhood-based refinement
 
 **Key Components**:
-- `find_conflict_components()` (`cluster_refinement.py`): Groups conflicts using graph analysis
-  - Builds cluster adjacency graph where edges represent shared sequences
-  - Uses DFS to find connected components of conflicted clusters
-  - Each component is resolved independently with full gapHACk
+- `iterative_refinement()` (`cluster_refinement.py`): Main refinement loop using proximity graph
+- `refine_scope_with_gaphack()`: Runs full gapHACk on seed + neighborhood
+- `build_refinement_scope()`: Builds seed cluster + neighbors within max_lump + context
+
+**Refinement Process**:
+1. Build proximity graph (BLAST/vsearch K-NN)
+2. For each seed cluster (deterministic priority order):
+   - Find nearby clusters within max_lump
+   - Expand context beyond max_lump (gradient area)
+   - Run full gapHACk on combined scope
+   - Update clusters if changed
+3. Iterate until convergence (AMI change < threshold)
+
+**Convergence Criteria**:
+- AMI change < 0.001 between iterations (stable clustering)
+- All scopes converged (no changes in last 2 iterations)
+- Maximum iterations reached (default: 10)
 
 **Refinement Configuration** (`cluster_refinement.py::RefinementConfig`):
 - `max_full_gaphack_size` (300): Maximum sequences for full gapHACk refinement
-- `close_threshold`: Distance threshold for close cluster refinement
-- `max_iterations` (10): Maximum Pass 2 iterations
+- `close_threshold`: Distance threshold for finding nearby clusters
+- `max_iterations` (10): Maximum refinement iterations
 - `k_neighbors` (20): K-NN graph parameter
 - `search_method` ("blast"): BLAST or vsearch for proximity graph
-- `random_seed`: Seed for randomizing seed order in Pass 2
+- `random_seed`: Seed for randomizing seed order (None = deterministic)
 
 ### Result Tracking and Reproducibility
 The `ProcessingStageInfo` dataclass (`refinement_types.py`) provides comprehensive tracking:
 
 **Stage Information**:
-- `stage_name`: Name of the processing stage (e.g., "Pass 1: Resolve and Split")
+- `stage_name`: Name of the processing stage (e.g., "Iterative Refinement")
 - `clusters_before`: Cluster state before stage
 - `clusters_after`: Cluster state after stage
 - `components_processed`: Details about each component refined
-- `summary_stats`: Aggregate statistics (counts, changes, timing)
+- `summary_stats`: Aggregate statistics (counts, changes, timing, iterations, convergence)
 
 **Cluster ID Management** (`refinement_types.py::ClusterIDGenerator`):
 - Generates globally unique cluster IDs with stage suffixes
-- Format: `cluster_{NNNNN}{SUFFIX}` where SUFFIX is I (initial), C (conflict resolution), or R1/R2/R3... (refinements)
+- Format: `cluster_{NNNNN}{SUFFIX}` where SUFFIX is I (initial) or R1/R2/R3... (refinement iterations)
 - Helper functions: `format_cluster_id()`, `parse_cluster_id()`, `get_next_cluster_number()`
 
 ### Cluster Graph Infrastructure

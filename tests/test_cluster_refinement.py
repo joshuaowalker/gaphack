@@ -12,10 +12,8 @@ import numpy as np
 
 from gaphack.cluster_refinement import (
     RefinementConfig,
-    find_conflict_components,
     apply_full_gaphack_to_scope,
     apply_full_gaphack_to_scope_with_metadata,
-    resolve_conflicts,
     verify_no_conflicts
 )
 
@@ -48,58 +46,6 @@ class TestRefinementConfig:
         assert config.max_iterations == 15
         assert config.k_neighbors == 30
         assert config.search_method == "vsearch"
-
-
-class TestConflictComponents:
-    """Test suite for conflict component finding algorithms."""
-
-    def test_find_conflict_components_simple(self):
-        """Test conflict component finding with simple conflicts."""
-        conflicts = {
-            "seq_1": ["cluster_A", "cluster_B"],
-            "seq_2": ["cluster_B", "cluster_C"]
-        }
-        all_clusters = {
-            "cluster_A": ["seq_1", "seq_3"],
-            "cluster_B": ["seq_1", "seq_2", "seq_4"],
-            "cluster_C": ["seq_2", "seq_5"]
-        }
-
-        components = find_conflict_components(conflicts, all_clusters)
-
-        # Should find one connected component containing all three clusters
-        assert len(components) == 1
-        assert set(components[0]) == {"cluster_A", "cluster_B", "cluster_C"}
-
-    def test_find_conflict_components_isolated(self):
-        """Test conflict component finding with isolated conflicts."""
-        conflicts = {
-            "seq_1": ["cluster_A", "cluster_B"],
-            "seq_2": ["cluster_C", "cluster_D"]
-        }
-        all_clusters = {
-            "cluster_A": ["seq_1"],
-            "cluster_B": ["seq_1"],
-            "cluster_C": ["seq_2"],
-            "cluster_D": ["seq_2"]
-        }
-
-        components = find_conflict_components(conflicts, all_clusters)
-
-        # Should find two separate components
-        assert len(components) == 2
-        component_sets = [set(comp) for comp in components]
-        assert {"cluster_A", "cluster_B"} in component_sets
-        assert {"cluster_C", "cluster_D"} in component_sets
-
-    def test_find_conflict_components_empty(self):
-        """Test conflict component finding with no conflicts."""
-        conflicts = {}
-        all_clusters = {"cluster_A": ["seq_1"], "cluster_B": ["seq_2"]}
-
-        components = find_conflict_components(conflicts, all_clusters)
-
-        assert components == []
 
 
 class TestFullGapHACkApplication:
@@ -154,89 +100,6 @@ class TestFullGapHACkApplication:
 
         assert len(clusters) == 2  # Two clusters
         assert metadata['gap_size'] == 0.05
-
-
-class TestConflictResolution:
-    """Test suite for conflict resolution algorithms."""
-
-    def setup_method(self):
-        """Set up test fixtures."""
-        self.test_sequences = ["ATCGATCG", "ATCGATCC", "TTTTGGGG", "TTTTGGCC"]
-        self.test_headers = ["seq_0", "seq_1", "seq_2", "seq_3"]
-        self.test_clusters = {
-            "cluster_A": ["seq_0", "seq_1"],
-            "cluster_B": ["seq_1", "seq_2"],  # seq_1 conflicts
-            "cluster_C": ["seq_3"]
-        }
-        self.conflicts = {"seq_1": ["cluster_A", "cluster_B"]}
-
-    @patch('gaphack.cluster_refinement.apply_full_gaphack_to_scope_with_metadata')
-    def test_resolve_conflicts_simple(self, mock_full_gaphack):
-        """Test simple conflict resolution."""
-        # Mock full gapHACk result - returns tuple (clusters, metadata)
-        mock_full_gaphack.return_value = (
-            {
-                "classic_1": ["seq_0", "seq_1"],
-                "classic_2": ["seq_2"]
-            },
-            {'gap_size': 0.01, 'metadata': {}}
-        )
-
-        updated_clusters, tracking_info = resolve_conflicts(
-            self.conflicts, self.test_clusters, self.test_sequences,
-            self.test_headers
-        )
-
-        # Should remove conflicted clusters and add classic results
-        assert "cluster_A" not in updated_clusters
-        assert "cluster_B" not in updated_clusters
-        assert "cluster_C" in updated_clusters  # Non-conflicted cluster preserved
-        assert "classic_1" in updated_clusters
-        assert "classic_2" in updated_clusters
-
-        # Verify tracking info
-        assert tracking_info.stage_name == "Conflict Resolution"
-        assert tracking_info.summary_stats['conflicts_count'] == 1
-
-    def test_resolve_conflicts_empty(self):
-        """Test conflict resolution with no conflicts."""
-        updated_clusters, tracking_info = resolve_conflicts(
-            {}, self.test_clusters, self.test_sequences,
-            self.test_headers
-        )
-
-        # Should return unchanged clusters
-        assert updated_clusters == self.test_clusters
-        assert tracking_info.summary_stats['conflicts_count'] == 0
-
-    @patch('gaphack.cluster_refinement.apply_full_gaphack_to_scope')
-    def test_resolve_conflicts_oversized(self, mock_full_gaphack):
-        """Test conflict resolution with oversized component."""
-        # Create large conflict scope
-        large_clusters = {}
-        conflicts = {}
-        for i in range(100):  # Create 100 clusters with 10 sequences each
-            cluster_id = f"cluster_{i}"
-            sequence_ids = [f"seq_{i*10 + j}" for j in range(10)]
-            large_clusters[cluster_id] = sequence_ids
-
-            # Create conflict for first sequence
-            if i < 50:  # First 50 clusters conflict on seq_0
-                if "seq_0" not in conflicts:
-                    conflicts["seq_0"] = []
-                conflicts["seq_0"].append(cluster_id)
-
-        config = RefinementConfig(max_full_gaphack_size=100)  # Small size limit
-        updated_clusters, tracking_info = resolve_conflicts(
-            conflicts, large_clusters, [], [],
-            config
-        )
-
-        # Should skip oversized component
-        assert len(tracking_info.components_processed) == 1
-        component_info = tracking_info.components_processed[0]
-        assert component_info['processed'] is False
-        assert component_info['skipped_reason'] == 'oversized'
 
 
 class TestConflictVerification:
@@ -303,52 +166,6 @@ class TestConflictVerification:
         assert result['no_conflicts'] is False
         assert result['critical_failure'] is True
         assert result['verification_context'] == "final"
-
-
-class TestPropertyBasedRefinement:
-    """Property-based tests for refinement algorithms."""
-
-    @given(
-        conflicts=st.dictionaries(
-            st.text(alphabet="seq_", min_size=4, max_size=10),
-            st.lists(st.text(alphabet="cluster_", min_size=8, max_size=15), min_size=2, max_size=4),
-            min_size=1, max_size=5
-        )
-    )
-    @settings(deadline=500)
-    def test_find_conflict_components_properties(self, conflicts):
-        """Property-based test for conflict component finding."""
-        # Generate corresponding cluster data
-        all_clusters = {}
-        for seq_id, cluster_ids in conflicts.items():
-            for cluster_id in cluster_ids:
-                if cluster_id not in all_clusters:
-                    all_clusters[cluster_id] = []
-                if seq_id not in all_clusters[cluster_id]:
-                    all_clusters[cluster_id].append(seq_id)
-
-        components = find_conflict_components(conflicts, all_clusters)
-
-        # Properties that should always hold
-        # 1. All conflicted clusters should appear in exactly one component
-        all_conflict_clusters = set()
-        for cluster_ids in conflicts.values():
-            all_conflict_clusters.update(cluster_ids)
-
-        found_clusters = set()
-        for component in components:
-            found_clusters.update(component)
-
-        assert found_clusters == all_conflict_clusters
-
-        # 2. No cluster should appear in multiple components
-        cluster_counts = defaultdict(int)
-        for component in components:
-            for cluster_id in component:
-                cluster_counts[cluster_id] += 1
-
-        for count in cluster_counts.values():
-            assert count == 1
 
 
 class TestGlobalGapMetrics:

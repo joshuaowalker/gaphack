@@ -374,11 +374,10 @@ def checkpoint_iteration(
 
 
 class RefinementConfig:
-    """Configuration for two-pass cluster refinement.
+    """Configuration for iterative cluster refinement.
 
-    This configuration supports the new two-pass architecture:
-    - Pass 1: Conflict resolution + individual refinement (tendency to split)
-    - Pass 2: Radius-based close cluster refinement (tendency to merge)
+    Controls parameters for neighborhood-based iterative refinement that
+    continues until convergence or iteration limit is reached.
     """
 
     def __init__(self,
@@ -392,11 +391,11 @@ class RefinementConfig:
 
         Args:
             max_full_gaphack_size: Hard limit for gapHACk input size (default: 300)
-            close_threshold: Distance threshold for "close" clusters (default: max_lump)
-            max_iterations: Maximum Pass 2 iterations (default: 10)
+            close_threshold: Distance threshold for finding nearby clusters (default: max_lump)
+            max_iterations: Maximum refinement iterations (default: 10)
             k_neighbors: K-NN graph parameter (default: 20)
             search_method: "blast" or "vsearch" for proximity graph
-            random_seed: Seed for randomizing seed order in Pass 2 (default: None for random seed)
+            random_seed: Seed for randomizing seed order (default: None for random seed)
         """
         self.max_full_gaphack_size = max_full_gaphack_size
         self.close_threshold = close_threshold
@@ -407,26 +406,8 @@ class RefinementConfig:
 
 
 # ============================================================================
-# Helper Functions for Two-Pass Refinement
+# Helper Functions for Iterative Refinement
 # ============================================================================
-
-def get_all_conflicted_cluster_ids(conflicts: Dict[str, List[str]],
-                                   all_clusters: Dict[str, List[str]]) -> Set[str]:
-    """Extract all cluster IDs involved in conflicts.
-
-    Args:
-        conflicts: Dict mapping sequence_id -> list of cluster_ids containing sequence
-        all_clusters: Dict mapping cluster_id -> list of sequence headers
-
-    Returns:
-        Set of all cluster IDs that contain conflicted sequences
-    """
-    conflicted_ids = set()
-    for seq_id, cluster_ids in conflicts.items():
-        conflicted_ids.update(cluster_ids)
-
-    # Verify these clusters actually exist
-    return {cid for cid in conflicted_ids if cid in all_clusters}
 
 
 def build_refinement_scope(
@@ -552,48 +533,6 @@ def build_refinement_scope(
     return scope_cluster_ids, scope_sequences, scope_headers
 
 
-def find_conflict_components(conflicts: Dict[str, List[str]],
-                                     all_clusters: Dict[str, List[str]]) -> List[List[str]]:
-    """Group conflicted clusters into connected components.
-
-    Two clusters are connected if they share any conflicted sequence.
-
-    Args:
-        conflicts: Dict mapping sequence_id -> list of cluster_ids containing sequence
-        all_clusters: Dict mapping cluster_id -> list of sequence headers
-
-    Returns:
-        List of connected components, each being a list of cluster IDs
-    """
-    # Build cluster adjacency graph
-    cluster_graph = defaultdict(set)
-
-    for seq_id, cluster_ids in conflicts.items():
-        for i, cluster1 in enumerate(cluster_ids):
-            for cluster2 in cluster_ids[i+1:]:
-                cluster_graph[cluster1].add(cluster2)
-                cluster_graph[cluster2].add(cluster1)
-
-    # Find connected components using DFS
-    visited = set()
-    components = []
-
-    def dfs_traverse(cluster_id: str, component: List[str]) -> None:
-        visited.add(cluster_id)
-        component.append(cluster_id)
-        for neighbor in cluster_graph[cluster_id]:
-            if neighbor not in visited:
-                dfs_traverse(neighbor, component)
-
-    for cluster_id in cluster_graph:
-        if cluster_id not in visited:
-            component = []
-            dfs_traverse(cluster_id, component)
-            components.append(component)
-
-    return components
-
-
 def apply_full_gaphack_to_scope_with_metadata(scope_sequences: List[str], scope_headers: List[str],
                                               min_split: float = 0.005, max_lump: float = 0.02,
                                               target_percentile: int = 95, cluster_id_generator=None,
@@ -696,183 +635,7 @@ def apply_full_gaphack_to_scope(scope_sequences: List[str], scope_headers: List[
 
 
 # ============================================================================
-# Pass 1: Conflict Resolution + Individual Refinement
-# ============================================================================
-
-def pass1_resolve_and_split(
-    all_clusters: Dict[str, List[str]],
-    sequences: List[str],
-    headers: List[str],
-    conflicts: Dict[str, List[str]],
-    min_split: float,
-    max_lump: float,
-    target_percentile: int,
-    config: RefinementConfig,
-    cluster_id_generator=None
-) -> Tuple[Dict[str, List[str]], 'ProcessingStageInfo']:
-    """Pass 1: Resolve conflicts and individually refine all clusters.
-
-    This pass ensures MECE property and has a tendency to split large clusters.
-    Every cluster is touched exactly once: either in conflict resolution or
-    individual refinement.
-
-    Args:
-        all_clusters: Current cluster dictionary
-        sequences: Full sequence list
-        headers: Full header list (indices must match sequences)
-        conflicts: Dict mapping sequence_id -> list of cluster_ids containing sequence
-        min_split: Minimum distance to split clusters
-        max_lump: Maximum distance to lump clusters (also used as close_threshold for Pass 1)
-        target_percentile: Percentile for gap optimization
-        config: Configuration for refinement parameters
-        cluster_id_generator: Optional cluster ID generator
-
-    Returns:
-        Tuple of (refined_clusters, tracking_info)
-    """
-    import time
-    from .refinement_types import ProcessingStageInfo, ClusterIDGenerator
-
-    # Initialize cluster ID generator if not provided
-    if cluster_id_generator is None:
-        cluster_id_generator = ClusterIDGenerator(stage_name="refined", refinement_count=0)
-
-    tracking_info = ProcessingStageInfo(
-        stage_name="Pass 1: Resolve and Split",
-        clusters_before=all_clusters.copy()
-    )
-
-    logger.info(f"=== Pass 1: Resolve and Split ===")
-    logger.info(f"Starting with {len(all_clusters)} clusters")
-
-    # Timing tracking
-    pass1_start = time.time()
-    timing = {}
-
-    # Step 1: Resolve conflicts using minimal scope (current approach)
-    conflict_start = time.time()
-    if conflicts:
-        logger.info(f"Resolving {len(conflicts)} conflicts...")
-        clusters_after_conflicts, conflict_info = resolve_conflicts(
-            conflicts=conflicts,
-            all_clusters=all_clusters,
-            sequences=sequences,
-            headers=headers,
-            config=config,
-            min_split=min_split,
-            max_lump=max_lump,
-            target_percentile=target_percentile,
-            cluster_id_generator=cluster_id_generator
-        )
-        conflicted_cluster_ids = get_all_conflicted_cluster_ids(conflicts, all_clusters)
-        logger.info(f"Conflicts resolved: {len(all_clusters)} clusters → {len(clusters_after_conflicts)} clusters")
-    else:
-        logger.info("No conflicts to resolve")
-        clusters_after_conflicts = all_clusters.copy()
-        conflicted_cluster_ids = set()
-    timing['conflict_resolution'] = time.time() - conflict_start
-
-    # Step 2: Individually refine every non-conflicted cluster in isolation (no neighbors, no context)
-    # This allows splitting of non-cohesive clusters
-    refinement_start = time.time()
-    final_clusters = clusters_after_conflicts.copy()
-    non_conflicted_count = len(clusters_after_conflicts) - len(conflicted_cluster_ids)
-    total_clusters = len(clusters_after_conflicts)  # Total for progress counter
-
-    logger.info(f"Individually refining {non_conflicted_count} non-conflicted clusters in isolation...")
-
-    # Map headers to indices for sequence extraction
-    header_to_idx = {h: i for i, h in enumerate(headers)}
-
-    clusters_processed = 0  # Track cumulative input clusters
-    for cluster_id in sorted(clusters_after_conflicts.keys()):
-        if cluster_id in conflicted_cluster_ids:
-            continue  # Already refined during conflict resolution
-
-        # Skip if cluster was already processed
-        if cluster_id not in final_clusters:
-            logger.debug(f"Skipping {cluster_id} - already processed")
-            continue
-
-        # Skip if cluster is empty (shouldn't happen, but defensive check)
-        if not final_clusters[cluster_id]:
-            logger.warning(f"Skipping {cluster_id} - empty cluster")
-            continue
-
-        # Extract sequences for this cluster only (isolated refinement)
-        cluster_headers = final_clusters[cluster_id]
-        cluster_sequences = [sequences[header_to_idx[h]] for h in cluster_headers]
-
-        # Apply full gapHACk to this cluster in isolation
-        refined_clusters, metadata = apply_full_gaphack_to_scope_with_metadata(
-            cluster_sequences, cluster_headers,
-            min_split, max_lump, target_percentile,
-            cluster_id_generator=cluster_id_generator,
-            quiet=True
-        )
-
-        # Extract gap info and compute AMI for logging
-        num_input = 1  # Always 1 cluster input in isolated mode
-        num_output = len(refined_clusters)
-        gap_size = metadata.get('gap_size', float('-inf'))
-
-        # Compute AMI between input and output
-        ami = compute_ami_for_refinement({cluster_id}, refined_clusters, final_clusters)
-
-        # Format gap info
-        gap_info_str = ""
-        best_config = metadata.get('metadata', {}).get('best_config', {})
-        gap_metrics = best_config.get('gap_metrics')
-        if gap_metrics:
-            target_key = f'p{target_percentile}'
-            if target_key in gap_metrics:
-                intra = gap_metrics[target_key].get('intra_upper', 0.0)
-                inter = gap_metrics[target_key].get('inter_lower', 0.0)
-                gap_info_str = f"Gap {gap_size:.4f} (intra≤{intra:.4f}, inter≥{inter:.4f})"
-        elif gap_size > float('-inf'):
-            gap_info_str = f"Gap {gap_size:.4f}"
-
-        # Replace original cluster with refined result
-        del final_clusters[cluster_id]
-        for new_id, new_headers in refined_clusters.items():
-            final_clusters[new_id] = new_headers
-
-        clusters_processed += 1
-        logger.info(f"Pass 1 ({clusters_processed} of {total_clusters}): "
-                   f"{num_input} -> {num_output} clusters.  {gap_info_str}.  AMI {ami:.3f}")
-
-    timing['individual_refinement'] = time.time() - refinement_start
-    timing['individual_refinement_avg'] = timing['individual_refinement'] / non_conflicted_count if non_conflicted_count > 0 else 0.0
-    timing['total'] = time.time() - pass1_start
-
-    # Compute AMI between input and output clusters
-    pass1_ami = compute_ami_for_refinement(
-        set(all_clusters.keys()),
-        final_clusters,
-        all_clusters
-    )
-
-    logger.info(f"Pass 1 complete: {len(all_clusters)} clusters → {len(final_clusters)} clusters "
-               f"({len(final_clusters) - len(all_clusters):+d}).  AMI {pass1_ami:.3f}")
-    logger.info(f"Pass 1 timing: conflict={timing['conflict_resolution']:.1f}s, "
-               f"refinement={timing['individual_refinement']:.1f}s, "
-               f"total={timing['total']:.1f}s")
-
-    tracking_info.clusters_after = final_clusters
-    tracking_info.summary_stats = {
-        'clusters_before': len(all_clusters),
-        'clusters_after': len(final_clusters),
-        'cluster_count_change': len(final_clusters) - len(all_clusters),
-        'conflicts_resolved': len(conflicts),
-        'individual_refinements': non_conflicted_count,
-        'timing': timing
-    }
-
-    return final_clusters, tracking_info
-
-
-# ============================================================================
-# Pass 2: Radius-Based Close Cluster Refinement
+# Iterative Refinement with Neighborhood-Based Seeding
 # ============================================================================
 
 def execute_refinement_operations(
@@ -926,7 +689,7 @@ def execute_refinement_operations(
     return next_clusters, changes_made, new_converged_scopes
 
 
-def pass2_iterative_merge(
+def iterative_refinement(
     all_clusters: Dict[str, List[str]],
     sequences: List[str],
     headers: List[str],
@@ -943,7 +706,7 @@ def pass2_iterative_merge(
     header_mapping: Optional[Dict[str, str]] = None,
     resume_state: Optional[Dict] = None
 ) -> Tuple[Dict[str, List[str]], 'ProcessingStageInfo']:
-    """Pass 2: Iteratively refine close clusters using radius-based seeding.
+    """Iteratively refine clusters using neighborhood-based seeding.
 
     Continues until convergence (no changes) or iteration limit reached.
     Every cluster serves as a seed in each iteration.
@@ -977,16 +740,16 @@ def pass2_iterative_merge(
         cluster_id_generator = ClusterIDGenerator(stage_name="refined", refinement_count=0)
 
     tracking_info = ProcessingStageInfo(
-        stage_name="Pass 2: Iterative Merge",
+        stage_name="Iterative Refinement",
         clusters_before=all_clusters.copy()
     )
 
-    logger.info(f"=== Pass 2: Iterative Merge ===")
+    logger.info(f"=== Iterative Refinement ===")
     logger.info(f"Starting with {len(all_clusters)} clusters")
     logger.info(f"Close threshold: {close_threshold:.4f}, Max iterations: {max_iterations}")
     logger.info(f"Seed prioritization: per-sequence reclustering counts (deterministic)")
 
-    pass2_start = time.time()
+    refinement_start_time = time.time()
     timing = {
         'iterations': [],  # Per-iteration timing
         'proximity_graphs': [],  # Per-graph timing
@@ -1013,7 +776,7 @@ def pass2_iterative_merge(
     while global_iteration < max_iterations:
         iteration_start = time.time()
         global_iteration += 1
-        logger.info(f"Pass 2 iteration {global_iteration}: {len(current_clusters)} clusters")
+        logger.info(f"Refinement iteration {global_iteration}: {len(current_clusters)} clusters")
 
         # Build proximity graph for current cluster state
         graph_start = time.time()
@@ -1112,7 +875,7 @@ def pass2_iterative_merge(
                 iteration_stats['seeds_skipped_already_processed'] += 1
                 # Note: sequences from this seed are already in unique_sequences_processed
                 # from when the seed was processed as part of another scope
-                logger.info(f"Pass 2 Iter {global_iteration} ({seeds_processed} of {total_clusters}): "
+                logger.info(f"Refinement Iter {global_iteration} ({seeds_processed} of {total_clusters}): "
                           f"Skipping seed {seed_id} - seed already processed")
                 continue  # Already processed as part of another seed's scope
 
@@ -1135,7 +898,7 @@ def pass2_iterative_merge(
                 iteration_stats['seeds_skipped_neighborhood_changed'] += 1
                 # Track sequences in this scope (will be deduplicated against processed later)
                 unique_sequences_neighborhood_changed.update(scope_headers)
-                logger.info(f"Pass 2 Iter {global_iteration} ({seeds_processed} of {total_clusters}): "
+                logger.info(f"Refinement Iter {global_iteration} ({seeds_processed} of {total_clusters}): "
                           f"Skipping seed {seed_id} - neighborhood changed")
                 continue
 
@@ -1145,7 +908,7 @@ def pass2_iterative_merge(
                 iteration_stats['seeds_skipped_convergence'] += 1
                 # Track sequences in this converged scope
                 unique_sequences_converged.update(scope_headers)
-                logger.info(f"Pass 2 Iter {global_iteration} ({seeds_processed} of {total_clusters}): "
+                logger.info(f"Refinement Iter {global_iteration} ({seeds_processed} of {total_clusters}): "
                           f"Skipping seed {seed_id} - prior convergence detected ({len(scope_signature)} sequences)")
                 # Don't mark as processed - we didn't actually process anything
                 continue
@@ -1191,7 +954,7 @@ def pass2_iterative_merge(
                         }
 
             # Log individual refinement
-            logger.info(f"Pass 2 Iter {global_iteration} ({seeds_processed} of {total_clusters}): "
+            logger.info(f"Refinement Iter {global_iteration} ({seeds_processed} of {total_clusters}): "
                        f"{num_input} -> {num_output} clusters.  {gap_info_str}.  AMI {ami:.3f}")
 
             # Store operation for batch execution
@@ -1226,7 +989,7 @@ def pass2_iterative_merge(
             min_count = min(counts)
             max_count = max(counts)
             mean_count = sum(counts) / len(counts)
-            logger.info(f"Pass 2 Iter {global_iteration} Reclustering stats: "
+            logger.info(f"Refinement Iter {global_iteration} Reclustering stats: "
                        f"min={min_count}, max={max_count}, mean={mean_count:.1f}")
 
         # Execute all refinement operations and track changes
@@ -1285,7 +1048,7 @@ def pass2_iterative_merge(
                           f"{total_sequences_in_clusters} total in clusters")
 
         # Log comprehensive iteration summary
-        logger.info(f"Pass 2 Iter {global_iteration} Summary:")
+        logger.info(f"Refinement Iter {global_iteration} Summary:")
         logger.info(f"  Clusters: {len(current_clusters)} -> {len(next_clusters)} "
                    f"({len(next_clusters) - len(current_clusters):+d})")
         logger.info(f"  AMI: {iteration_ami:.3f}")
@@ -1344,14 +1107,14 @@ def pass2_iterative_merge(
         logger.warning(f"Reached iteration limit ({max_iterations}) without convergence")
         tracking_info.summary_stats = {'convergence_reason': 'iteration_limit'}
 
-    timing['total'] = time.time() - pass2_start
+    timing['total'] = time.time() - refinement_start_time
     timing['avg_iteration'] = sum(timing['iterations']) / len(timing['iterations']) if timing['iterations'] else 0.0
     timing['avg_graph'] = sum(timing['proximity_graphs']) / len(timing['proximity_graphs']) if timing['proximity_graphs'] else 0.0
     timing['avg_refinement'] = sum(timing['refinements']) / len(timing['refinements']) if timing['refinements'] else 0.0
 
-    logger.info(f"Pass 2 complete: {len(all_clusters)} clusters → {len(current_clusters)} clusters "
+    logger.info(f"Iterative refinement complete: {len(all_clusters)} clusters → {len(current_clusters)} clusters "
                f"({len(current_clusters) - len(all_clusters):+d})")
-    logger.info(f"Pass 2 timing: total={timing['total']:.1f}s, "
+    logger.info(f"Refinement timing: total={timing['total']:.1f}s, "
                f"avg_iteration={timing['avg_iteration']:.1f}s, "
                f"avg_graph={timing['avg_graph']:.1f}s, "
                f"avg_refinement={timing['avg_refinement']:.1f}s")
@@ -1371,47 +1134,42 @@ def pass2_iterative_merge(
     return current_clusters, tracking_info
 
 
-def two_pass_refinement(
+def refine_clusters(
     all_clusters: Dict[str, List[str]],
     sequences: List[str],
     headers: List[str],
-    conflicts: Dict[str, List[str]],
     min_split: float,
     max_lump: float,
     target_percentile: int,
     config: Optional[RefinementConfig] = None,
-    run_pass1: bool = True,
-    run_pass2: bool = True,
     cluster_id_generator=None,
     show_progress: bool = False,
     checkpoint_frequency: int = 0,
     checkpoint_output_dir: Optional[Path] = None,
     header_mapping: Optional[Dict[str, str]] = None,
     resume_state: Optional[Dict] = None
-) -> Tuple[Dict[str, List[str]], List['ProcessingStageInfo']]:
-    """Two-pass cluster refinement: resolve conflicts, split, then merge.
+) -> Tuple[Dict[str, List[str]], 'ProcessingStageInfo']:
+    """Iteratively refine clusters using neighborhood-based approach.
 
-    This is the main entry point for the new refinement architecture.
-
-    Pass 1: Conflict resolution + individual refinement (tendency to split)
-    Pass 2: Radius-based close cluster refinement (tendency to merge)
+    Main entry point for cluster refinement.
 
     Args:
         all_clusters: Current cluster dictionary
         sequences: Full sequence list
         headers: Full header list (indices must match sequences)
-        conflicts: Dict mapping sequence_id -> list of cluster_ids containing sequence
         min_split: Minimum distance to split clusters
         max_lump: Maximum distance to lump clusters
         target_percentile: Percentile for gap optimization
         config: Configuration for refinement parameters
-        run_pass1: Whether to run Pass 1 (default: True)
-        run_pass2: Whether to run Pass 2 (default: True)
         cluster_id_generator: Optional cluster ID generator
-        show_progress: Show progress bars during Pass 2 iterations
+        show_progress: Show progress bars during iterations
+        checkpoint_frequency: Checkpoint every N iterations (0=disabled)
+        checkpoint_output_dir: Base output directory for checkpoints
+        header_mapping: Mapping of sequence IDs to full headers (for checkpointing)
+        resume_state: Optional state to resume from (loaded from state.json)
 
     Returns:
-        Tuple of (refined_clusters, tracking_info_list)
+        Tuple of (refined_clusters, tracking_info)
     """
     if config is None:
         config = RefinementConfig()
@@ -1420,259 +1178,53 @@ def two_pass_refinement(
     if cluster_id_generator is None:
         cluster_id_generator = ClusterIDGenerator(stage_name="refined", refinement_count=0)
 
-    tracking_stages = []
-    current_clusters = all_clusters.copy()
-
     logger.info("=" * 80)
-    logger.info("TWO-PASS CLUSTER REFINEMENT")
+    logger.info("ITERATIVE CLUSTER REFINEMENT")
     logger.info("=" * 80)
     logger.info(f"Initial clusters: {len(all_clusters)}")
-    logger.info(f"Conflicts: {len(conflicts)}")
     logger.info(f"Config: max_scope={config.max_full_gaphack_size}, "
                f"max_iterations={config.max_iterations}")
 
-    # Pass 1: Conflict resolution + individual refinement
-    if run_pass1:
-        clusters_after_pass1, pass1_tracking = pass1_resolve_and_split(
-            all_clusters=current_clusters,
-            sequences=sequences,
-            headers=headers,
-            conflicts=conflicts,
-            min_split=min_split,
-            max_lump=max_lump,
-            target_percentile=target_percentile,
-            config=config,
-            cluster_id_generator=cluster_id_generator
-        )
-        tracking_stages.append(pass1_tracking)
-        current_clusters = clusters_after_pass1
-        logger.info(f"After Pass 1: {len(current_clusters)} clusters")
-    else:
-        logger.info("Skipping Pass 1 (run_pass1=False)")
+    # Determine close threshold (default to max_lump if not specified)
+    close_threshold = config.close_threshold if config.close_threshold is not None else max_lump
 
-    # Pass 2: Radius-based close cluster refinement
-    if run_pass2:
-        # Determine close threshold (default to max_lump if not specified)
-        close_threshold = config.close_threshold if config.close_threshold is not None else max_lump
-
-        clusters_after_pass2, pass2_tracking = pass2_iterative_merge(
-            all_clusters=current_clusters,
-            sequences=sequences,
-            headers=headers,
-            min_split=min_split,
-            max_lump=max_lump,
-            target_percentile=target_percentile,
-            close_threshold=close_threshold,
-            max_iterations=config.max_iterations,
-            config=config,
-            cluster_id_generator=cluster_id_generator,
-            show_progress=show_progress,
-            checkpoint_frequency=checkpoint_frequency,
-            checkpoint_output_dir=checkpoint_output_dir,
-            header_mapping=header_mapping,
-            resume_state=resume_state
-        )
-        tracking_stages.append(pass2_tracking)
-        current_clusters = clusters_after_pass2
-        logger.info(f"After Pass 2: {len(current_clusters)} clusters")
-    else:
-        logger.info("Skipping Pass 2 (run_pass2=False)")
-
-    logger.info("=" * 80)
-    logger.info(f"TWO-PASS REFINEMENT COMPLETE")
-    logger.info(f"Final result: {len(all_clusters)} clusters → {len(current_clusters)} clusters "
-               f"({len(current_clusters) - len(all_clusters):+d})")
-    logger.info("=" * 80)
-
-    return current_clusters, tracking_stages
-
-
-def resolve_conflicts(conflicts: Dict[str, List[str]],
-                                     all_clusters: Dict[str, List[str]],
-                                     sequences: List[str],
-                                     headers: List[str],
-                                     config: Optional[RefinementConfig] = None,
-                                     min_split: float = 0.005,
-                                     max_lump: float = 0.02,
-                                     target_percentile: int = 95,
-                                     cluster_id_generator=None) -> Tuple[Dict[str, List[str]], 'ProcessingStageInfo']:
-    """Resolve assignment conflicts using full gapHACk refinement with minimal scope.
-
-    Uses only conflicted clusters (no expansion) for fastest, most predictable conflict-free fixes.
-    This is pure correctness operation - quality improvement belongs to close cluster refinement.
-
-    Args:
-        conflicts: Dict mapping sequence_id -> list of cluster_ids containing sequence
-        all_clusters: Dict mapping cluster_id -> list of sequence headers
-        sequences: Full sequence list
-        headers: Full header list (indices must match sequences)
-        config: Configuration for refinement parameters
-        min_split: Minimum distance to split clusters
-        max_lump: Maximum distance to lump clusters
-        target_percentile: Percentile for gap optimization
-
-    Returns:
-        Tuple of (updated_clusters, tracking_info): Updated cluster dictionary with conflicts resolved and tracking information
-    """
-    if config is None:
-        config = RefinementConfig()
-
-    # Initialize tracking
-    from .refinement_types import ProcessingStageInfo
-    tracking_info = ProcessingStageInfo(
-        stage_name="Conflict Resolution",
-        clusters_before=all_clusters.copy(),
-        summary_stats={
-            'conflicts_count': len(conflicts),
-            'conflicted_sequences': list(conflicts.keys()),
-            'clusters_before_count': len(all_clusters)
-        }
+    # Run iterative refinement
+    final_clusters, tracking_info = iterative_refinement(
+        all_clusters=all_clusters,
+        sequences=sequences,
+        headers=headers,
+        min_split=min_split,
+        max_lump=max_lump,
+        target_percentile=target_percentile,
+        close_threshold=close_threshold,
+        max_iterations=config.max_iterations,
+        config=config,
+        cluster_id_generator=cluster_id_generator,
+        show_progress=show_progress,
+        checkpoint_frequency=checkpoint_frequency,
+        checkpoint_output_dir=checkpoint_output_dir,
+        header_mapping=header_mapping,
+        resume_state=resume_state
     )
 
-    if not conflicts:
-        logger.info("No conflicts to resolve")
-        result = all_clusters.copy()
-        tracking_info.clusters_after = result
-        tracking_info.summary_stats.update({
-            'clusters_after_count': len(result),
-            'components_processed_count': 0
-        })
-        return result, tracking_info
+    logger.info("=" * 80)
+    logger.info(f"ITERATIVE REFINEMENT COMPLETE")
+    logger.info(f"Final result: {len(all_clusters)} clusters → {len(final_clusters)} clusters "
+               f"({len(final_clusters) - len(all_clusters):+d})")
+    logger.info("=" * 80)
 
-    logger.info(f"Resolving conflicts for {len(conflicts)} sequences across clusters")
-
-    # Step 1: Group conflicts by connected components
-    conflict_components = find_conflict_components(conflicts, all_clusters)
-    logger.info(f"Found {len(conflict_components)} connected conflict components")
-
-    updated_clusters = all_clusters.copy()
-    total_components = len(conflict_components)
-
-    # Calculate total clusters in conflicts for progress tracking
-    total_conflict_clusters = sum(len(comp) for comp in conflict_components)
-    clusters_processed = 0  # Track cumulative input clusters
-
-    # Process each conflict component
-    for component_idx, component_clusters in enumerate(conflict_components):
-        # Step 2: Extract scope sequences (minimal scope - only conflicted clusters)
-        scope_headers_set = set()
-        for cluster_id in component_clusters:
-            scope_headers_set.update(all_clusters[cluster_id])
-
-        scope_headers = list(scope_headers_set)  # Headers same as sequences for decompose
-
-        # Track component before processing
-        component_info = {
-            'component_index': component_idx,
-            'clusters_before': list(component_clusters),
-            'clusters_before_count': len(component_clusters),
-            'sequences_count': len(scope_headers_set),
-            'processed': False
-        }
-
-        # Step 3: Apply full gapHACk to minimal conflict scope (no expansion)
-        if len(scope_headers_set) == 0:
-            logger.warning(f"Pass 1 Conflict Resolution ({component_idx+1} of {total_components}): "
-                         f"Skipping empty scope")
-            component_info['processed'] = False
-            component_info['clusters_after'] = []
-            component_info['clusters_after_count'] = 0
-            tracking_info.components_processed.append(component_info)
-            continue
-
-        if len(scope_headers_set) <= config.max_full_gaphack_size:
-            # Map headers to actual sequences
-            header_to_idx = {h: i for i, h in enumerate(headers)}
-            scope_sequence_list = [sequences[header_to_idx[h]] for h in scope_headers]
-
-            # Apply full gapHACk and get metadata
-            full_result, metadata = apply_full_gaphack_to_scope_with_metadata(
-                scope_sequence_list, scope_headers, min_split, max_lump,
-                target_percentile, cluster_id_generator, quiet=True
-            )
-
-            # Extract gap info and compute AMI for logging
-            gap_size = metadata.get('gap_size', float('-inf'))
-
-            # Compute AMI between input and output
-            ami = compute_ami_for_refinement(set(component_clusters), full_result, all_clusters)
-
-            # Format gap info
-            gap_info_str = ""
-            best_config = metadata.get('metadata', {}).get('best_config', {})
-            gap_metrics = best_config.get('gap_metrics')
-            if gap_metrics:
-                target_key = f'p{target_percentile}'
-                if target_key in gap_metrics:
-                    intra = gap_metrics[target_key].get('intra_upper', 0.0)
-                    inter = gap_metrics[target_key].get('inter_lower', 0.0)
-                    gap_info_str = f"Gap {gap_size:.4f} (intra≤{intra:.4f}, inter≥{inter:.4f})"
-            elif gap_size > float('-inf'):
-                gap_info_str = f"Gap {gap_size:.4f}"
-
-            # Step 4: Replace original conflicted clusters with classic result
-            for cluster_id in component_clusters:
-                if cluster_id in updated_clusters:
-                    del updated_clusters[cluster_id]
-
-            # Add new clusters from classic result
-            for cluster_id, cluster_headers in full_result.items():
-                updated_clusters[cluster_id] = cluster_headers
-
-            # Update component tracking with destination clusters
-            component_info.update({
-                'clusters_after': list(full_result.keys()),
-                'clusters_after_count': len(full_result),
-                'processed': True
-            })
-
-            clusters_processed += len(component_clusters)
-            logger.info(f"Pass 1 Conflict ({clusters_processed} of {total_conflict_clusters}): "
-                       f"{len(component_clusters)} -> {len(full_result)} clusters.  {gap_info_str}.  AMI {ami:.3f}")
-
-        else:
-            # Fallback: skip oversized components with warning
-            logger.warning(f"Pass 1 Conflict Resolution ({component_idx+1} of {total_components}): "
-                         f"Skipping oversized component with {len(scope_headers_set)} sequences "
-                         f"(exceeds limit of {config.max_full_gaphack_size})")
-            component_info.update({
-                'clusters_after': list(component_clusters),  # Unchanged
-                'clusters_after_count': len(component_clusters),
-                'processed': False,
-                'skipped_reason': 'oversized'
-            })
-
-        # Add component info to tracking
-        tracking_info.components_processed.append(component_info)
-
-    # Verify conflicts are resolved
-    remaining_conflicts = 0
-    for seq_id, cluster_ids in conflicts.items():
-        active_clusters = [cid for cid in cluster_ids if cid in updated_clusters]
-        if len(active_clusters) > 1:
-            remaining_conflicts += 1
-
-    if remaining_conflicts > 0:
-        logger.warning(f"{remaining_conflicts} conflicts remain unresolved")
-    else:
-        logger.info("All conflicts successfully resolved")
-
-    # Finalize tracking information
-    tracking_info.clusters_after = updated_clusters
-    tracking_info.summary_stats.update({
-        'clusters_after_count': len(updated_clusters),
-        'components_processed_count': len(conflict_components),
-        'remaining_conflicts_count': remaining_conflicts
-    })
-    return updated_clusters, tracking_info
+    return final_clusters, tracking_info
 
 
 # ============================================================================
-# Legacy functions removed (replaced by two-pass refinement)
+# Legacy functions removed (replaced by iterative refinement)
 # ============================================================================
 # - find_connected_close_components() → replaced by radius-based seeding
 # - expand_context_for_gap_optimization() → replaced by build_refinement_scope()
-# - refine_close_clusters() → replaced by pass2_iterative_merge()
+# - refine_close_clusters() → replaced by iterative_refinement()
+# - resolve_conflicts() → conflicts now handled by iterative refinement
+# - find_conflict_components() → no longer needed
+# - pass1_resolve_and_split() → removed (redundant with iterative refinement)
 # See docs/REFINEMENT_DESIGN.md for migration details
 
 

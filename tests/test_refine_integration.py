@@ -53,6 +53,7 @@ class TestRefineWithVsearch:
             "gaphack-refine",
             "--input-dir", str(vsearch_dir),
             "--output-dir", str(refine_output),
+            "--close-threshold", "0.02",
         ], capture_output=True, text=True)
 
         assert result.returncode == 0, f"Refine failed: {result.stderr}"
