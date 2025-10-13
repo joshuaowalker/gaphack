@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2025-10-13
+
+### Removed
+- **gaphack-decompose CLI tool**: Simplified to two-tool architecture (gaphack, gaphack-refine, gaphack-analyze)
+- **Pass 1 from gaphack-refine**: Streamlined to single-pass iterative refinement architecture
+- **Obsolete alignment-method parameter**: Removed non-functional parameter from CLI
+
+### Added
+- **Iteration checkpointing**: Save and auto-resume refinement state for long-running jobs
+- **MSA coverage-based alignment trimming**: Improved distance quality by filtering low-coverage alignment regions
+- **Deterministic seed prioritization**: Reproducible refinement with complete neighborhood consistency
+- **Medoid and gap metric caching**: Significant performance improvements in iterative refinement
+- **Enhanced iteration logging**: Detailed sequence and cluster statistics for progress monitoring
+- **Density-adaptive K-NN graph**: Improved proximity graph construction for refinement
+
+### Changed
+- **Refinement architecture**: Simplified from two-pass to single iterative approach with neighborhood-based refinement
+- **Convergence detection**: Enhanced AMI-based approach with improved convergence tracking
+- **Distance calculation**: Enhanced MSA-based distances with overlap filtering and median normalization
+- **Refinement types**: Extracted shared types to dedicated `refinement_types.py` module
+
+### Fixed
+- **Refine CLI bugs**: Removed unused code and fixed checkpoint-related bug
+- **Convergence detection**: Fixed bug in AMI-based convergence logic
+
+### Improved
+- **Code organization**: Better separation of concerns with dedicated refinement types module
+- **Documentation**: Updated CLAUDE.md to reflect simplified architecture
+- **API clarity**: Cleaner refinement API with reduced complexity
+
 ## [0.4.0] - 2025-01-29
 
 ### Added

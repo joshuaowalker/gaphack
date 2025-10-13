@@ -1,8 +1,8 @@
 """
-Cluster refinement algorithms for achieving conflict-free clustering from gaphack-decompose.
+Cluster refinement algorithms for iterative neighborhood-based refinement.
 
-This module implements scope-limited refinement using full gapHACk to resolve
-conflicts, refine close clusters, and handle incremental updates.
+This module implements scope-limited refinement using full gapHACk to optimize
+cluster boundaries through iterative refinement of local neighborhoods.
 """
 
 import logging

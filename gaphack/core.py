@@ -156,8 +156,6 @@ def _evaluate_merge_pairs_multiprocess_worker(args):
     Multiprocessing worker function that uses persistent worker instance.
     Uses offset-based workload distribution for perfect load balancing with minimal IPC overhead.
     """
-    global _worker_instance
-    
     # Offset-based: ('offset', start_offset, count, clusters_list)
     mode, start_offset, count, clusters_list = args
     if mode != 'offset':

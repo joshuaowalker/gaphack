@@ -1,4 +1,4 @@
-"""BLAST-based neighborhood finding for gaphack-decompose."""
+"""BLAST-based neighborhood finding for gaphack cluster refinement."""
 
 import hashlib
 import logging

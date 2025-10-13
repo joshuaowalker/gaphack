@@ -1,4 +1,4 @@
-"""vsearch-based neighborhood finding for gaphack-decompose."""
+"""vsearch-based neighborhood finding for gaphack cluster refinement."""
 
 import hashlib
 import logging
