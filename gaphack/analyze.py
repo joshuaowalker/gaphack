@@ -13,14 +13,12 @@ import logging
 from .utils import load_sequences_from_fasta, calculate_distance_matrix
 
 
-def calculate_intra_cluster_distances(sequences: List[str],
-                                    alignment_method: str = "adjusted") -> np.ndarray:
+def calculate_intra_cluster_distances(sequences: List[str]) -> np.ndarray:
     """
     Calculate all pairwise distances within a cluster.
 
     Args:
         sequences: List of DNA sequences
-        alignment_method: Method for distance calculation
 
     Returns:
         1D array of pairwise distances (upper triangle, excluding diagonal)
@@ -28,10 +26,7 @@ def calculate_intra_cluster_distances(sequences: List[str],
     if len(sequences) < 2:
         return np.array([])
 
-    distance_matrix = calculate_distance_matrix(
-        sequences,
-        alignment_method=alignment_method
-    )
+    distance_matrix = calculate_distance_matrix(sequences)
     
     # Extract upper triangle (excluding diagonal)
     n = len(sequences)
@@ -43,14 +38,12 @@ def calculate_intra_cluster_distances(sequences: List[str],
     return np.array(distances)
 
 
-def calculate_inter_cluster_distances(cluster_sequences: List[List[str]],
-                                    alignment_method: str = "adjusted") -> np.ndarray:
+def calculate_inter_cluster_distances(cluster_sequences: List[List[str]]) -> np.ndarray:
     """
     Calculate all pairwise distances between different clusters.
 
     Args:
         cluster_sequences: List of sequence lists, one per cluster
-        alignment_method: Method for distance calculation
 
     Returns:
         1D array of inter-cluster pairwise distances
@@ -70,10 +63,7 @@ def calculate_inter_cluster_distances(cluster_sequences: List[List[str]],
         return np.array([])
 
     # Calculate full distance matrix
-    distance_matrix = calculate_distance_matrix(
-        all_sequences,
-        alignment_method=alignment_method
-    )
+    distance_matrix = calculate_distance_matrix(all_sequences)
     
     # Extract inter-cluster distances
     inter_distances = []

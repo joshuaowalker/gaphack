@@ -51,26 +51,6 @@ This will create:
 - `results/clusters.singletons.fasta`
 - `metrics.json` with gap analysis
 
-### Using Different Alignment Methods
-
-Compare results with different alignment methods:
-
-```bash
-# Adjusted identity with MycoBLAST adjustments (default, recommended)
-gaphack examples/data/collybia_nuda_test.fasta \
-    --alignment-method adjusted \
-    -o adjusted_clusters
-
-# Traditional identity without adjustments (more conservative)
-gaphack examples/data/collybia_nuda_test.fasta \
-    --alignment-method traditional \
-    -o traditional_clusters
-```
-
-**Expected differences:**
-- Adjusted identity: 3 clusters, strong barcode gap (~1.58%)
-- Traditional identity: 15+ clusters, no clear gap (over-splits)
-
 ### Custom Parameters
 
 Experiment with different clustering parameters:
@@ -78,8 +58,8 @@ Experiment with different clustering parameters:
 ```bash
 # More conservative clustering (larger gap required)
 gaphack examples/data/collybia_nuda_test.fasta \
-    --min-gap-size 0.01 \
-    --max-threshold 0.03 \
+    --min-split 0.01 \
+    --max-lump 0.03 \
     -o conservative_clusters
 
 # Target different percentile for gap optimization

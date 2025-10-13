@@ -26,7 +26,7 @@ class TestDistanceAnalysis:
     def test_calculate_intra_cluster_distances(self):
         """Test intra-cluster distance calculation."""
         sequences = ["ATCG", "ATCC", "TACG", "TACG"]  # 4 sequences
-        distances = calculate_intra_cluster_distances(sequences, alignment_method="traditional")
+        distances = calculate_intra_cluster_distances(sequences)
         
         # Should have 6 pairwise distances (4 choose 2)
         assert len(distances) == 6
@@ -35,7 +35,7 @@ class TestDistanceAnalysis:
     def test_calculate_intra_cluster_distances_single_sequence(self):
         """Test intra-cluster distances with single sequence."""
         sequences = ["ATCG"]
-        distances = calculate_intra_cluster_distances(sequences, alignment_method="traditional")
+        distances = calculate_intra_cluster_distances(sequences)
         
         # Should have no distances for single sequence
         assert len(distances) == 0
@@ -43,7 +43,7 @@ class TestDistanceAnalysis:
     def test_calculate_intra_cluster_distances_empty(self):
         """Test intra-cluster distances with empty sequences."""
         sequences = []
-        distances = calculate_intra_cluster_distances(sequences, alignment_method="traditional")
+        distances = calculate_intra_cluster_distances(sequences)
         
         # Should have no distances for empty list
         assert len(distances) == 0
@@ -54,7 +54,7 @@ class TestDistanceAnalysis:
             ["ATCG", "ATCC"],  # Cluster 1: 2 sequences
             ["TACG", "TACC"]   # Cluster 2: 2 sequences
         ]
-        distances = calculate_inter_cluster_distances(cluster_sequences, alignment_method="traditional")
+        distances = calculate_inter_cluster_distances(cluster_sequences)
         
         # Should have 4 inter-cluster distances (2*2)
         assert len(distances) == 4
@@ -63,7 +63,7 @@ class TestDistanceAnalysis:
     def test_calculate_inter_cluster_distances_single_cluster(self):
         """Test inter-cluster distances with single cluster."""
         cluster_sequences = [["ATCG", "ATCC"]]
-        distances = calculate_inter_cluster_distances(cluster_sequences, alignment_method="traditional")
+        distances = calculate_inter_cluster_distances(cluster_sequences)
         
         # Should have no inter-cluster distances with only one cluster
         assert len(distances) == 0
@@ -71,7 +71,7 @@ class TestDistanceAnalysis:
     def test_calculate_inter_cluster_distances_empty(self):
         """Test inter-cluster distances with empty clusters."""
         cluster_sequences = []
-        distances = calculate_inter_cluster_distances(cluster_sequences, alignment_method="traditional")
+        distances = calculate_inter_cluster_distances(cluster_sequences)
         
         # Should have no distances for empty clusters
         assert len(distances) == 0

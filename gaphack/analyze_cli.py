@@ -65,14 +65,12 @@ def validate_fasta_files(fasta_paths: List[str]) -> List[Path]:
     return validated_paths
 
 
-def analyze_single_cluster(fasta_path: Path,
-                          alignment_method: str) -> Dict[str, Any]:
+def analyze_single_cluster(fasta_path: Path) -> Dict[str, Any]:
     """
     Analyze a single FASTA file as a cluster.
 
     Args:
         fasta_path: Path to FASTA file
-        alignment_method: Method for distance calculation
 
     Returns:
         Dictionary with cluster analysis results
@@ -94,10 +92,7 @@ def analyze_single_cluster(fasta_path: Path,
         }
 
     # Calculate intra-cluster distances
-    distances = calculate_intra_cluster_distances(
-        sequences,
-        alignment_method=alignment_method
-    )
+    distances = calculate_intra_cluster_distances(sequences)
     
     # Calculate percentiles
     percentiles = calculate_percentiles(distances)
@@ -137,7 +132,7 @@ def main():
 Examples:
   gaphack-analyze cluster1.fasta cluster2.fasta cluster3.fasta
   gaphack-analyze *.fasta -o analysis_results
-  gaphack-analyze cluster*.fasta --alignment-method traditional -v
+  gaphack-analyze cluster*.fasta -v
   gaphack-analyze clusters/*.fasta --no-plots --format tsv
         """
     )
@@ -165,14 +160,6 @@ Examples:
         '--no-plots',
         action='store_true',
         help='Skip generating histogram plots'
-    )
-    
-    # Distance calculation parameters
-    parser.add_argument(
-        '--alignment-method',
-        choices=['adjusted', 'traditional'],
-        default='adjusted',
-        help='Alignment method: adjusted (MycoBLAST-style) or traditional (raw identity) (default: adjusted)'
     )
 
     # Analysis parameters
@@ -216,7 +203,7 @@ Examples:
         all_sequences_by_cluster = []
 
         for fasta_path in fasta_paths:
-            result = analyze_single_cluster(fasta_path, args.alignment_method)
+            result = analyze_single_cluster(fasta_path)
             cluster_results.append(result)
             
             if 'sequences' in result:
@@ -243,10 +230,7 @@ Examples:
         
         # Calculate global inter-cluster distances
         valid_cluster_sequences = [r['sequences'] for r in cluster_results if 'sequences' in r and len(r['sequences']) > 0]
-        all_inter_distances = calculate_inter_cluster_distances(
-            valid_cluster_sequences,
-            alignment_method=args.alignment_method
-        )
+        all_inter_distances = calculate_inter_cluster_distances(valid_cluster_sequences)
         
         # Calculate global statistics
         global_stats = {
@@ -298,7 +282,6 @@ Examples:
                 'global_statistics': global_stats,
                 'barcode_gap_metrics': gap_metrics,
                 'analysis_parameters': {
-                    'alignment_method': args.alignment_method,
                     'gap_percentiles': args.gap_percentiles
                 }
             }

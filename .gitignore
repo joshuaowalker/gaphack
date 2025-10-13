@@ -39,6 +39,7 @@ env/
 *.tmp
 *.bak
 *.log
+*.backup
 
 # Local development files
 extract_collybia_nuda.py

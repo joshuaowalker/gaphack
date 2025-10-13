@@ -67,7 +67,7 @@ The beam search implementation can be found in git history if needed for future 
 The codebase implements a three-tier distance computation system for efficient large-scale clustering:
 
 **1. Global Distance Provider** (`lazy_distances.py::LazyDistanceProvider`)
-- Computes distances on-demand using configured alignment parameters
+- Computes distances on-demand using hardcoded MycoBLAST-style adjustment parameters
 - Maintains global cache (`_distance_cache`) of all computed distances
 - Tracks unique computations to monitor cache effectiveness
 - Prevents redundant distance calculations across refinement operations
@@ -270,7 +270,7 @@ The refinement system includes infrastructure for incremental/streaming clusteri
 **Potential Improvements**:
 1. **Parallel BLAST operations**: Currently sequential BLAST calls
    - Could parallelize neighborhood discovery across multiple targets
-   - Would improve decompose iteration speed
+   - Would improve refinement iteration speed
 
 2. **Incremental medoid updates**: Currently recomputes all medoids
    - After small refinements, most medoids unchanged

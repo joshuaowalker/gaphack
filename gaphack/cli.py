@@ -41,7 +41,6 @@ Examples:
   gaphack input.fasta --format tsv -o results.tsv
   gaphack input.fasta --min-split 0.003 --max-lump 0.03
   gaphack input.fasta --export-metrics gap_analysis.json -v
-  gaphack input.fasta --alignment-method traditional
   gaphack input.fasta --target seeds.fasta    # Target mode: grow cluster from seeds.fasta
         """
     )
@@ -84,14 +83,6 @@ Examples:
         choices=range(50, 101),
         metavar='[50-100]',
         help='Percentile gap to optimize (default: 95)'
-    )
-    
-    # Alignment strategy options
-    parser.add_argument(
-        '--alignment-method',
-        choices=['adjusted', 'traditional'],
-        default='adjusted',
-        help='Alignment method: adjusted (MycoBLAST-style) or traditional (raw identity) (default: adjusted)'
     )
 
     # Target mode clustering
@@ -190,12 +181,9 @@ Examples:
             
             # Conditional distance calculation - only full matrix for non-target mode
             if not args.target:
-                logging.info(f"Calculating pairwise distances using {args.alignment_method} method...")
+                logging.info("Calculating pairwise distances using MSA-based method...")
 
-                distance_matrix = calculate_distance_matrix(
-                    sequences,
-                    alignment_method=args.alignment_method
-                )
+                distance_matrix = calculate_distance_matrix(sequences)
                 logging.info("Distance calculation complete")
         
         # If target mode, find matching target sequences using sequence-based matching

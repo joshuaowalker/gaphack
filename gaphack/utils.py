@@ -446,7 +446,6 @@ def compute_msa_distance(seq1_aligned: str, seq2_aligned: str,
 
 
 def calculate_distance_matrix(sequences: List[str],
-                            alignment_method: Literal["adjusted", "traditional"] = "adjusted",
                             show_progress: bool = True) -> np.ndarray:
     """
     Calculate pairwise distance matrix for sequences using MSA-based scoring.
@@ -459,7 +458,6 @@ def calculate_distance_matrix(sequences: List[str],
 
     Args:
         sequences: List of DNA sequences as strings
-        alignment_method: Either "adjusted" (MycoBLAST adjustments) or "traditional" (raw BLAST-like)
         show_progress: Whether to show progress bar for distance calculations
 
     Returns:
