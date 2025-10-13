@@ -15,7 +15,7 @@ from Bio import SeqIO
 from gaphack.cluster_refinement import two_pass_refinement, RefinementConfig
 from gaphack.cluster_graph import ClusterGraph
 from gaphack.refine_cli import detect_conflicts
-from gaphack.decompose import ClusterIDGenerator
+from gaphack.refinement_types import ClusterIDGenerator
 
 
 def load_fasta(fasta_path):

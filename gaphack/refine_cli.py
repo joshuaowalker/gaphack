@@ -21,7 +21,7 @@ from .cluster_refinement import (
     RefinementConfig, verify_no_conflicts
 )
 from .cluster_graph import ClusterGraph
-from .decompose import ClusterIDGenerator, ProcessingStageInfo
+from .refinement_types import ClusterIDGenerator, ProcessingStageInfo
 from . import __version__
 
 logger = logging.getLogger(__name__)

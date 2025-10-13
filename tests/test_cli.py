@@ -11,7 +11,6 @@ from unittest.mock import Mock, patch, MagicMock
 from io import StringIO
 
 from gaphack.cli import main as cli_main, setup_logging
-from gaphack.decompose_cli import main as decompose_main
 from gaphack.analyze_cli import main as analyze_main
 
 
@@ -209,105 +208,6 @@ class TestMainCLI:
 
                     # Verify metrics were attempted to be written
                     mock_json_dump.assert_called()
-
-
-class TestDecomposeCLI:
-    """Test suite for decompose CLI."""
-
-    def setup_method(self):
-        """Set up test fixtures."""
-        self.test_sequences = [
-            "ATGCGATCGATCGATCG",
-            "ATGCGATCGATCGATCC",
-            "TTTTTTTTTTTTTTTTTT"
-        ]
-
-    def _create_test_fasta(self, sequences, filepath):
-        """Helper to create test FASTA file."""
-        with open(filepath, 'w') as f:
-            for i, seq in enumerate(sequences):
-                f.write(f">seq_{i}\n{seq}\n")
-
-    @patch('sys.argv', ['gaphack-decompose', '--help'])
-    def test_decompose_cli_help(self):
-        """Test decompose CLI help message."""
-        with pytest.raises(SystemExit) as exc_info:
-            decompose_main()
-        assert exc_info.value.code == 0
-
-    def test_decompose_cli_basic_functionality(self):
-        """Test basic decompose CLI functionality."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir)
-
-            input_fasta = tmpdir / "input.fasta"
-            self._create_test_fasta(self.test_sequences, input_fasta)
-
-            test_args = ['gaphack-decompose', str(input_fasta), '-o', str(tmpdir / 'output')]
-
-            with patch('sys.argv', test_args), \
-                 patch('gaphack.decompose_cli.DecomposeClustering') as mock_decompose, \
-                 patch('gaphack.decompose_cli.save_decompose_results') as mock_save:
-
-                # Mock decompose results
-                mock_results = Mock()
-                mock_results.clusters = {'cluster_1': ['seq_0'], 'cluster_2': ['seq_1', 'seq_2']}
-                mock_results.conflicts = {}
-                mock_results.unassigned = []
-
-                mock_decompose_instance = Mock()
-                mock_decompose_instance.decompose.return_value = mock_results
-                mock_decompose.return_value = mock_decompose_instance
-
-                try:
-                    decompose_main()
-                except SystemExit as e:
-                    assert e.code == 0 or e.code is None
-
-    def test_decompose_cli_with_targets(self):
-        """Test decompose CLI with target sequences."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir)
-
-            input_fasta = tmpdir / "input.fasta"
-            targets_fasta = tmpdir / "targets.fasta"
-
-            self._create_test_fasta(self.test_sequences, input_fasta)
-            self._create_test_fasta(self.test_sequences[:1], targets_fasta)
-
-            test_args = ['gaphack-decompose', str(input_fasta), '--targets', str(targets_fasta), '-o', str(tmpdir / 'output')]
-
-            with patch('sys.argv', test_args), \
-                 patch('gaphack.decompose_cli.DecomposeClustering') as mock_decompose, \
-                 patch('gaphack.decompose_cli.save_decompose_results') as mock_save:
-
-                mock_results = Mock()
-                mock_results.clusters = {'cluster_1': ['seq_0', 'seq_1']}
-                mock_results.conflicts = {}
-                mock_results.unassigned = ['seq_2']
-
-                mock_decompose_instance = Mock()
-                mock_decompose_instance.decompose.return_value = mock_results
-                mock_decompose.return_value = mock_decompose_instance
-
-                try:
-                    decompose_main()
-                except SystemExit as e:
-                    assert e.code == 0 or e.code is None
-
-    def test_decompose_cli_parameter_validation(self):
-        """Test decompose CLI parameter validation."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir)
-            input_fasta = tmpdir / "input.fasta"
-            self._create_test_fasta(self.test_sequences, input_fasta)
-
-            # Test invalid max-clusters parameter
-            test_args = ['gaphack-decompose', str(input_fasta), '--max-clusters', 'invalid']
-
-            with patch('sys.argv', test_args):
-                with pytest.raises(SystemExit):
-                    decompose_main()
 
 
 class TestAnalyzeCLI:

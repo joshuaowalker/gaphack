@@ -19,7 +19,7 @@ from sklearn.metrics import adjusted_mutual_info_score
 from .cluster_graph import ClusterGraph
 from .distance_providers import DistanceProvider
 from .core import GapOptimizedClustering
-from .decompose import DecomposeResults
+from .refinement_types import ProcessingStageInfo, ClusterIDGenerator
 from .utils import calculate_distance_matrix
 
 logger = logging.getLogger("gaphack.refine")
@@ -643,7 +643,7 @@ def apply_full_gaphack_to_scope_with_metadata(scope_sequences: List[str], scope_
     clusters = {}
 
     # Import here to avoid circular imports
-    from .decompose import ClusterIDGenerator
+    from .refinement_types import ClusterIDGenerator
 
     # Use provided generator or create a temporary one
     if cluster_id_generator is None:
@@ -731,7 +731,7 @@ def pass1_resolve_and_split(
         Tuple of (refined_clusters, tracking_info)
     """
     import time
-    from .decompose import ProcessingStageInfo, ClusterIDGenerator
+    from .refinement_types import ProcessingStageInfo, ClusterIDGenerator
 
     # Initialize cluster ID generator if not provided
     if cluster_id_generator is None:
@@ -970,7 +970,7 @@ def pass2_iterative_merge(
     """
     import time
     from tqdm import tqdm
-    from .decompose import ProcessingStageInfo, ClusterIDGenerator
+    from .refinement_types import ProcessingStageInfo, ClusterIDGenerator
 
     # Initialize cluster ID generator if not provided
     if cluster_id_generator is None:
@@ -1416,7 +1416,7 @@ def two_pass_refinement(
     if config is None:
         config = RefinementConfig()
 
-    from .decompose import ClusterIDGenerator
+    from .refinement_types import ClusterIDGenerator
     if cluster_id_generator is None:
         cluster_id_generator = ClusterIDGenerator(stage_name="refined", refinement_count=0)
 
@@ -1518,7 +1518,7 @@ def resolve_conflicts(conflicts: Dict[str, List[str]],
         config = RefinementConfig()
 
     # Initialize tracking
-    from .decompose import ProcessingStageInfo
+    from .refinement_types import ProcessingStageInfo
     tracking_info = ProcessingStageInfo(
         stage_name="Conflict Resolution",
         clusters_before=all_clusters.copy(),

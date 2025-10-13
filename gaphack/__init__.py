@@ -9,7 +9,6 @@ __version__ = "0.4.0"
 
 from .core import GapOptimizedClustering
 from .target_clustering import TargetModeClustering
-from .decompose import DecomposeClustering
 from .distance_providers import (
     DistanceProvider,
     MSACachedDistanceProvider,
@@ -36,7 +35,6 @@ from .analyze import (
 __all__ = [
     "GapOptimizedClustering",
     "TargetModeClustering",
-    "DecomposeClustering",
     "DistanceProvider",
     "MSACachedDistanceProvider",
     "PrecomputedDistanceProvider",

@@ -7,27 +7,25 @@ This file contains development notes and future considerations for the gapHACk p
 ### Architecture Overview
 - **Distance Provider Architecture**: Three-tier system (global cache, scoped providers, precomputed) - see [Performance Considerations](#performance-considerations)
 - **Cluster Graph**: BLAST K-NN graph for O(K) proximity queries - see [Cluster Graph Infrastructure](#cluster-graph-infrastructure)
-- **Conflict Resolution**: AssignmentTracker + DFS component analysis - see [Conflict Resolution Architecture](#conflict-resolution-architecture)
-- **Result Tracking**: Comprehensive reproducibility via DecomposeResults - see [Result Tracking and Reproducibility](#result-tracking-and-reproducibility)
+- **Conflict Resolution**: DFS component analysis for conflict resolution - see [Conflict Resolution Architecture](#conflict-resolution-architecture)
+- **Result Tracking**: Comprehensive refinement tracking via ProcessingStageInfo - see [Result Tracking and Reproducibility](#result-tracking-and-reproducibility)
 
 ### Key Files by Functionality
 - **Core clustering**: `core.py` (main algorithm + DistanceCache)
 - **Target mode**: `target_clustering.py`
-- **Decompose orchestration**: `decompose.py` (main DecomposeClustering class, AssignmentTracker)
-- **Target selection**: `target_selection.py` (TargetSelector, NearbyTargetSelector, BlastResultMemory)
-- **Resume and finalization**: `resume.py` (resume_decompose, finalize_decompose, refinement stages)
-- **Post-processing**: `cluster_refinement.py` (conflict resolution, close cluster refinement)
+- **Refinement orchestration**: `cluster_refinement.py` (two-pass refinement, conflict resolution, close cluster refinement)
+- **Refinement types**: `refinement_types.py` (ClusterIDGenerator, ProcessingStageInfo, cluster ID utilities)
+- **CLI entry points**: `cli.py` (main gaphack), `refine_cli.py` (gaphack-refine), `analyze_cli.py` (gaphack-analyze)
 - **Distance computation**: `lazy_distances.py` (LazyDistanceProvider, PrecomputedDistanceProvider)
 - **Scoped operations**: `scoped_distances.py` (ScopedDistanceProvider for refinement)
 - **Cluster proximity**: `cluster_graph.py` (ClusterGraph with BLAST K-NN)
 - **BLAST integration**: `blast_neighborhood.py`
 
 ### Testing
-- **317 passing tests**, 18,958 lines of test code
+- **Comprehensive test suite** with integration, performance, and quality tests
 - **Real biological data**: 1,429 Russula sequences with ground truth
 - **Performance baselines**: See [Performance Baselines](#performance-baselines)
 - **Quality metrics**: ARI >0.85, Homogeneity >0.90, Completeness >0.85
-- **Documentation**: `tests/PHASE4_SUMMARY.md`
 
 ## Algorithm Development History
 
@@ -55,25 +53,7 @@ Key implementation details for future reference:
 
 The beam search implementation can be found in git history if needed for future algorithm research.
 
-## gaphack-decompose Implementation Notes
-
-### Context Requirements for Gap Calculation
-
-The barcode gap calculation fundamentally requires both intra-cluster and inter-cluster distances. Without sufficient inter-cluster context, the algorithm cannot determine if a gap exists. This manifests in two key areas:
-
-#### N+N Neighborhood Pruning
-- Takes N sequences within max_lump (potential cluster members)
-- Takes N additional sequences beyond max_lump (inter-cluster context)
-- This 1:1 ratio ensures balanced representation for percentile calculations
-- Located in: `decompose.py::_prune_neighborhood_by_distance()`
-
-#### Iterative Context Expansion in Refinement
-- When refining close clusters, initial scope often lacks inter-cluster context
-- Clusters within max_lump distance would all merge without external context
-- Solution: iteratively add clusters beyond threshold until positive gap achieved
-- Located in: `cluster_refinement.py::expand_context_for_gap_optimization()`
-
-### Technical Debt and Known Issues
+## Technical Debt and Known Issues
 
 #### Target Clustering Linkage Consistency
 - `_find_closest_to_target()` hardcodes 95th percentile linkage instead of using `self.target_percentile`
@@ -90,7 +70,7 @@ The codebase implements a three-tier distance computation system for efficient l
 - Computes distances on-demand using configured alignment parameters
 - Maintains global cache (`_distance_cache`) of all computed distances
 - Tracks unique computations to monitor cache effectiveness
-- Prevents redundant distance calculations across entire decompose run
+- Prevents redundant distance calculations across refinement operations
 
 **2. Scoped Distance Provider** (`scoped_distances.py::ScopedDistanceProvider`)
 - Maps local indices within refinement scopes to global indices
@@ -116,64 +96,39 @@ The multiprocessing implementation uses a specialized `DistanceCache` class (`co
 - Enables ~4x speedup with 8 cores (200→800 steps/second)
 - Reduces initialization overhead by reusing worker state
 
-#### BLAST Memory Pool
-**Purpose**: Stores full BLAST neighborhoods before pruning (`decompose.py:151::BlastResultMemory`)
-- Enables "nearby" target selection for better clustering coherence
-- Reduces random jumps across sequence space during iterative clustering
-- Maintains biological continuity by selecting next target from existing neighborhoods
-- Implements spiral target selector for systematic coverage when operating without explicit targets
-
-**Target Selection Strategy**:
-- Without explicit targets: selects from BLAST memory pool based on proximity to existing clusters
-- Prevents random sampling that could fragment biologically related groups
-- Ensures iterative clustering maintains spatial coherence in sequence space
-
-## Post-Processing and Refinement Implementation
+## Refinement Implementation
 
 ### Conflict Resolution Architecture
-**Purpose**: Ensures mutually exclusive and collectively exhaustive (MECE) clustering after iterative decompose
+**Purpose**: Ensures mutually exclusive and collectively exhaustive (MECE) clustering
 
 **Key Components**:
-- `AssignmentTracker` (`decompose.py:65-110`): Tracks sequence assignments across iterations
-  - Maintains `assignments` dict: `seq_id -> [(cluster_id, iteration), ...]`
-  - Detects conflicts when sequences assigned to multiple clusters
-  - Separates single-assignment sequences from conflicts
-
-- `find_conflict_components()` (`cluster_refinement.py:69-100`): Groups conflicts using graph analysis
+- `find_conflict_components()` (`cluster_refinement.py`): Groups conflicts using graph analysis
   - Builds cluster adjacency graph where edges represent shared sequences
   - Uses DFS to find connected components of conflicted clusters
   - Each component is resolved independently with full gapHACk
 
-**Refinement Configuration** (`cluster_refinement.py:29-58`):
+**Refinement Configuration** (`cluster_refinement.py::RefinementConfig`):
 - `max_full_gaphack_size` (300): Maximum sequences for full gapHACk refinement
-- `preferred_scope_size` (250): Target scope size for optimal performance
-- `expansion_size_buffer` (50): Reserve capacity for context expansion
-- `conflict_expansion_threshold`: Distance threshold for conflict scope expansion
-- `close_cluster_expansion_threshold`: Distance threshold for close cluster refinement
-- `incremental_search_distance`: Search distance for incremental updates (future use)
-- `max_closest_clusters` (5): Limits for incremental refinement (future use)
+- `close_threshold`: Distance threshold for close cluster refinement
+- `max_iterations` (10): Maximum Pass 2 iterations
+- `k_neighbors` (20): K-NN graph parameter
+- `search_method` ("blast"): BLAST or vsearch for proximity graph
+- `random_seed`: Seed for randomizing seed order in Pass 2
 
 ### Result Tracking and Reproducibility
-The `DecomposeResults` dataclass (`decompose.py:45-63`) provides comprehensive tracking:
+The `ProcessingStageInfo` dataclass (`refinement_types.py`) provides comprehensive tracking:
 
-**Core Results**:
-- `clusters`: Non-conflicted sequences only (clean output)
-- `all_clusters`: All sequences including conflicts (for debugging)
-- `conflicts`: Sequences assigned to multiple clusters
-- `unassigned`: Sequences never processed
+**Stage Information**:
+- `stage_name`: Name of the processing stage (e.g., "Pass 1: Resolve and Split")
+- `clusters_before`: Cluster state before stage
+- `clusters_after`: Cluster state after stage
+- `components_processed`: Details about each component refined
+- `summary_stats`: Aggregate statistics (counts, changes, timing)
 
-**Reproducibility Tracking**:
-- `processing_stages`: List of `ProcessingStageInfo` objects tracking each refinement stage
-  - `clusters_before` and `clusters_after`: State before/after each stage
-  - `components_processed`: Details about each component refined
-  - `summary_stats`: Aggregate statistics (counts, changes)
-- `active_to_final_mapping`: Maps internal cluster IDs to final output IDs
-- `command_line`: Full command used to run decompose
-- `start_time`: ISO timestamp of run start
-
-**Verification**:
-- `verification_results`: Comprehensive conflict verification after all processing
-- Ensures MECE property maintained throughout pipeline
+**Cluster ID Management** (`refinement_types.py::ClusterIDGenerator`):
+- Generates globally unique cluster IDs with stage suffixes
+- Format: `cluster_{NNNNN}{SUFFIX}` where SUFFIX is I (initial), C (conflict resolution), or R1/R2/R3... (refinements)
+- Helper functions: `format_cluster_id()`, `parse_cluster_id()`, `get_next_cluster_number()`
 
 ### Cluster Graph Infrastructure
 **Purpose**: Efficient proximity queries for finding nearby clusters during refinement (`cluster_graph.py`)
@@ -197,8 +152,6 @@ The `DecomposeResults` dataclass (`decompose.py:45-63`) provides comprehensive t
 ## Testing Infrastructure
 
 ### Comprehensive Test Suite
-The project includes 317 passing tests with 18,958 lines of test code:
-
 **Test Organization** (custom pytest markers):
 - `@pytest.mark.integration`: End-to-end pipeline tests
 - `@pytest.mark.performance`: Performance regression tests
