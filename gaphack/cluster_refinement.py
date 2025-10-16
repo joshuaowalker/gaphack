@@ -536,7 +536,8 @@ def build_refinement_scope(
 def apply_full_gaphack_to_scope_with_metadata(scope_sequences: List[str], scope_headers: List[str],
                                               min_split: float = 0.005, max_lump: float = 0.02,
                                               target_percentile: int = 95, cluster_id_generator=None,
-                                              quiet: bool = True) -> Tuple[Dict[str, List[str]], Dict]:
+                                              quiet: bool = True, gap_method: str = 'global',
+                                              alpha: float = 0.0) -> Tuple[Dict[str, List[str]], Dict]:
     """Apply full gapHACk clustering to a scope of sequences, returning clusters and metadata.
 
     Args:
@@ -547,6 +548,8 @@ def apply_full_gaphack_to_scope_with_metadata(scope_sequences: List[str], scope_
         target_percentile: Percentile for gap optimization
         cluster_id_generator: Optional cluster ID generator
         quiet: If True, suppress verbose logging (default: True)
+        gap_method: Gap calculation method ('global' or 'local')
+        alpha: Parsimony parameter for local gap (default: 0.0)
 
     Returns:
         Tuple of (cluster_dict, metadata_dict) where metadata includes gap_size
@@ -572,7 +575,9 @@ def apply_full_gaphack_to_scope_with_metadata(scope_sequences: List[str], scope_
         max_lump=max_lump,
         target_percentile=target_percentile,
         show_progress=False,  # Disable progress for scope-limited clustering
-        logger=quiet_logger
+        logger=quiet_logger,
+        gap_method=gap_method,
+        alpha=alpha
     )
 
     # Get clustering result with metadata
@@ -613,7 +618,8 @@ def apply_full_gaphack_to_scope_with_metadata(scope_sequences: List[str], scope_
 
 def apply_full_gaphack_to_scope(scope_sequences: List[str], scope_headers: List[str], min_split: float = 0.005,
                                 max_lump: float = 0.02, target_percentile: int = 95, cluster_id_generator=None,
-                                quiet: bool = True) -> Dict[str, List[str]]:
+                                quiet: bool = True, gap_method: str = 'global',
+                                alpha: float = 0.0) -> Dict[str, List[str]]:
     """Apply full gapHACk clustering to a scope of sequences.
 
     Args:
@@ -624,13 +630,16 @@ def apply_full_gaphack_to_scope(scope_sequences: List[str], scope_headers: List[
         target_percentile: Percentile for gap optimization
         cluster_id_generator: Optional cluster ID generator
         quiet: If True, suppress verbose logging (default: True)
+        gap_method: Gap calculation method ('global' or 'local')
+        alpha: Parsimony parameter for local gap (default: 0.0)
 
     Returns:
         Dict mapping cluster_id -> list of sequence headers
     """
     # Use the metadata version and just return the clusters
     clusters, _ = apply_full_gaphack_to_scope_with_metadata(scope_sequences, scope_headers, min_split, max_lump,
-                                                            target_percentile, cluster_id_generator, quiet)
+                                                            target_percentile, cluster_id_generator, quiet, gap_method,
+                                                            alpha)
     return clusters
 
 
@@ -704,7 +713,9 @@ def iterative_refinement(
     checkpoint_frequency: int = 0,
     checkpoint_output_dir: Optional[Path] = None,
     header_mapping: Optional[Dict[str, str]] = None,
-    resume_state: Optional[Dict] = None
+    resume_state: Optional[Dict] = None,
+    gap_method: str = 'global',
+    alpha: float = 0.0
 ) -> Tuple[Dict[str, List[str]], 'ProcessingStageInfo']:
     """Iteratively refine clusters using neighborhood-based seeding.
 
@@ -727,6 +738,9 @@ def iterative_refinement(
         checkpoint_output_dir: Base output directory for checkpoints
         header_mapping: Mapping of sequence IDs to full headers (for checkpointing)
         resume_state: Optional state to resume from (loaded from state.json)
+        gap_method: Gap calculation method ('global' or 'local')
+        alpha: Parsimony parameter for local gap method (default: 0.0)
+              Score = local_gap / (num_clusters^alpha)
 
     Returns:
         Tuple of (refined_clusters, tracking_info)
@@ -918,7 +932,9 @@ def iterative_refinement(
                 scope_sequences, scope_headers,
                 min_split, max_lump, target_percentile,
                 cluster_id_generator=cluster_id_generator,
-                quiet=True
+                quiet=True,
+                gap_method=gap_method,
+                alpha=alpha
             )
 
             # Track statistics for this refinement
@@ -933,7 +949,8 @@ def iterative_refinement(
             gap_info_str = ""
             best_config = metadata.get('metadata', {}).get('best_config', {})
             gap_metrics = best_config.get('gap_metrics')
-            if gap_metrics:
+            # gap_metrics can be a dict (global method) or float (total method)
+            if gap_metrics and isinstance(gap_metrics, dict):
                 target_key = f'p{target_percentile}'
                 if target_key in gap_metrics:
                     intra = gap_metrics[target_key].get('intra_upper', 0.0)
@@ -945,7 +962,7 @@ def iterative_refinement(
             # Track best gap for this iteration
             if gap_size > iteration_stats['best_gap']:
                 iteration_stats['best_gap'] = gap_size
-                if gap_metrics:
+                if gap_metrics and isinstance(gap_metrics, dict):
                     target_key = f'p{target_percentile}'
                     if target_key in gap_metrics:
                         iteration_stats['best_gap_info'] = {
@@ -1147,7 +1164,9 @@ def refine_clusters(
     checkpoint_frequency: int = 0,
     checkpoint_output_dir: Optional[Path] = None,
     header_mapping: Optional[Dict[str, str]] = None,
-    resume_state: Optional[Dict] = None
+    resume_state: Optional[Dict] = None,
+    gap_method: str = 'global',
+    alpha: float = 0.0
 ) -> Tuple[Dict[str, List[str]], 'ProcessingStageInfo']:
     """Iteratively refine clusters using neighborhood-based approach.
 
@@ -1167,6 +1186,9 @@ def refine_clusters(
         checkpoint_output_dir: Base output directory for checkpoints
         header_mapping: Mapping of sequence IDs to full headers (for checkpointing)
         resume_state: Optional state to resume from (loaded from state.json)
+        gap_method: Gap calculation method ('global' or 'local')
+        alpha: Parsimony parameter for local gap method (default: 0.0)
+              Score = local_gap / (num_clusters^alpha)
 
     Returns:
         Tuple of (refined_clusters, tracking_info)
@@ -1204,7 +1226,9 @@ def refine_clusters(
         checkpoint_frequency=checkpoint_frequency,
         checkpoint_output_dir=checkpoint_output_dir,
         header_mapping=header_mapping,
-        resume_state=resume_state
+        resume_state=resume_state,
+        gap_method=gap_method,
+        alpha=alpha
     )
 
     logger.info("=" * 80)

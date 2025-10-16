@@ -23,17 +23,25 @@ class PersistentWorker:
     Used only by the ProcessPoolExecutor workers, not by single-process mode.
     """
     
-    def __init__(self, distance_matrix, min_split, max_lump, target_percentile):
+    def __init__(self, distance_matrix, min_split, max_lump, target_percentile, gap_method='global',
+                 alpha=0.0):
         """Initialize worker with persistent cache and gap calculator."""
         self.distance_matrix = distance_matrix
         self.min_split = min_split
         self.max_lump = max_lump
         self.target_percentile = target_percentile
-        
+        self.gap_method = gap_method
+        self.alpha = alpha
+
         # Create persistent instances that will be reused
         self.cache = DistanceCache(distance_matrix)
-        self.gap_calculator = GapCalculator(target_percentile)
-        
+
+        # Choose gap calculator based on gap_method
+        if gap_method == 'local':
+            self.gap_calculator = LocalGapCalculator(alpha=alpha, max_lump=max_lump)
+        else:
+            self.gap_calculator = GapCalculator(target_percentile)
+
         # Track current cluster state
         self.current_clusters = None
     
@@ -145,10 +153,12 @@ class PersistentWorker:
 _worker_instance = None
 
 
-def _init_worker(distance_matrix, min_split, max_lump, target_percentile):
+def _init_worker(distance_matrix, min_split, max_lump, target_percentile, gap_method='global',
+                 alpha=0.0):
     """Initialize persistent worker instance for this process."""
     global _worker_instance
-    _worker_instance = PersistentWorker(distance_matrix, min_split, max_lump, target_percentile)
+    _worker_instance = PersistentWorker(distance_matrix, min_split, max_lump, target_percentile, gap_method,
+                                       alpha)
 
 
 def _evaluate_merge_pairs_multiprocess_worker(args):
@@ -478,6 +488,199 @@ class GapCalculator:
         }
 
 
+class LocalGapCalculator:
+    """
+    Calculate local gap (sum of per-cluster gaps) for clustering optimization.
+
+    Each cluster's gap is calculated relative to its nearest neighbor cluster only,
+    using multiple percentiles (p90, p95, p100) to capture separation quality across
+    the distribution rather than relying on a single arbitrary threshold.
+
+    For each cluster and each percentile:
+    - Intra: Upper percentile of intra-cluster distances
+    - Inter: Lower percentile of distances to nearest neighbor cluster
+    - Cluster gap at percentile p: inter_lower - intra_upper
+    - Total cluster gap: sum of gaps across all percentiles [90, 95, 100]
+
+    This approach is less sensitive to dataset composition than global gap, since each
+    cluster only compares to its nearest neighbor. The multi-percentile design reduces
+    sensitivity to arbitrary percentile choice and includes p100 (max) to avoid "sweeping
+    issues under the rug."
+    """
+
+    def __init__(self, alpha: float = 0.0, max_lump=0.02):
+        """
+        Initialize local gap calculator.
+
+        Args:
+            alpha: Parsimony parameter controlling cluster count preference (default 0.0)
+                   Score = local_gap / (num_clusters^alpha)
+                   0.0 = no parsimony penalty (maximize sum of gaps)
+                   1.0 = strong parsimony (mean gap per cluster)
+                   0.5 = moderate parsimony (recommended starting point)
+            max_lump: Maximum distance threshold for merging clusters (default 0.02)
+
+        Note: Uses fixed multi-percentile calculation [90, 95, 100] for robustness.
+        """
+        self.percentiles = [90, 95, 100]  # Hardcoded multi-percentile
+        self.alpha = alpha
+        self.max_lump = max_lump
+
+    def _calculate_percentile(self, sorted_values: List[float], percentile: float) -> float:
+        """Calculate percentile from sorted values with linear interpolation."""
+        if not sorted_values:
+            return 0.0
+
+        index = (len(sorted_values) - 1) * (percentile / 100.0)
+        if index == int(index):
+            return sorted_values[int(index)]
+        else:
+            lower_idx = int(index)
+            upper_idx = min(lower_idx + 1, len(sorted_values) - 1)
+            fraction = index - lower_idx
+            return sorted_values[lower_idx] + fraction * (sorted_values[upper_idx] - sorted_values[lower_idx])
+
+    def calculate_percentile_cluster_distance(self, cluster1: Set[int], cluster2: Set[int],
+                                             cache: DistanceCache) -> float:
+        """
+        Calculate percentile distance for merged cluster (for max_lump check).
+        Uses the first (most permissive) percentile for linkage decisions.
+        """
+        distances1 = cache.get_intra_distances(cluster1)
+        distances2 = cache.get_intra_distances(cluster2)
+        inter_distances = cache.get_inter_distances(cluster1, cluster2)
+
+        total_distances = len(distances1) + len(distances2) + len(inter_distances)
+        if total_distances == 0:
+            return 0.0
+
+        # Use first (lowest) percentile for most permissive linkage
+        intra_percentile = self.percentiles[0]
+        percentile_idx = int(total_distances * (intra_percentile / 100.0))
+        if percentile_idx >= total_distances:
+            percentile_idx = total_distances - 1
+
+        # Walk three sorted lists to find value at percentile_idx
+        i1 = i2 = i_inter = 0
+        current_idx = 0
+
+        while current_idx <= percentile_idx:
+            candidates = []
+            if i1 < len(distances1):
+                candidates.append((distances1[i1], 1))
+            if i2 < len(distances2):
+                candidates.append((distances2[i2], 2))
+            if i_inter < len(inter_distances):
+                candidates.append((inter_distances[i_inter], 3))
+
+            min_val, source = min(candidates)
+
+            if current_idx == percentile_idx:
+                return min_val
+
+            if source == 1:
+                i1 += 1
+            elif source == 2:
+                i2 += 1
+            else:
+                i_inter += 1
+
+            current_idx += 1
+
+        return 0.0
+
+    def calculate_cluster_gap(self, cluster_idx: int, clusters: List[Set[int]],
+                             cache: DistanceCache) -> float:
+        """
+        Calculate gap for a single cluster relative to its nearest neighbor.
+        Uses multi-percentile calculation (sum of gaps at p90, p95, p100).
+
+        Returns:
+            Sum of gaps across all percentiles (can be negative if intra > inter at some percentiles)
+        """
+        cluster = clusters[cluster_idx]
+        intra_distances = cache.get_intra_distances(cluster)
+
+        # Calculate gaps at multiple percentiles
+        total_gap = 0.0
+
+        for percentile in self.percentiles:
+            # Calculate intra-cluster upper bound at this percentile
+            if len(cluster) == 1:
+                intra_upper = 0.0
+            else:
+                intra_upper = self._calculate_percentile(intra_distances, percentile)
+
+            # Find nearest neighbor cluster at this percentile
+            min_inter_lower = float('inf')
+            inter_percentile = 100 - percentile  # Complement percentile
+
+            for other_idx in range(len(clusters)):
+                if other_idx == cluster_idx:
+                    continue
+
+                inter_distances = cache.get_inter_distances(cluster, clusters[other_idx])
+                if inter_distances:
+                    inter_lower = self._calculate_percentile(inter_distances, inter_percentile)
+                    if inter_lower < min_inter_lower:
+                        min_inter_lower = inter_lower
+
+            # Calculate gap at this percentile
+            if min_inter_lower == float('inf'):
+                # No other clusters (shouldn't happen in practice)
+                gap_at_percentile = self.max_lump
+            else:
+                gap_at_percentile = min_inter_lower - intra_upper
+
+            # Include all gaps (positive and negative) in aggregation
+            # Negative gaps indicate over-lumping and create pressure to split
+            total_gap += gap_at_percentile
+
+        return total_gap
+
+    def calculate_gap_for_clustering(self, clusters: List[Set[int]], cache: DistanceCache) -> float:
+        """
+        Calculate local gap (sum of per-cluster multi-percentile gaps) for current clustering.
+
+        Returns:
+            Local gap score = sum(cluster_gaps) / (num_clusters^alpha)
+        """
+        if len(clusters) <= 1:
+            return 0.0
+
+        # Sum gaps across all clusters (each cluster gap is already multi-percentile sum)
+        local_gap = sum(self.calculate_cluster_gap(i, clusters, cache) for i in range(len(clusters)))
+
+        # Apply parsimony penalty if configured
+        if self.alpha > 0:
+            num_clusters = len(clusters)
+            parsimony_factor = num_clusters ** self.alpha
+            return local_gap / parsimony_factor
+
+        return local_gap
+
+    def calculate_incremental_gap(self, clusters: List[Set[int]], merge_i: int, merge_j: int,
+                                  cache: DistanceCache) -> float:
+        """
+        Calculate total gap if we hypothetically merge clusters i and j.
+
+        Args:
+            clusters: Current cluster configuration
+            merge_i, merge_j: Indices of clusters to hypothetically merge
+            cache: Distance cache
+
+        Returns:
+            Total gap after the hypothetical merge
+        """
+        # Create hypothetical merged clustering
+        merged_cluster = clusters[merge_i].union(clusters[merge_j])
+        temp_clusters = [c for idx, c in enumerate(clusters) if idx not in [merge_i, merge_j]]
+        temp_clusters.append(merged_cluster)
+
+        # Calculate total gap for hypothetical configuration
+        return self.calculate_gap_for_clustering(temp_clusters, cache)
+
+
 class GapOptimizedClustering:
     """
     Gap-optimized hierarchical agglomerative clustering for DNA barcoding.
@@ -499,18 +702,28 @@ class GapOptimizedClustering:
                  show_progress: bool = True,
                  logger: Optional[logging.Logger] = None,
                  num_threads: Optional[int] = None,
-                 single_process: bool = False):
+                 single_process: bool = False,
+                 gap_method: str = 'local',
+                 alpha: float = 0.0):
         """
         Initialize the gap-optimized clustering algorithm.
-        
+
         Args:
             min_split: Minimum distance to split clusters - sequences closer are lumped together (default 0.5%)
             max_lump: Maximum distance to lump clusters - sequences farther are kept split (default 2%)
             target_percentile: Which percentile to use for gap optimization and linkage decisions (default 95)
+                              Only used when gap_method='global'
             show_progress: If True, show progress bars during clustering (default True)
             logger: Optional logger instance for output; uses default logging if None
             num_threads: Number of threads for parallel processing (default: auto-detect)
             single_process: If True, run entirely in single process for library usage (default False)
+            gap_method: Gap calculation method - 'local' (default) or 'global'
+                       Local gap evaluates each cluster relative to its nearest neighbor and is
+                       more robust to high-variance datasets. Global gap is provided for
+                       comparison to literature (e.g., Wilson et al. 2023).
+            alpha: Parsimony parameter for local gap - controls cluster count preference (default 0.0)
+                   Only used when gap_method='local'. 0.0 = no parsimony (maximize total gap),
+                   1.0 = strong parsimony (mean gap per cluster), 0.5 = moderate balance.
         """
         self.min_split = min_split
         self.max_lump = max_lump
@@ -519,6 +732,12 @@ class GapOptimizedClustering:
         self.logger = logger or logging.getLogger(__name__)
         self.num_threads = num_threads
         self.single_process = single_process
+        self.gap_method = gap_method
+        self.alpha = alpha
+
+        # Validate gap_method
+        if self.gap_method not in ['global', 'local']:
+            raise ValueError(f"gap_method must be 'global' or 'local', got '{self.gap_method}'")
         
     def cluster(self, distance_matrix: np.ndarray) -> Tuple[List[List[int]], List[int], Dict]:
         """
@@ -585,11 +804,22 @@ class GapOptimizedClustering:
         self.logger.debug(f"Fast clustering finished with {len(clusters)} clusters.")
         # Initialize distance cache and gap calculator
         cache = DistanceCache(distance_matrix)
-        gap_calculator = GapCalculator(self.target_percentile)
+
+        # Choose gap calculator based on gap_method
+        if self.gap_method == 'local':
+            gap_calculator = LocalGapCalculator(alpha=self.alpha, max_lump=self.max_lump)
+        else:
+            gap_calculator = GapCalculator(self.target_percentile)
 
         gap_metrics = gap_calculator.calculate_gap_for_clustering(clusters, cache)
 
-        current_gap = gap_metrics[f'p{self.target_percentile}']['gap_size']
+        # Handle different return types for different gap methods
+        if self.gap_method == 'local':
+            # LocalGapCalculator returns a float directly
+            current_gap = gap_metrics
+        else:
+            # GapCalculator returns a dict with percentile metrics
+            current_gap = gap_metrics[f'p{self.target_percentile}']['gap_size']
 
         # Phase 2: Gap-aware merging between thresholds
         self.logger.info(f"Running gap-optimized clustering.")
@@ -612,7 +842,7 @@ class GapOptimizedClustering:
         # Handle special case: num_threads=0 means single-process mode
         if self.num_threads == 0:
             self.single_process = True
-        
+
         if self.single_process:
             # Single-process mode: run everything in main thread
             executor = None
@@ -625,7 +855,8 @@ class GapOptimizedClustering:
             executor = ProcessPoolExecutor(
                 max_workers=num_threads,
                 initializer=_init_worker,
-                initargs=(cache.distance_matrix, self.min_split, self.max_lump, self.target_percentile)
+                initargs=(cache.distance_matrix, self.min_split, self.max_lump, self.target_percentile,
+                         self.gap_method, self.alpha)
             )
         
         try:
@@ -650,14 +881,20 @@ class GapOptimizedClustering:
                 
                 # Calculate gap metrics for this configuration
                 gap_metrics = gap_calculator.calculate_gap_for_clustering(clusters, cache)
-                
-                current_gap = gap_metrics[f'p{self.target_percentile}']['gap_size']
-                
+
+                # Handle different return types for different gap methods
+                if self.gap_method == 'local':
+                    current_gap = gap_metrics
+                    gap_exists = True  # Local gap always exists (can be negative)
+                else:
+                    current_gap = gap_metrics[f'p{self.target_percentile}']['gap_size']
+                    gap_exists = bool(gap_metrics[f'p{self.target_percentile}']['gap_exists'])
+
                 gap_history.append({
                     'num_clusters': len(clusters),
                     'merge_distance': float(best_merge_distance),
                     'gap_size': float(current_gap),
-                    'gap_exists': bool(gap_metrics[f'p{self.target_percentile}']['gap_exists'])
+                    'gap_exists': gap_exists
                 })
                 
                 # Track best configuration encountered so far
@@ -695,7 +932,10 @@ class GapOptimizedClustering:
             if len(clusters) > 1:
                 try:
                     gap_metrics = gap_calculator.calculate_gap_for_clustering(clusters, cache)
-                    best_config['gap_size'] = gap_metrics[f'p{self.target_percentile}']['gap_size']
+                    if self.gap_method == 'local':
+                        best_config['gap_size'] = gap_metrics
+                    else:
+                        best_config['gap_size'] = gap_metrics[f'p{self.target_percentile}']['gap_size']
                     best_config['gap_metrics'] = gap_metrics
                 except Exception as e:
                     self.logger.info(f"Could not calculate gap metrics for final configuration: {e}")
@@ -717,9 +957,14 @@ class GapOptimizedClustering:
         
         # Report gap components from the best configuration
         if best_config['gap_metrics']:
-            target_metrics = best_config['gap_metrics'][f'p{self.target_percentile}']
-            self.logger.info(f"Gap optimization complete. Best gap: {best_config['gap_size']:.4f} "
-                        f"(intra≤{target_metrics['intra_upper']:.4f}, inter≥{target_metrics['inter_lower']:.4f})")
+            if self.gap_method == 'local':
+                # For local gap, best_config['gap_metrics'] is a float
+                self.logger.info(f"Gap optimization complete. Best local gap: {best_config['gap_size']:.4f}")
+            else:
+                # For global gap, best_config['gap_metrics'] is a dict
+                target_metrics = best_config['gap_metrics'][f'p{self.target_percentile}']
+                self.logger.info(f"Gap optimization complete. Best gap: {best_config['gap_size']:.4f} "
+                            f"(intra≤{target_metrics['intra_upper']:.4f}, inter≥{target_metrics['inter_lower']:.4f})")
         else:
             self.logger.info(f"Gap optimization complete. Best gap: {best_config['gap_size']:.4f}")
         

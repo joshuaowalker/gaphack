@@ -113,7 +113,9 @@ class TestMSACachedDistanceProvider:
         dist01 = provider.get_distance(0, 1)
         dist02 = provider.get_distance(0, 2)
         assert dist01 > 0
-        assert dist02 > 0
+        # dist02 is 0.0 due to homopolymer normalization: ATCGAATCG vs ATCGATCG
+        # The extra 'A' creates a homopolymer (AA) which is normalized to single A
+        assert dist02 == 0.0
 
     def test_larger_dataset(self):
         """Test with a larger dataset."""

@@ -82,7 +82,26 @@ Examples:
         default=95,
         choices=range(50, 101),
         metavar='[50-100]',
-        help='Percentile gap to optimize (default: 95)'
+        help='Percentile gap to optimize (default: 95). Only used with --gap-method global. '
+             'Local gap method uses hardcoded multi-percentile calculation [90, 95, 100].'
+    )
+    parser.add_argument(
+        '--gap-method',
+        choices=['global', 'local'],
+        default='local',
+        help='Gap calculation method (default: local). '
+             'Local gap evaluates each cluster relative to its nearest neighbor and is more robust '
+             'to high-variance datasets. Global gap is provided for comparison to literature '
+             '(e.g., Wilson et al. 2023).'
+    )
+    parser.add_argument(
+        '--alpha',
+        type=float,
+        default=0.0,
+        help='Parsimony parameter for local gap method (only used with --gap-method local). '
+             'Controls preference for fewer clusters via score = local_gap / (num_clusters^alpha). '
+             '0.0=no parsimony (maximize total gap, default), 1.0=mean gap per cluster (strong parsimony), '
+             '0.5=moderate balance.'
     )
 
     # Target mode clustering
@@ -113,9 +132,19 @@ Examples:
     )
     
     args = parser.parse_args()
-    
+
     # Setup logging
     setup_logging(args.verbose)
+
+    # Validate parameter combinations
+    if args.gap_method == 'global' and args.alpha != 0.0:
+        logging.error("Error: --alpha can only be used with --gap-method local")
+        sys.exit(1)
+
+    if args.gap_method == 'local' and args.target_percentile != 95:
+        logging.error("Error: --target-percentile can only be used with --gap-method global. "
+                     "Local gap uses hardcoded multi-percentile calculation [90, 95, 100].")
+        sys.exit(1)
     
     try:
         # Validate input file
@@ -262,8 +291,10 @@ Examples:
                 max_lump=args.max_lump,
                 target_percentile=args.target_percentile,
                 num_threads=args.threads,
+                gap_method=args.gap_method,
+                alpha=args.alpha,
             )
-            
+
             clusters, singletons, metrics = clustering.cluster(distance_matrix)
         
         # Results are already reported by core module, no need to repeat

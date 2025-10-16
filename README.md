@@ -59,7 +59,8 @@ This workflow is useful for taxonomic investigations, quality control, or detail
 ## Features
 
 ### Core Clustering (`gaphack`)
-- **Gap Optimization**: Uses gap-based heuristic to directly maximize the barcode gap
+- **Local Gap Optimization**: Evaluates each cluster relative to its nearest neighbor using multi-percentile calculation [90, 95, 100] for robust species delimitation
+- **Global Gap Support**: Optional global gap method for comparison to literature (e.g., Wilson et al. 2023)
 - **MSA-based Distances**: Uses SPOA multiple sequence alignment for consistent distance calculations across all sequence pairs
 - **Target Mode**: Single-cluster focused clustering from seed sequences with `--target` parameter
 - **Percentile-based Linkage**: Uses percentile-based complete linkage (default 95th percentile) for robust merge decisions
@@ -186,13 +187,20 @@ gaphack input.fasta --target seeds.fasta -o target_cluster
 
 With custom parameters:
 ```bash
-# With custom thresholds and multi-threading
+# Local gap with custom thresholds and parsimony
 gaphack input.fasta \
     --min-split 0.003 \
     --max-lump 0.03 \
-    --target-percentile 90 \
+    --alpha 0.5 \
     --export-metrics gap_analysis.json \
     --threads 8 \
+    --verbose
+
+# Global gap for literature comparison
+gaphack input.fasta \
+    --gap-method global \
+    --target-percentile 90 \
+    --export-metrics gap_analysis.json \
     --verbose
 ```
 
@@ -354,7 +362,8 @@ distance_matrix = calculate_distance_matrix(sequences)
 clustering = GapOptimizedClustering(
     min_split=0.005,         # 0.5% minimum distance to split clusters
     max_lump=0.02,           # 2% maximum distance to lump clusters
-    target_percentile=95,    # Use P95 for gap optimization and linkage decisions
+    gap_method='local',      # Use local gap (default)
+    alpha=0.5,               # Moderate parsimony (0.0=no penalty, 1.0=strong penalty)
     num_threads=None,        # Auto-detect cores (default), 0 for single-process
     show_progress=True,      # Show progress bar (default True)
     logger=None              # Use default logger (default None)
@@ -459,7 +468,9 @@ This approach is useful for:
 
 - `min_split` (default: 0.005): Minimum distance to split clusters. Sequences closer than this are lumped together (assumed intraspecific).
 - `max_lump` (default: 0.02): Maximum distance to lump clusters. Sequences farther than this are kept split (assumed interspecific).
-- `target_percentile` (default: 95): Which percentile to use for gap optimization and linkage decisions (P95 provides robustness against outliers).
+- `gap_method` (default: 'local'): Gap calculation method - 'local' (recommended) or 'global' (for literature comparison).
+- `alpha` (default: 0.0): Parsimony parameter for local gap method. Controls cluster count preference (0.0=maximize total gap, 1.0=mean gap per cluster).
+- `target_percentile` (default: 95): Which percentile to use for gap optimization (only used with global gap method).
 
 ### Refinement Parameters (gaphack-refine)
 
@@ -481,6 +492,110 @@ This approach is useful for:
   - Uses two-line format (header + sequence on single line)
 - **TSV format**: Tab-separated values with columns `sequence_id` and `cluster_id`
 - **Text format**: Human-readable clustering report
+
+## Gap Calculation Methods
+
+gapHACk provides two gap calculation methods that optimize for different scenarios:
+
+### Local Gap Method (Default, Recommended)
+
+The **local gap** method evaluates each cluster relative to its nearest neighbor cluster, using a multi-percentile calculation across percentiles [90, 95, 100]. This approach shares conceptual foundations with silhouette coefficients (Rousseeuw, 1987), a well-established cluster quality metric.
+
+#### Relationship to Silhouette Coefficients
+
+Both local gap and silhouette coefficients recognize that cluster quality should be evaluated **locally** rather than globally:
+
+**Silhouette Coefficient** (Rousseeuw, 1987):
+- For each data point: s(i) = (b(i) - a(i)) / max{a(i), b(i)}
+  - a(i) = mean distance to points in same cluster
+  - b(i) = mean distance to **nearest neighboring cluster**
+- Averaged across all points
+- Range: -1 (poor) to +1 (excellent)
+
+**Local Gap** (gapHACk):
+- For each cluster: gap = inter_lower - intra_upper
+  - intra_upper = upper percentile of intra-cluster distances (e.g., P95)
+  - inter_lower = lower percentile to **nearest neighboring cluster** (e.g., P5)
+- Multi-percentile [90, 95, 100] for robustness
+- Summed across clusters (or divided by num_clusters^alpha)
+
+Both methods avoid the pitfall of global metrics where distant well-separated clusters can mask problems with nearby poorly-separated clusters. The key insight: **a good cluster should be tight within itself AND well-separated from its nearest neighbor**.
+
+gapHACk's local gap adapts this principle for DNA barcoding by:
+- Using **percentiles instead of means** (more robust to outliers common in genetic data)
+- Operating at **cluster level** (biologically meaningful units) rather than individual sequences
+- Using **raw genetic distances** (interpretable as percent divergence) rather than normalized scores
+- Incorporating **multi-percentile calculation** [90, 95, 100] for additional robustness
+
+#### How it works:
+- For each cluster, identifies its nearest neighbor cluster
+- Calculates gap at three percentiles (90th, 95th, 100th/max)
+- Sums these three gap values for each cluster
+- Total local gap = sum of all per-cluster gap scores
+
+#### Advantages:
+- **Robust to dataset heterogeneity**: Each cluster only compares to its nearest neighbor, not all distant clusters
+- **Handles high variance**: Resistant to the variance problems that eliminate global gaps in many fungal genera (Wilson et al. 2023 found global gaps fail in >50% of macrofungal genera)
+- **Multi-percentile robustness**: Using [90, 95, 100] reduces sensitivity to arbitrary percentile choice and captures separation quality across the distribution
+- **Prevents over-lumping**: The 100th percentile (max) ensures outliers aren't ignored
+- **Theoretically grounded**: Builds on established cluster quality metrics from the statistical literature
+
+**Use when:**
+- Working with real-world fungal datasets (recommended default)
+- Dataset may have heterogeneous divergence patterns
+- You want robust results across different taxonomic groups
+
+**Tuning with alpha parameter:**
+```bash
+# Default: maximize total gap (no parsimony penalty)
+gaphack sequences.fasta --gap-method local --alpha 0.0
+
+# Moderate balance between gap size and cluster count
+gaphack sequences.fasta --gap-method local --alpha 0.5
+
+# Favor fewer, larger clusters (mean gap per cluster)
+gaphack sequences.fasta --gap-method local --alpha 1.0
+```
+
+The alpha parameter controls cluster count preference via `score = local_gap / (num_clusters^alpha)`:
+- **α = 0.0** (default): No parsimony penalty - maximizes sum of gaps (favors more clusters/splitting)
+- **α = 0.5**: Moderate balance - scales gap by square root of cluster count
+- **α = 1.0**: Strong parsimony - uses mean gap per cluster (favors fewer clusters/lumping)
+
+### Global Gap Method (For Literature Comparison)
+
+The **global gap** method pools all intra-cluster distances and all inter-cluster distances, then calculates the gap at a single percentile (default 95th):
+
+**How it works:**
+- Pools ALL intra-cluster distances across all clusters
+- Pools ALL inter-cluster distances across all cluster pairs
+- Gap = 5th percentile of inter - 95th percentile of intra (for P95)
+
+**Use when:**
+- Comparing results to published barcode gap studies (Wilson et al. 2023, etc.)
+- Running diagnostic comparisons between methods
+- Dataset has low variance and well-separated groups
+
+**Important limitations (from Wilson et al. 2023):**
+- Sensitive to dataset composition - one distant cluster pair can mask close pairs
+- Fails to find gaps in many real-world datasets (>50% of macrofungal genera)
+- High variance in either distribution can eliminate the gap
+
+```bash
+# Global gap for literature comparison
+gaphack sequences.fasta --gap-method global --target-percentile 95
+```
+
+### When to Use Which Method
+
+| Scenario | Recommended Method | Why |
+|----------|-------------------|-----|
+| **Default/General use** | Local (α=0.0) | Most robust for real datasets |
+| **Conservative clustering** | Local (α=0.5 to 1.0) | Favors fewer, larger clusters |
+| **Literature comparison** | Global | Match published studies |
+| **Clean, simple dataset** | Either | Both should work |
+| **High variance dataset** | Local | Global will likely fail |
+| **Diagnostic/validation** | Run both | Compare results |
 
 ## Algorithm Details
 
@@ -681,6 +796,7 @@ for DNA barcoding. https://github.com/joshuaowalker/gaphack
 
 - Puillandre, N., Lambert, A., Brouillet, S., & Achaz, G. (2012). ABGD, Automatic Barcode Gap Discovery for primary species delimitation. *Molecular Ecology*, 21(8), 1864-1877.
 - Randriamihamison, N., Vialaneix, N., & Neuvial, P. (2021). Applicability and interpretability of Ward's hierarchical agglomerative clustering with or without contiguity constraints. *Journal of Classification*, 38, 363-389.
+- Rousseeuw, P. J. (1987). Silhouettes: A graphical aid to the interpretation and validation of cluster analysis. *Journal of Computational and Applied Mathematics*, 20, 53-65. https://doi.org/10.1016/0377-0427(87)90125-7
 - Russell, S. (2025). Why NCBI BLAST Identity Scores Can Mislead Fungal Identifications — And How to Improve Them. *MycotaLab Substack*. https://mycotalab.substack.com/p/why-ncbi-blast-identity-scores-can
 - Wilson, A.W., Eberhardt, U., Nguyen, N., et al. (2023). Does One Size Fit All? Variations in the DNA Barcode Gaps of Macrofungal Genera. *Journal of Fungi*, 9(8), 788. https://doi.org/10.3390/jof9080788
 

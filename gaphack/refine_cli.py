@@ -267,6 +267,9 @@ def generate_refinement_summary(
     lines.append(f"min_split: {parameters['min_split']}")
     lines.append(f"max_lump: {parameters['max_lump']}")
     lines.append(f"target_percentile: {parameters['target_percentile']}")
+    lines.append(f"gap_method: {parameters.get('gap_method', 'global')}")
+    if parameters.get('gap_method') == 'local':
+        lines.append(f"alpha: {parameters.get('alpha', 0.0)}")
     lines.append(f"max_scope_size: {parameters['max_scope_size']}")
     if parameters.get('search_method'):
         lines.append(f"search_method: {parameters['search_method']}")
@@ -565,6 +568,12 @@ def main():
                        help='Maximum distance to lump clusters (default: 0.02)')
     parser.add_argument('--target-percentile', type=int, default=95,
                        help='Percentile for gap optimization (default: 95)')
+    parser.add_argument('--gap-method', choices=['global', 'local'], default='global',
+                       help='Gap calculation method: global (default) or local (sum of nearest-neighbor gaps across multiple percentiles)')
+    parser.add_argument('--alpha', type=float, default=0.0,
+                       help='Parsimony parameter for local gap method (only used with --gap-method local). '
+                            'Controls preference for fewer clusters via score = local_gap / (num_clusters^alpha). '
+                            '0.0=no parsimony penalty (default), 1.0=mean gap per cluster (strong parsimony), 0.5=moderate (recommended)')
 
     # Advanced refinement parameters
     parser.add_argument('--max-scope-size', type=int, default=300,
@@ -684,7 +693,9 @@ def main():
             checkpoint_frequency=args.checkpoint_frequency,
             checkpoint_output_dir=args.output_dir,
             header_mapping=header_mapping,
-            resume_state=resume_state
+            resume_state=resume_state,
+            gap_method=args.gap_method,
+            alpha=args.alpha
         )
         timing['refinement_total'] = time.time() - refinement_start
 
@@ -772,6 +783,8 @@ def main():
             'min_split': args.min_split,
             'max_lump': args.max_lump,
             'target_percentile': args.target_percentile,
+            'gap_method': args.gap_method,
+            'alpha': args.alpha,
             'max_scope_size': args.max_scope_size,
             'search_method': args.search_method,
             'knn_neighbors': args.knn_neighbors,
