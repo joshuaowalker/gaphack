@@ -417,13 +417,13 @@ def compute_msa_distance(seq1_aligned: str, seq2_aligned: str,
         # No positions to score (should be caught by min_required_overlap check, but defensive)
         return np.nan
 
-    # MycoBLAST-style parameters: end_skip=0, all normalizations=True, max_repeat=0
+    # MycoBLAST-style parameters: end_skip=0, all normalizations=True, max_repeat=1
     params = AdjustmentParams(
         end_skip_distance=0,
         normalize_homopolymers=True,
         handle_iupac_overlap=True,
         normalize_indels=True,
-        max_repeat_motif_length=0
+        max_repeat_motif_length=1
     )
 
     try:

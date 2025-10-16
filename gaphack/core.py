@@ -609,8 +609,6 @@ class GapOptimizedClustering:
         max_clusters = len(clusters)
         max_pairs = max_clusters * (max_clusters - 1) // 2
 
-        self.num_threads = 0
-
         # Handle special case: num_threads=0 means single-process mode
         if self.num_threads == 0:
             self.single_process = True
