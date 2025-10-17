@@ -25,18 +25,18 @@ from .utils import calculate_distance_matrix
 logger = logging.getLogger("gaphack.refine")
 
 
-# Global gap metric configuration
+# Convergence metrics configuration
 # Number of nearest neighbor clusters to use for inter-cluster distance calculation
 # Higher K provides more robust estimates but increases computation
-GLOBAL_GAP_K_NEIGHBORS = 3
+CONVERGENCE_METRICS_K_NEIGHBORS = 3
 
-# Cache for per-cluster gap computations
+# Cache for per-cluster gap computations used in convergence tracking
 # Key: (frozenset(cluster_headers), tuple(sorted(frozenset(neighbor_headers))), target_percentile)
 # Value: gap value (float)
-_global_gap_cache: Dict[Tuple[frozenset, Tuple[frozenset, ...], int], float] = {}
+_convergence_metrics_cache: Dict[Tuple[frozenset, Tuple[frozenset, ...], int], float] = {}
 
 
-def compute_global_gap_metrics(
+def compute_convergence_metrics(
     clusters: Dict[str, List[str]],
     proximity_graph: 'ClusterGraph',
     sequences: List[str],
@@ -44,13 +44,18 @@ def compute_global_gap_metrics(
     target_percentile: int = 95,
     show_progress: bool = True
 ) -> Dict[str, float]:
-    """Compute global gap metrics across all clusters for convergence tracking.
+    """Compute convergence metrics across all clusters for refinement tracking.
 
     Calculates per-cluster barcode gaps using K nearest neighbor clusters for
-    inter-cluster distances, then aggregates into global metrics.
+    inter-cluster distances, then aggregates into summary metrics. This provides
+    a quality metric for tracking refinement convergence.
 
     Creates MSA-based distance providers for each cluster's minimal scope
     (cluster + K neighbors) to avoid cost-prohibitive global MSA.
+
+    Note: This is different from --gap-method global vs local. This function
+    computes per-cluster gaps (similar to local method) and aggregates them
+    for convergence tracking across the entire clustering.
 
     Args:
         clusters: Dict mapping cluster_id -> list of sequence headers
@@ -61,7 +66,7 @@ def compute_global_gap_metrics(
         show_progress: Show progress bar during computation (default: True)
 
     Returns:
-        Dict with global gap metrics:
+        Dict with convergence metrics:
         - 'mean_gap': Mean gap across all clusters (unweighted)
         - 'weighted_gap': Mean gap weighted by cluster size
         - 'gap_coverage': Fraction of clusters with positive gap
@@ -86,14 +91,14 @@ def compute_global_gap_metrics(
     cache_hits = 0
     cache_misses = 0
 
-    cluster_iter = tqdm(clusters.items(), desc="Computing global gap metrics", unit="cluster", disable=not show_progress)
+    cluster_iter = tqdm(clusters.items(), desc="Computing convergence metrics", unit="cluster", disable=not show_progress)
 
     for cluster_id, cluster_headers in cluster_iter:
         cluster_size = len(cluster_headers)
         total_sequences += cluster_size
 
         # Get K nearest neighbor clusters
-        k_nearest = proximity_graph.get_k_nearest_neighbors(cluster_id, GLOBAL_GAP_K_NEIGHBORS)
+        k_nearest = proximity_graph.get_k_nearest_neighbors(cluster_id, CONVERGENCE_METRICS_K_NEIGHBORS)
 
         # Build minimal scope: cluster + K neighbors
         scope_headers = list(cluster_headers)  # Start with current cluster
@@ -117,9 +122,9 @@ def compute_global_gap_metrics(
             target_percentile
         )
 
-        if cache_key in _global_gap_cache:
+        if cache_key in _convergence_metrics_cache:
             # Cache hit - reuse computed gap
-            gap = _global_gap_cache[cache_key]
+            gap = _convergence_metrics_cache[cache_key]
             cache_hits += 1
 
             # Track statistics
@@ -203,7 +208,7 @@ def compute_global_gap_metrics(
             continue
 
         # Store in cache for future iterations
-        _global_gap_cache[cache_key] = gap
+        _convergence_metrics_cache[cache_key] = gap
 
         per_cluster_gaps.append(gap)
         per_cluster_sizes.append(cluster_size)
@@ -214,7 +219,7 @@ def compute_global_gap_metrics(
 
     # Log debug statistics if there were issues
     if nan_gap_count > 0 or skipped_no_neighbors > 0:
-        logger.info(f"Global gap computation: skipped {skipped_no_neighbors} clusters (no neighbors), "
+        logger.info(f"Convergence metrics computation: skipped {skipped_no_neighbors} clusters (no neighbors), "
                    f"{nan_gap_count} clusters (NaN gaps)")
 
     # Aggregate into global metrics
@@ -804,9 +809,9 @@ def iterative_refinement(
         graph_time = time.time() - graph_start
         timing['proximity_graphs'].append(graph_time)
 
-        # Compute global gap metrics at start of iteration (using fresh graph)
+        # Compute convergence metrics at start of iteration (using fresh graph)
         gap_metrics_start = time.time()
-        global_gap_metrics = compute_global_gap_metrics(
+        convergence_metrics = compute_convergence_metrics(
             clusters=current_clusters,
             proximity_graph=proximity_graph,
             sequences=sequences,
@@ -816,16 +821,16 @@ def iterative_refinement(
         )
         gap_metrics_time = time.time() - gap_metrics_start
 
-        # Log global gap metrics (pre-refinement)
-        mean_gap = global_gap_metrics['mean_gap']
-        weighted_gap = global_gap_metrics['weighted_gap']
-        gap_coverage = global_gap_metrics['gap_coverage']
-        gap_coverage_sequences = global_gap_metrics['gap_coverage_sequences']
+        # Log aggregate gap metrics (pre-refinement)
+        mean_gap = convergence_metrics['mean_gap']
+        weighted_gap = convergence_metrics['weighted_gap']
+        gap_coverage = convergence_metrics['gap_coverage']
+        gap_coverage_sequences = convergence_metrics['gap_coverage_sequences']
         total_sequences_in_clusters = sum(len(headers_list) for headers_list in current_clusters.values())
         positive_gap_sequence_count = int(gap_coverage_sequences * total_sequences_in_clusters)
 
-        logger.info(f"Global gap (pre-refinement): mean={mean_gap:.4f}, weighted={weighted_gap:.4f}, "
-                   f"coverage={gap_coverage*100:.1f}% ({positive_gap_sequence_count}/{total_sequences_in_clusters} seqs)")
+        logger.info(f"Aggregate gap (pre-refinement): mean={mean_gap:.4f}, weighted={weighted_gap:.4f}, "
+                   f"cluster coverage={gap_coverage*100:.1f}%, sequence coverage={gap_coverage_sequences*100:.1f}%")
 
         # Track which clusters have been processed this iteration
         processed_this_iteration = set()
@@ -837,7 +842,7 @@ def iterative_refinement(
         iteration_stats = {
             'best_gap': float('-inf'),
             'best_gap_info': None,
-            'global_gap_metrics': global_gap_metrics,  # Store for checkpointing
+            'convergence_metrics': convergence_metrics,  # Store for checkpointing
             'seeds_processed': 0,
             'seeds_skipped_already_processed': 0,  # Seed was in a processed scope
             'seeds_skipped_neighborhood_changed': 0,  # Neighborhood modified this iteration

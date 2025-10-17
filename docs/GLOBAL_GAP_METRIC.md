@@ -1,16 +1,18 @@
-# Global Gap Metric Design
+# Convergence Metrics Design
 
 ## Objective
 
-Implement a **global gap metric** to track convergence progress during iterative refinement (Pass 2). This metric provides a direct indicator of progress toward our optimization objective: maximizing the barcode gap between intra-cluster and inter-cluster distances.
+Implement **convergence metrics** to track refinement progress during iterative refinement. These metrics provide a direct indicator of progress toward our optimization objective: maximizing the barcode gap between intra-cluster and inter-cluster distances.
 
-Unlike AMI (which measures clustering stability), the global gap metric measures **clustering quality** in terms of barcode separation.
+Unlike AMI (which measures clustering stability), the aggregate gap metric measures **clustering quality** in terms of barcode separation.
+
+**Note**: This is different from `--gap-method global` vs `local`. The convergence metrics compute per-cluster gaps (similar to the local method) and aggregate them for tracking overall clustering quality.
 
 ## Key Design Decisions
 
 ### 1. Computation Timing: Start of Iteration
 
-**Decision**: Compute global gap metrics at the **start** of each iteration, using the proximity graph that was just built for `current_clusters`.
+**Decision**: Compute convergence metrics at the **start** of each iteration, using the proximity graph that was just built for `current_clusters`.
 
 **Rationale**:
 - Zero additional cost (graph already exists)
@@ -34,7 +36,7 @@ Unlike AMI (which measures clustering stability), the global gap metric measures
 **Implementation**:
 ```python
 # In cluster_refinement.py
-GLOBAL_GAP_K_NEIGHBORS = 3  # Tunable constant
+CONVERGENCE_METRICS_K_NEIGHBORS = 3  # Tunable constant
 ```
 
 ### 3. Singleton Handling
@@ -67,12 +69,12 @@ For each cluster C:
    gap_C = inter_lower - intra_upper
    ```
 
-### 5. Global Metrics
+### 5. Aggregate Metrics
 
-Aggregate per-cluster gaps into four global metrics:
+Aggregate per-cluster gaps into four convergence metrics:
 
 ```python
-global_gap_metrics = {
+convergence_metrics = {
     # Mean gap across all clusters (unweighted)
     'mean_gap': mean(gap_C for all C),
 
@@ -88,8 +90,8 @@ global_gap_metrics = {
 ```
 
 **Rationale for multiple metrics**:
-- `mean_gap`: Simple average, equal weight per cluster
-- `weighted_gap`: Prioritizes large clusters (most sequences)
+- `mean_gap`: Simple average, equal weight per cluster (aggregate gap)
+- `weighted_gap`: Prioritizes large clusters (most sequences, weighted aggregate gap)
 - `gap_coverage`: Robust to outliers, clear interpretation
 - `gap_coverage_sequences`: Combines coverage concept with sequence weighting
 
@@ -156,10 +158,10 @@ Iter 8: mean_gap=0.020, coverage=66%  # No progress
 ## Logging Format
 
 ```
-Pass 2 iteration 5: 1456 clusters
-Global gap (pre-refinement): mean=0.0234, weighted=0.0241, coverage=67.3% (2891/4296 seqs)
+Refinement iteration 5: 1456 clusters
+Aggregate gap (pre-refinement): mean=0.0234, weighted=0.0241, cluster coverage=88.6%, sequence coverage=67.3% (2891/4296 seqs)
 ... [refinement operations] ...
-Pass 2 Iter 5 Summary:
+Refinement Iter 5 Summary:
   Clusters: 1446 -> 1456 (+10)
   AMI: 0.984
   [existing statistics]
@@ -167,8 +169,9 @@ Pass 2 Iter 5 Summary:
 
 **Key elements**:
 - Logged at start of iteration (pre-refinement)
-- Shows both mean and weighted gap
-- Shows coverage as percentage and absolute counts
+- Shows both mean and weighted aggregate gap
+- Shows both cluster coverage (% of clusters with positive gap) and sequence coverage (% of sequences in positive-gap clusters)
+- Shows absolute counts for sequence coverage
 - Appears before refinement summary for clear temporal ordering
 
 ## Alternative Approaches Considered
@@ -183,8 +186,8 @@ Use only the single nearest cluster for inter-cluster distances.
 
 **Considered but enhanced**: K=1 is most conservative, but K=3 hedges against medoid-based distance underestimating true overlap. Made K configurable.
 
-### 3. Multi-Percentile Global Gap
-Compute global gap at multiple percentiles (p50, p75, p90, p95) and combine.
+### 3. Multi-Percentile Aggregate Gap
+Compute aggregate gap at multiple percentiles (p50, p75, p90, p95) and combine.
 
 **Rejected for now**: Requires collecting ALL intra/inter distances globally (expensive), or loses per-cluster granularity. Current approach provides per-cluster gaps which are more diagnostic.
 
@@ -197,21 +200,21 @@ For large clusters, sample N sequences instead of computing all O(n²) pairs.
 
 **Primary file**: `gaphack/cluster_refinement.py`
 
-**New function**: `compute_global_gap_metrics()`
+**Function**: `compute_convergence_metrics()`
 - Input: clusters dict, proximity graph, sequences, headers, target_percentile
-- Output: dict with 4 global metrics
+- Output: dict with 4 convergence metrics
 - **Key implementation detail**: Creates scoped MSA-based distance provider for each cluster + K neighbors
   - Avoids cost-prohibitive global MSA across all sequences
   - Provides better alignments for sequences covering different marker regions
 
-**Integration point**: `pass2_iterative_merge()`
+**Integration point**: `iterative_refinement()`
 - Called immediately after building proximity graph
 - Before seed prioritization and refinement loop
 - Stored in iteration_stats for checkpointing
 
 ## Testing Strategy
 
-1. **Unit test**: `compute_global_gap_metrics()` with synthetic clusters
+1. **Unit test**: `compute_convergence_metrics()` with synthetic clusters
    - Verify singleton handling
    - Verify coverage calculations
    - Verify weighted vs unweighted mean

@@ -168,16 +168,16 @@ class TestConflictVerification:
         assert result['verification_context'] == "final"
 
 
-class TestGlobalGapMetrics:
-    """Test suite for global gap metric computation."""
+class TestConvergenceMetrics:
+    """Test suite for convergence metrics computation."""
 
     @patch('gaphack.distance_providers.MSACachedDistanceProvider')
-    def test_compute_global_gap_metrics_basic(self, mock_msa_provider_class):
-        """Test basic global gap metrics computation."""
-        from gaphack.cluster_refinement import compute_global_gap_metrics, _global_gap_cache
+    def test_compute_convergence_metrics_basic(self, mock_msa_provider_class):
+        """Test basic convergence metrics computation."""
+        from gaphack.cluster_refinement import compute_convergence_metrics, _convergence_metrics_cache
 
         # Clear cache to avoid interference from other tests
-        _global_gap_cache.clear()
+        _convergence_metrics_cache.clear()
 
         # Create mock distance provider that returns different distances
         # Set up distance matrix: cluster1 has internal distance 0.01, cluster2 has 0.02
@@ -213,7 +213,7 @@ class TestGlobalGapMetrics:
         ]
 
         # Compute metrics
-        metrics = compute_global_gap_metrics(
+        metrics = compute_convergence_metrics(
             clusters=clusters,
             proximity_graph=mock_graph,
             sequences=sequences,
@@ -237,12 +237,12 @@ class TestGlobalGapMetrics:
         assert metrics['gap_coverage_sequences'] == 1.0
 
     @patch('gaphack.distance_providers.MSACachedDistanceProvider')
-    def test_compute_global_gap_metrics_singleton(self, mock_msa_provider_class):
-        """Test global gap metrics with singleton clusters."""
-        from gaphack.cluster_refinement import compute_global_gap_metrics, _global_gap_cache
+    def test_compute_convergence_metrics_singleton(self, mock_msa_provider_class):
+        """Test convergence metrics with singleton clusters."""
+        from gaphack.cluster_refinement import compute_convergence_metrics, _convergence_metrics_cache
 
         # Clear cache to avoid interference from other tests
-        _global_gap_cache.clear()
+        _convergence_metrics_cache.clear()
 
         # Create mock distance provider
         def create_mock_provider(*args, **kwargs):
@@ -270,7 +270,7 @@ class TestGlobalGapMetrics:
         mock_graph.get_k_nearest_neighbors = Mock()
         mock_graph.get_k_nearest_neighbors.return_value = [('cluster_2', 0.1)]
 
-        metrics = compute_global_gap_metrics(
+        metrics = compute_convergence_metrics(
             clusters=clusters,
             proximity_graph=mock_graph,
             sequences=sequences,
@@ -284,12 +284,12 @@ class TestGlobalGapMetrics:
         assert metrics['gap_coverage'] > 0
 
     @patch('gaphack.distance_providers.MSACachedDistanceProvider')
-    def test_compute_global_gap_metrics_negative_gap(self, mock_msa_provider_class):
-        """Test global gap metrics when some clusters have negative gaps."""
-        from gaphack.cluster_refinement import compute_global_gap_metrics, _global_gap_cache
+    def test_compute_convergence_metrics_negative_gap(self, mock_msa_provider_class):
+        """Test convergence metrics when some clusters have negative gaps."""
+        from gaphack.cluster_refinement import compute_convergence_metrics, _convergence_metrics_cache
 
         # Clear cache to avoid interference from other tests
-        _global_gap_cache.clear()
+        _convergence_metrics_cache.clear()
 
         # Create mock distance provider
         # Cluster1 has large internal distances (0.2), cluster2 small (0.01)
@@ -339,7 +339,7 @@ class TestGlobalGapMetrics:
             ('cluster_2', 0.05) if cluster_id == 'cluster_1' else ('cluster_1', 0.05)
         ]
 
-        metrics = compute_global_gap_metrics(
+        metrics = compute_convergence_metrics(
             clusters=clusters,
             proximity_graph=mock_graph,
             sequences=sequences,
