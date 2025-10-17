@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2025-10-17
+
+### Changed
+- **Local gap method is now the default**: Changed from global gap to local gap for more robust clustering with high-variance datasets
+- **Alpha parameter defaults to 0.0**: Maximize total gap with no parsimony penalty (favors splitting over lumping)
+- **Global gap retained for literature comparison**: Available via `--gap-method global` for validation against published studies
+
+### Added
+- **Parameter validation**: Strict validation prevents incompatible parameter combinations
+  - `--alpha` can only be used with `--gap-method local`
+  - `--target-percentile` can only be used with `--gap-method global`
+- **Comprehensive gap methods documentation**: New "Gap Calculation Methods" section in README explaining:
+  - Local gap method with multi-percentile calculation [90, 95, 100]
+  - Theoretical grounding in silhouette coefficients (Rousseeuw, 1987)
+  - Global gap method and its limitations (Wilson et al. 2023)
+  - When to use each method with comparison table
+  - Alpha parameter tuning examples
+- **Silhouette coefficient comparison**: Documented conceptual foundations linking local gap to established clustering literature
+
+### Documentation
+- Updated all usage examples to reflect new defaults
+- Added Rousseeuw (1987) to Key References
+- Enhanced Features section to highlight local gap optimization
+- Provided detailed guidance on gap method selection
+
+### Rationale
+Local gap is more robust for real-world datasets with high variance, as demonstrated by Wilson et al. (2023) showing global gaps fail in >50% of macrofungal genera. The connection to silhouette coefficients establishes theoretical foundations for the local nearest-neighbor evaluation approach.
+
+## [0.5.1] - 2025-10-13
+
+### Fixed
+- Bug fixes merged from main branch during feature development
+
 ## [0.5.0] - 2025-10-13
 
 ### Removed
