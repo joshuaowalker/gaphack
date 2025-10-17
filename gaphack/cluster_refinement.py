@@ -687,7 +687,9 @@ def execute_refinement_operations(
         if ami == 1.0:
             # No changes - mark scope as converged
             new_converged_scopes.add(scope_signature)
-            logger.debug(f"Scope converged (AMI=1.0): {len(scope_signature)} sequences")
+            # Extract sequence count and cluster count from signature tuple
+            seq_set, cluster_pattern = scope_signature
+            logger.debug(f"Scope converged (AMI=1.0): {len(seq_set)} sequences, {len(cluster_pattern)} clusters")
             continue
 
         # Apply refinement: remove inputs, add outputs
@@ -921,14 +923,30 @@ def iterative_refinement(
                           f"Skipping seed {seed_id} - neighborhood changed")
                 continue
 
-            # Check if this scope has already converged (use sequence set as signature)
-            scope_signature = frozenset(scope_headers)
+            # Check if this scope has already converged
+            # Signature includes both sequence set AND current clustering pattern to handle
+            # cases where overlapping scopes change the clustering between iterations
+            scope_clustering_pattern = set()
+            for cluster_id in scope_cluster_ids:
+                if cluster_id in current_clusters:
+                    # Add frozenset of headers for this cluster to capture the grouping
+                    cluster_headers_in_scope = current_clusters[cluster_id]
+                    if cluster_headers_in_scope:  # Only add non-empty clusters
+                        scope_clustering_pattern.add(frozenset(cluster_headers_in_scope))
+
+            # Combined signature: (sequences, clustering_pattern)
+            scope_signature = (
+                frozenset(scope_headers),
+                frozenset(scope_clustering_pattern)
+            )
+
             if scope_signature in converged_scopes:
                 iteration_stats['seeds_skipped_convergence'] += 1
                 # Track sequences in this converged scope
                 unique_sequences_converged.update(scope_headers)
                 logger.info(f"Refinement Iter {global_iteration} ({seeds_processed} of {total_clusters}): "
-                          f"Skipping seed {seed_id} - prior convergence detected ({len(scope_signature)} sequences)")
+                          f"Skipping seed {seed_id} - prior convergence detected ({len(scope_headers)} sequences, "
+                          f"{len(scope_clustering_pattern)} clusters)")
                 # Don't mark as processed - we didn't actually process anything
                 continue
 
