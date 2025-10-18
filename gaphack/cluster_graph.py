@@ -6,9 +6,11 @@ cluster proximity queries needed for scope-limited cluster refinement algorithms
 """
 
 import logging
+import os
 import tempfile
 from typing import List, Dict, Tuple, Set, Optional
 from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 from tqdm import tqdm
 
@@ -18,6 +20,191 @@ from .neighborhood_finder import NeighborhoodFinder
 
 
 logger = logging.getLogger(__name__)
+
+
+# Global worker state for K-NN query processing (initialized once per worker)
+_knn_worker_unique_sequences = None
+_knn_worker_sequence_to_clusters = None
+_knn_worker_sequence_lookup = None
+_knn_worker_k_neighbors = None
+_knn_worker_close_threshold = None
+
+
+def _init_knn_query_worker(unique_sequences: List[str],
+                           sequence_to_clusters: Dict[str, List[str]],
+                           sequence_lookup: Dict,
+                           k_neighbors: int,
+                           close_threshold: Optional[float]) -> None:
+    """Initialize worker with shared K-NN query data.
+
+    Called once per worker process at startup to avoid repeated serialization.
+    """
+    global _knn_worker_unique_sequences, _knn_worker_sequence_to_clusters
+    global _knn_worker_sequence_lookup, _knn_worker_k_neighbors, _knn_worker_close_threshold
+    _knn_worker_unique_sequences = unique_sequences
+    _knn_worker_sequence_to_clusters = sequence_to_clusters
+    _knn_worker_sequence_lookup = sequence_lookup
+    _knn_worker_k_neighbors = k_neighbors
+    _knn_worker_close_threshold = close_threshold
+
+
+def _compute_medoid_worker(cluster_id: str, cluster_headers: List[str],
+                          cluster_sequences: List[str], cluster_indices: List[int]) -> Tuple[str, int]:
+    """Worker function to compute medoid for a single cluster.
+
+    Args:
+        cluster_id: Cluster identifier
+        cluster_headers: List of sequence headers in this cluster
+        cluster_sequences: List of sequences in this cluster (pre-looked up in main thread)
+        cluster_indices: List of global indices for these sequences (for return value)
+
+    Returns:
+        Tuple of (cluster_id, medoid_global_index)
+    """
+    from .distance_providers import MSACachedDistanceProvider
+
+    if len(cluster_headers) == 0:
+        raise ValueError(f"Cannot find medoid of empty cluster {cluster_id}")
+
+    if len(cluster_headers) == 1:
+        return (cluster_id, cluster_indices[0])
+
+    try:
+        msa_provider = MSACachedDistanceProvider(cluster_sequences, cluster_headers)
+
+        min_total_distance = float('inf')
+        medoid_idx = cluster_indices[0]
+
+        # Use local indices for MSA provider
+        for local_candidate_idx, global_candidate_idx in enumerate(cluster_indices):
+            total_distance = 0.0
+
+            for local_other_idx in range(len(cluster_indices)):
+                if local_candidate_idx != local_other_idx:
+                    distance = msa_provider.get_distance(local_candidate_idx, local_other_idx)
+                    total_distance += distance
+
+            if total_distance < min_total_distance:
+                min_total_distance = total_distance
+                medoid_idx = global_candidate_idx
+
+        return (cluster_id, medoid_idx)
+
+    except Exception as e:
+        logger.warning(f"Failed to compute medoid for cluster {cluster_id}: {e}. Using first sequence.")
+        return (cluster_id, cluster_indices[0])
+
+
+def _process_knn_query_worker(query_header: str, query_hits: List) -> Tuple[List[str], List[Tuple[str, float]]]:
+    """Worker function to process one query's K-NN neighborhood.
+
+    Uses global worker state initialized once per worker process.
+
+    Args:
+        query_header: Query medoid header (format: "medoid_N")
+        query_hits: List of BLAST/vsearch hits for this query
+
+    Returns:
+        Tuple of (query_cluster_ids, neighbors_list)
+        where neighbors_list is a list of (cluster_id, distance) tuples
+    """
+    from .distance_providers import MSACachedDistanceProvider
+
+    # Access global worker state
+    unique_sequences = _knn_worker_unique_sequences
+    sequence_to_clusters = _knn_worker_sequence_to_clusters
+    sequence_lookup = _knn_worker_sequence_lookup
+    k_neighbors = _knn_worker_k_neighbors
+    close_threshold = _knn_worker_close_threshold
+
+    try:
+        # Extract unique sequence index from header
+        query_idx = int(query_header.split("_")[1])
+        query_sequence = unique_sequences[query_idx]
+        query_clusters = sequence_to_clusters[query_sequence]
+
+        # Collect all unique sequences in this query's neighborhood for MSA
+        neighborhood_sequences = [query_sequence]
+        neighborhood_headers = [query_header]
+        neighborhood_unique_indices = [query_idx]
+
+        for hit in query_hits:
+            subject_sequence_hash = hit.sequence_hash
+
+            if subject_sequence_hash in sequence_lookup:
+                subject_sequence, subject_original_header, subject_idx = sequence_lookup[subject_sequence_hash][0]
+
+                try:
+                    subject_idx = int(subject_original_header.split("_")[1])
+                    subject_sequence = unique_sequences[subject_idx]
+                except (ValueError, IndexError):
+                    logger.warning(f"Could not parse subject header: {subject_original_header}")
+                    continue
+            else:
+                logger.warning(f"Subject sequence hash not found in lookup: {subject_sequence_hash}")
+                continue
+
+            # Skip self-hits
+            if subject_sequence == query_sequence:
+                continue
+
+            # Add to neighborhood for MSA
+            neighborhood_sequences.append(subject_sequence)
+            neighborhood_headers.append(subject_original_header)
+            neighborhood_unique_indices.append(subject_idx)
+
+        # Create MSA-based distance provider for this query's neighborhood
+        msa_provider = MSACachedDistanceProvider(
+            neighborhood_sequences,
+            neighborhood_headers
+        )
+
+        # Calculate distances using MSA-based provider
+        subject_distances = []
+        for local_subject_idx in range(1, len(neighborhood_sequences)):
+            subject_unique_idx = neighborhood_unique_indices[local_subject_idx]
+            subject_sequence = unique_sequences[subject_unique_idx]
+            subject_clusters = sequence_to_clusters[subject_sequence]
+
+            # Calculate distance from query to this subject using MSA
+            distance = msa_provider.get_distance(0, local_subject_idx)
+
+            # Map distance to all clusters that use this subject medoid
+            for subject_cluster_id in subject_clusters:
+                subject_distances.append((subject_cluster_id, distance))
+
+        # Handle identical medoids (clusters with same sequence as query)
+        for other_cluster_id in query_clusters:
+            for same_medoid_cluster in query_clusters:
+                if same_medoid_cluster != other_cluster_id:
+                    subject_distances.append((same_medoid_cluster, 0.0))
+
+        # Build neighbor list for each cluster that uses this query sequence
+        # We'll return the raw neighbor list and let the main thread assign it
+        neighbors = subject_distances
+
+        # Sort by distance
+        neighbors.sort(key=lambda x: x[1])
+
+        # Apply threshold-based filtering if close_threshold is set
+        if close_threshold is not None:
+            within_threshold = [n for n in neighbors if n[1] <= close_threshold]
+            if len(within_threshold) >= k_neighbors:
+                neighbors = within_threshold
+            else:
+                neighbors = neighbors[:k_neighbors]
+        else:
+            neighbors = neighbors[:k_neighbors]
+
+        return (query_clusters, neighbors)
+
+    except Exception as e:
+        logger.warning(f"Failed to process K-NN query {query_header}: {e}")
+        # Return empty neighbors for this query
+        query_idx = int(query_header.split("_")[1])
+        query_sequence = unique_sequences[query_idx]
+        query_clusters = sequence_to_clusters[query_sequence]
+        return (query_clusters, [])
 
 
 class ClusterGraph:
@@ -79,11 +266,68 @@ class ClusterGraph:
         logger.debug(f"Computing medoids for {len(self.clusters)} clusters")
 
         cluster_items = list(self.clusters.items())
-        iterator = tqdm(cluster_items, desc="Computing cluster medoids", unit="cluster") if self.show_progress else cluster_items
 
-        for cluster_id, cluster_headers in iterator:
-            medoid_idx = self._find_cluster_medoid(cluster_headers)
-            self.medoid_cache[cluster_id] = medoid_idx
+        # Pre-filter cached clusters in main thread to avoid parallelization overhead
+        uncached_clusters = []
+        for cluster_id, cluster_headers in cluster_items:
+            # Handle single-sequence clusters immediately
+            if len(cluster_headers) == 1:
+                medoid_idx = self.headers.index(cluster_headers[0])
+                self.medoid_cache[cluster_id] = medoid_idx
+                continue
+
+            # Check if already cached
+            cache_key = frozenset(cluster_headers)
+            if cache_key in self.medoid_computation_cache:
+                self.medoid_cache[cluster_id] = self.medoid_computation_cache[cache_key]
+            else:
+                uncached_clusters.append((cluster_id, cluster_headers))
+
+        cached_count = len(cluster_items) - len(uncached_clusters)
+        logger.debug(f"Found {cached_count} cached medoids, computing {len(uncached_clusters)} new medoids")
+
+        if not uncached_clusters:
+            logger.debug(f"All medoids retrieved from cache")
+            return
+
+        # Use parallel execution for larger datasets
+        if len(uncached_clusters) >= 20:
+            num_workers = min(os.cpu_count() or 4, len(uncached_clusters))
+            logger.debug(f"Using {num_workers} workers for parallel medoid computation")
+
+            with ProcessPoolExecutor(max_workers=num_workers) as executor:
+                # Submit only uncached clusters with pre-looked-up sequences
+                futures = []
+                for cluster_id, cluster_headers in uncached_clusters:
+                    # Look up sequences and indices in main thread (cheap operation)
+                    cluster_indices = [self.headers.index(h) for h in cluster_headers]
+                    cluster_sequences = [self.sequences[idx] for idx in cluster_indices]
+
+                    future = executor.submit(_compute_medoid_worker, cluster_id, cluster_headers,
+                                           cluster_sequences, cluster_indices)
+                    futures.append(future)
+
+                # Collect results with progress bar
+                if self.show_progress:
+                    iterator = tqdm(as_completed(futures), total=len(futures),
+                                  desc="Computing cluster medoids", unit="cluster")
+                else:
+                    iterator = as_completed(futures)
+
+                for future in iterator:
+                    cluster_id, medoid_idx = future.result()
+                    self.medoid_cache[cluster_id] = medoid_idx
+                    # Update shared cache for future use
+                    cache_key = frozenset(self.clusters[cluster_id])
+                    self.medoid_computation_cache[cache_key] = medoid_idx
+
+        else:
+            # Use sequential execution for small datasets
+            iterator = tqdm(uncached_clusters, desc="Computing cluster medoids", unit="cluster") if self.show_progress else uncached_clusters
+
+            for cluster_id, cluster_headers in iterator:
+                medoid_idx = self._find_cluster_medoid(cluster_headers)
+                self.medoid_cache[cluster_id] = medoid_idx
 
         logger.debug(f"Computed medoids for all clusters")
 
@@ -232,114 +476,150 @@ class ClusterGraph:
 
         # Process search results for each unique medoid sequence
         search_result_items = list(search_results.items())
-        result_iterator = tqdm(search_result_items, desc="Building K-NN graph from results", unit="query") if self.show_progress else search_result_items
 
-        for query_header, query_hits in result_iterator:
-            # Extract unique sequence index from header (format: "medoid_N")
-            query_idx = int(query_header.split("_")[1])
-            query_sequence = unique_sequences[query_idx]
-            query_clusters = sequence_to_clusters[query_sequence]
+        # Use parallel execution for larger datasets
+        if len(search_result_items) >= 20:
+            num_workers = min(os.cpu_count() or 4, len(search_result_items))
+            logger.debug(f"Using {num_workers} workers for parallel K-NN query processing")
 
-            logger.debug(f"Processing search results for {query_header}: {len(query_hits)} hits, "
-                        f"represents clusters {query_clusters}")
+            with ProcessPoolExecutor(max_workers=num_workers,
+                                   initializer=_init_knn_query_worker,
+                                   initargs=(unique_sequences, sequence_to_clusters,
+                                           self.neighborhood_finder.sequence_lookup,
+                                           self.k_neighbors, self.close_threshold)) as executor:
+                # Submit K-NN query processing tasks with minimal data
+                futures = []
+                for query_header, query_hits in search_result_items:
+                    future = executor.submit(_process_knn_query_worker, query_header, query_hits)
+                    futures.append(future)
 
-            # Collect all unique sequences in this query's neighborhood for MSA
-            neighborhood_sequences = [query_sequence]
-            neighborhood_headers = [query_header]
-            neighborhood_unique_indices = [query_idx]
+                # Collect results with progress bar
+                if self.show_progress:
+                    iterator = tqdm(as_completed(futures), total=len(futures),
+                                  desc="Building K-NN graph from results", unit="query")
+                else:
+                    iterator = as_completed(futures)
 
-            for hit in query_hits:
-                # hit.sequence_hash contains the subject sequence hash
-                subject_sequence_hash = hit.sequence_hash
+                for future in iterator:
+                    query_clusters, neighbors = future.result()
 
-                # Look up the subject header from the finder's sequence_lookup
-                if subject_sequence_hash in self.neighborhood_finder.sequence_lookup:
-                    # Get the first match (there could be multiple due to hash collisions)
-                    subject_sequence, subject_original_header, subject_idx = self.neighborhood_finder.sequence_lookup[subject_sequence_hash][0]
+                    # Assign neighbors to all clusters that use this query sequence
+                    for query_cluster_id in query_clusters:
+                        # Filter out self-edges for this cluster
+                        cluster_neighbors = [(neighbor_id, dist) for neighbor_id, dist in neighbors
+                                           if neighbor_id != query_cluster_id]
+                        self.knn_graph[query_cluster_id] = cluster_neighbors
 
-                    # The subject_original_header is the header we used in our search database (e.g., "medoid_0")
-                    # Extract the index to map back to our unique sequences
-                    try:
-                        subject_idx = int(subject_original_header.split("_")[1])
-                        subject_sequence = unique_sequences[subject_idx]
-                    except (ValueError, IndexError):
-                        logger.warning(f"Could not parse subject header: {subject_original_header}")
+        else:
+            # Use sequential execution for small datasets
+            result_iterator = tqdm(search_result_items, desc="Building K-NN graph from results", unit="query") if self.show_progress else search_result_items
+
+            for query_header, query_hits in result_iterator:
+                # Extract unique sequence index from header (format: "medoid_N")
+                query_idx = int(query_header.split("_")[1])
+                query_sequence = unique_sequences[query_idx]
+                query_clusters = sequence_to_clusters[query_sequence]
+
+                logger.debug(f"Processing search results for {query_header}: {len(query_hits)} hits, "
+                            f"represents clusters {query_clusters}")
+
+                # Collect all unique sequences in this query's neighborhood for MSA
+                neighborhood_sequences = [query_sequence]
+                neighborhood_headers = [query_header]
+                neighborhood_unique_indices = [query_idx]
+
+                for hit in query_hits:
+                    # hit.sequence_hash contains the subject sequence hash
+                    subject_sequence_hash = hit.sequence_hash
+
+                    # Look up the subject header from the finder's sequence_lookup
+                    if subject_sequence_hash in self.neighborhood_finder.sequence_lookup:
+                        # Get the first match (there could be multiple due to hash collisions)
+                        subject_sequence, subject_original_header, subject_idx = self.neighborhood_finder.sequence_lookup[subject_sequence_hash][0]
+
+                        # The subject_original_header is the header we used in our search database (e.g., "medoid_0")
+                        # Extract the index to map back to our unique sequences
+                        try:
+                            subject_idx = int(subject_original_header.split("_")[1])
+                            subject_sequence = unique_sequences[subject_idx]
+                        except (ValueError, IndexError):
+                            logger.warning(f"Could not parse subject header: {subject_original_header}")
+                            continue
+                    else:
+                        logger.warning(f"Subject sequence hash not found in lookup: {subject_sequence_hash}")
                         continue
-                else:
-                    logger.warning(f"Subject sequence hash not found in lookup: {subject_sequence_hash}")
-                    continue
 
-                # Skip self-hits (same sequence)
-                if subject_sequence == query_sequence:
-                    logger.debug(f"Skipping self-hit: {query_header} -> {subject_original_header}")
-                    continue
+                    # Skip self-hits (same sequence)
+                    if subject_sequence == query_sequence:
+                        logger.debug(f"Skipping self-hit: {query_header} -> {subject_original_header}")
+                        continue
 
-                # Add to neighborhood for MSA
-                neighborhood_sequences.append(subject_sequence)
-                neighborhood_headers.append(subject_original_header)
-                neighborhood_unique_indices.append(subject_idx)
+                    # Add to neighborhood for MSA
+                    neighborhood_sequences.append(subject_sequence)
+                    neighborhood_headers.append(subject_original_header)
+                    neighborhood_unique_indices.append(subject_idx)
 
-            # Create MSA-based distance provider for this query's neighborhood
-            # This provides consistent alignment across all medoids in the BLAST/vsearch neighborhood
-            from .distance_providers import MSACachedDistanceProvider
-            logger.debug(f"Creating MSA for {len(neighborhood_sequences)} medoids in {query_header}'s neighborhood")
+                # Create MSA-based distance provider for this query's neighborhood
+                # This provides consistent alignment across all medoids in the BLAST/vsearch neighborhood
+                from .distance_providers import MSACachedDistanceProvider
+                logger.debug(f"Creating MSA for {len(neighborhood_sequences)} medoids in {query_header}'s neighborhood")
 
-            msa_provider = MSACachedDistanceProvider(
-                neighborhood_sequences,
-                neighborhood_headers
-            )
+                msa_provider = MSACachedDistanceProvider(
+                    neighborhood_sequences,
+                    neighborhood_headers
+                )
 
-            # Calculate distances using MSA-based provider
-            subject_distances = []
-            for local_subject_idx in range(1, len(neighborhood_sequences)):  # Start at 1 to skip query itself
-                subject_unique_idx = neighborhood_unique_indices[local_subject_idx]
-                subject_sequence = unique_sequences[subject_unique_idx]
-                subject_clusters = sequence_to_clusters[subject_sequence]
+                # Calculate distances using MSA-based provider
+                subject_distances = []
+                for local_subject_idx in range(1, len(neighborhood_sequences)):  # Start at 1 to skip query itself
+                    subject_unique_idx = neighborhood_unique_indices[local_subject_idx]
+                    subject_sequence = unique_sequences[subject_unique_idx]
+                    subject_clusters = sequence_to_clusters[subject_sequence]
 
-                # Calculate distance from query (local index 0) to this subject using MSA
-                distance = msa_provider.get_distance(0, local_subject_idx)
+                    # Calculate distance from query (local index 0) to this subject using MSA
+                    distance = msa_provider.get_distance(0, local_subject_idx)
 
-                # Map distance to all clusters that use this subject medoid
-                for subject_cluster_id in subject_clusters:
-                    if subject_cluster_id in self.medoid_cache:
-                        logger.debug(f"MSA distance: {query_header} -> medoid_{subject_unique_idx}, "
-                                   f"distance={distance:.4f}, subject_cluster={subject_cluster_id}")
-                        subject_distances.append((subject_cluster_id, distance))
+                    # Map distance to all clusters that use this subject medoid
+                    for subject_cluster_id in subject_clusters:
+                        if subject_cluster_id in self.medoid_cache:
+                            logger.debug(f"MSA distance: {query_header} -> medoid_{subject_unique_idx}, "
+                                       f"distance={distance:.4f}, subject_cluster={subject_cluster_id}")
+                            subject_distances.append((subject_cluster_id, distance))
+                        else:
+                            logger.warning(f"Could not find medoid for subject cluster {subject_cluster_id}")
+
+                # Handle identical medoids (clusters with same sequence as query)
+                for other_cluster_id in query_clusters:
+                    # For identical medoids, add all other clusters with same medoid at distance 0.0
+                    for same_medoid_cluster in query_clusters:
+                        if same_medoid_cluster != other_cluster_id:
+                            subject_distances.append((same_medoid_cluster, 0.0))
+
+                # Assign neighbors to all clusters that use this query sequence
+                for query_cluster_id in query_clusters:
+                    # Get distances to all other clusters (excluding self)
+                    neighbors = [(subject_id, dist) for subject_id, dist in subject_distances
+                               if subject_id != query_cluster_id]
+
+                    # Sort by distance
+                    neighbors.sort(key=lambda x: x[1])
+
+                    # Apply threshold-based filtering if close_threshold is set
+                    if self.close_threshold is not None:
+                        within_threshold = [n for n in neighbors if n[1] <= self.close_threshold]
+                        if len(within_threshold) >= self.k_neighbors:
+                            # Dense region: use all neighbors within threshold
+                            self.knn_graph[query_cluster_id] = within_threshold
+                            logger.debug(f"Cluster {query_cluster_id}: {len(within_threshold)} neighbors within threshold "
+                                       f"(>= min K={self.k_neighbors})")
+                        else:
+                            # Sparse region: use at least k_neighbors for connectivity
+                            self.knn_graph[query_cluster_id] = neighbors[:self.k_neighbors]
+                            logger.debug(f"Cluster {query_cluster_id}: {len(within_threshold)} neighbors within threshold, "
+                                       f"using min K={self.k_neighbors} for connectivity")
                     else:
-                        logger.warning(f"Could not find medoid for subject cluster {subject_cluster_id}")
-
-            # Handle identical medoids (clusters with same sequence as query)
-            for other_cluster_id in query_clusters:
-                # For identical medoids, add all other clusters with same medoid at distance 0.0
-                for same_medoid_cluster in query_clusters:
-                    if same_medoid_cluster != other_cluster_id:
-                        subject_distances.append((same_medoid_cluster, 0.0))
-
-            # Assign neighbors to all clusters that use this query sequence
-            for query_cluster_id in query_clusters:
-                # Get distances to all other clusters (excluding self)
-                neighbors = [(subject_id, dist) for subject_id, dist in subject_distances
-                           if subject_id != query_cluster_id]
-
-                # Sort by distance
-                neighbors.sort(key=lambda x: x[1])
-
-                # Apply threshold-based filtering if close_threshold is set
-                if self.close_threshold is not None:
-                    within_threshold = [n for n in neighbors if n[1] <= self.close_threshold]
-                    if len(within_threshold) >= self.k_neighbors:
-                        # Dense region: use all neighbors within threshold
-                        self.knn_graph[query_cluster_id] = within_threshold
-                        logger.debug(f"Cluster {query_cluster_id}: {len(within_threshold)} neighbors within threshold "
-                                   f"(>= min K={self.k_neighbors})")
-                    else:
-                        # Sparse region: use at least k_neighbors for connectivity
+                        # Original behavior: exactly K neighbors
                         self.knn_graph[query_cluster_id] = neighbors[:self.k_neighbors]
-                        logger.debug(f"Cluster {query_cluster_id}: {len(within_threshold)} neighbors within threshold, "
-                                   f"using min K={self.k_neighbors} for connectivity")
-                else:
-                    # Original behavior: exactly K neighbors
-                    self.knn_graph[query_cluster_id] = neighbors[:self.k_neighbors]
 
         neighbor_counts = [len(neighbors) for neighbors in self.knn_graph.values()]
         if neighbor_counts:
