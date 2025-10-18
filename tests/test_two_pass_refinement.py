@@ -28,6 +28,7 @@ class TestExecuteRefinementOperations:
         }
 
         # Two non-overlapping operations that actually change the clusters
+        # POST-refinement signature format: (sequences, clustering_pattern)
         operations = [
             {
                 'seed_id': 'cluster_A',
@@ -36,7 +37,10 @@ class TestExecuteRefinementOperations:
                     'cluster_A_split1': ['seq1'],
                     'cluster_A_split2': ['seq2']
                 },  # Split cluster A
-                'scope_signature': frozenset(['seq1', 'seq2']),
+                'scope_signature': (
+                    frozenset(['seq1', 'seq2']),
+                    frozenset([frozenset(['seq1']), frozenset(['seq2'])])
+                ),
                 'ami': 0.5  # Changed (split)
             },
             {
@@ -46,7 +50,10 @@ class TestExecuteRefinementOperations:
                     'cluster_C_split1': ['seq5'],
                     'cluster_C_split2': ['seq6']
                 },  # Split cluster C
-                'scope_signature': frozenset(['seq5', 'seq6']),
+                'scope_signature': (
+                    frozenset(['seq5', 'seq6']),
+                    frozenset([frozenset(['seq5']), frozenset(['seq6'])])
+                ),
                 'ami': 0.5  # Changed (split)
             }
         ]
@@ -64,6 +71,8 @@ class TestExecuteRefinementOperations:
         assert 'cluster_B' in next_clusters  # Unchanged cluster preserved
         assert len(next_clusters) == 5
         assert changes_made, "Changes should be recorded"
+        # New behavior: both scopes should be cached
+        assert len(converged) == 2, "Both scopes should be cached"
 
     def test_overlapping_operations_skip_second(self):
         """Test that overlapping operations skip the second one."""
@@ -73,6 +82,7 @@ class TestExecuteRefinementOperations:
         }
 
         # Two operations that try to modify cluster_A (both split it)
+        # POST-refinement signature format: (sequences, clustering_pattern)
         operations = [
             {
                 'seed_id': 'cluster_A',
@@ -81,7 +91,10 @@ class TestExecuteRefinementOperations:
                     'cluster_A_v1_1': ['seq1'],
                     'cluster_A_v1_2': ['seq2']
                 },
-                'scope_signature': frozenset(['seq1', 'seq2']),
+                'scope_signature': (
+                    frozenset(['seq1', 'seq2']),
+                    frozenset([frozenset(['seq1']), frozenset(['seq2'])])
+                ),
                 'ami': 0.5  # Changed
             },
             {
@@ -91,7 +104,10 @@ class TestExecuteRefinementOperations:
                     'cluster_A_v2_1': ['seq1'],
                     'cluster_A_v2_2': ['seq2']
                 },
-                'scope_signature': frozenset(['seq1', 'seq2']),
+                'scope_signature': (
+                    frozenset(['seq1', 'seq2']),
+                    frozenset([frozenset(['seq1']), frozenset(['seq2'])])
+                ),
                 'ami': 0.5  # Changed
             }
         ]
@@ -108,21 +124,28 @@ class TestExecuteRefinementOperations:
         assert 'cluster_A_v2_2' not in next_clusters
         assert 'cluster_B' in next_clusters
         assert len(next_clusters) == 3  # 2 from split A + cluster_B
+        # New behavior: first operation should be cached (second was skipped)
+        assert len(converged) == 1, "First operation should be cached"
 
     def test_converged_scope_detected(self):
-        """Test that converged scopes are detected."""
+        """Test that converged scopes are detected and cached."""
         current_clusters = {
             'cluster_A': ['seq1', 'seq2'],
             'cluster_B': ['seq3', 'seq4']
         }
 
         # Operation that produces identical output (converged, AMI=1.0)
+        # POST-refinement signature format: (sequences, clustering_pattern)
+        post_refinement_clustering = frozenset([frozenset(['seq1', 'seq2'])])
         operations = [
             {
                 'seed_id': 'cluster_A',
                 'input_cluster_ids': {'cluster_A'},
                 'output_clusters': {'cluster_A_same': ['seq1', 'seq2']},  # Same content
-                'scope_signature': frozenset(['seq1', 'seq2']),
+                'scope_signature': (
+                    frozenset(['seq1', 'seq2']),
+                    post_refinement_clustering
+                ),
                 'ami': 1.0  # Perfect agreement (converged)
             }
         ]
@@ -132,25 +155,33 @@ class TestExecuteRefinementOperations:
             operations=operations
         )
 
-        # Should detect convergence
+        # Should detect convergence and cache
         assert len(converged) == 1
-        assert frozenset(['seq1', 'seq2']) in converged
+        expected_signature = (frozenset(['seq1', 'seq2']), post_refinement_clustering)
+        assert expected_signature in converged, "POST-refinement signature should be cached"
         assert not changes_made, "No changes should be recorded for converged scope"
 
     def test_merge_operation_marks_changes(self):
-        """Test that merge operations are marked as changes."""
+        """Test that merge operations are marked as changes and cached."""
         current_clusters = {
             'cluster_A': ['seq1', 'seq2'],
             'cluster_B': ['seq3', 'seq4']
         }
 
         # Operation that merges two clusters
+        # POST-refinement signature format: (sequences, clustering_pattern)
+        post_refinement_clustering = frozenset([
+            frozenset(['seq1', 'seq2', 'seq3', 'seq4'])  # Merged cluster
+        ])
         operations = [
             {
                 'seed_id': 'cluster_A',
                 'input_cluster_ids': {'cluster_A', 'cluster_B'},
                 'output_clusters': {'cluster_merged': ['seq1', 'seq2', 'seq3', 'seq4']},
-                'scope_signature': frozenset(['seq1', 'seq2', 'seq3', 'seq4']),
+                'scope_signature': (
+                    frozenset(['seq1', 'seq2', 'seq3', 'seq4']),
+                    post_refinement_clustering
+                ),
                 'ami': 0.7  # Changed (merged)
             }
         ]
@@ -162,7 +193,13 @@ class TestExecuteRefinementOperations:
 
         # Should mark as changed
         assert changes_made, "Merge should be marked as a change"
-        assert len(converged) == 0, "Merge should not be marked as converged"
+        # New behavior: always cache POST-refinement signature (deterministic)
+        assert len(converged) == 1, "Scope should be cached after refinement"
+        expected_signature = (
+            frozenset(['seq1', 'seq2', 'seq3', 'seq4']),
+            post_refinement_clustering
+        )
+        assert expected_signature in converged, "POST-refinement signature should be cached"
         assert 'cluster_merged' in next_clusters
         assert len(next_clusters) == 1
 
@@ -178,19 +215,26 @@ class TestEdgeCases:
         }
 
         # Operations that produce identical output (converged immediately)
+        # POST-refinement signature format: (sequences, clustering_pattern)
         operations = [
             {
                 'seed_id': 'cluster_A',
                 'input_cluster_ids': {'cluster_A'},
                 'output_clusters': {'cluster_A_same': ['seq1', 'seq2']},
-                'scope_signature': frozenset(['seq1', 'seq2']),
+                'scope_signature': (
+                    frozenset(['seq1', 'seq2']),
+                    frozenset([frozenset(['seq1', 'seq2'])])
+                ),
                 'ami': 1.0  # Perfect agreement
             },
             {
                 'seed_id': 'cluster_B',
                 'input_cluster_ids': {'cluster_B'},
                 'output_clusters': {'cluster_B_same': ['seq3', 'seq4']},
-                'scope_signature': frozenset(['seq3', 'seq4']),
+                'scope_signature': (
+                    frozenset(['seq3', 'seq4']),
+                    frozenset([frozenset(['seq3', 'seq4'])])
+                ),
                 'ami': 1.0  # Perfect agreement
             }
         ]
@@ -200,7 +244,7 @@ class TestEdgeCases:
             operations=operations
         )
 
-        # Both should be detected as converged
+        # Both should be detected as converged and cached
         assert len(converged) == 2
         assert not changes_made
 
@@ -212,12 +256,16 @@ class TestEdgeCases:
         }
 
         # Operation referencing cluster that doesn't exist
+        # POST-refinement signature format: (sequences, clustering_pattern)
         operations = [
             {
                 'seed_id': 'cluster_NONEXISTENT',
                 'input_cluster_ids': {'cluster_NONEXISTENT'},
                 'output_clusters': {'cluster_new': ['seq5', 'seq6']},
-                'scope_signature': frozenset(['seq5', 'seq6']),
+                'scope_signature': (
+                    frozenset(['seq5', 'seq6']),
+                    frozenset([frozenset(['seq5', 'seq6'])])
+                ),
                 'ami': 0.8  # Changed
             }
         ]
@@ -232,6 +280,8 @@ class TestEdgeCases:
         assert 'cluster_B' in next_clusters
         assert 'cluster_new' not in next_clusters
         assert not changes_made
+        # No convergence since operation was skipped
+        assert len(converged) == 0, "Skipped operation should not be cached"
 
 
 # Note: Tests for build_refinement_scope() require creating real sequences and a ClusterGraph,

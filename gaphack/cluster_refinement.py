@@ -884,7 +884,7 @@ def execute_refinement_operations(
         seed_id = op['seed_id']
         input_cluster_ids = op['input_cluster_ids']
         output_clusters = op['output_clusters']
-        scope_signature = op['scope_signature']
+        scope_signature = op['scope_signature']  # POST-refinement signature
         ami = op['ami']
 
         # Check if all input clusters still exist (not consumed by earlier op)
@@ -894,13 +894,17 @@ def execute_refinement_operations(
             logger.info(f"Skipping operation for seed {seed_id} - inputs already consumed")
             continue
 
-        # Check convergence: AMI == 1.0 means perfect agreement (no changes)
+        # Always cache the POST-refinement signature
+        # This optimization is valid because gapHACk is deterministic on sequences
+        # Cache semantics: "Refining these sequences produces this clustering"
+        # Confirmed empirically through extensive testing
+        new_converged_scopes.add(scope_signature)
+
+        # Check if any changes needed: AMI == 1.0 means perfect agreement (no changes)
         if ami == 1.0:
-            # No changes - mark scope as converged
-            new_converged_scopes.add(scope_signature)
-            # Extract sequence count and cluster count from signature tuple
+            # No changes - clustering is already in stable state
             seq_set, cluster_pattern = scope_signature
-            logger.debug(f"Scope converged (AMI=1.0): {len(seq_set)} sequences, {len(cluster_pattern)} clusters")
+            logger.debug(f"Scope stable (AMI=1.0): {len(seq_set)} sequences, {len(cluster_pattern)} clusters")
             continue
 
         # Apply refinement: remove inputs, add outputs
@@ -1121,23 +1125,25 @@ def iterative_refinement(
                 continue
 
             # Check if this scope has already converged
+            # Pre-refinement signature is used for lookup to determine if current state
+            # matches a previously observed stable output (post-refinement clustering)
             # Signature includes both sequence set AND current clustering pattern to handle
             # cases where overlapping scopes change the clustering between iterations
-            scope_clustering_pattern = set()
+            pre_refinement_clustering_pattern = set()
             for cluster_id in scope_cluster_ids:
                 if cluster_id in current_clusters:
                     # Add frozenset of headers for this cluster to capture the grouping
                     cluster_headers_in_scope = current_clusters[cluster_id]
                     if cluster_headers_in_scope:  # Only add non-empty clusters
-                        scope_clustering_pattern.add(frozenset(cluster_headers_in_scope))
+                        pre_refinement_clustering_pattern.add(frozenset(cluster_headers_in_scope))
 
             # Combined signature: (sequences, clustering_pattern)
-            scope_signature = (
+            pre_refinement_signature = (
                 frozenset(scope_headers),
-                frozenset(scope_clustering_pattern)
+                frozenset(pre_refinement_clustering_pattern)
             )
 
-            if scope_signature in converged_scopes:
+            if pre_refinement_signature in converged_scopes:
                 iteration_stats['seeds_skipped_convergence'] += 1
                 # Track sequences in this converged scope
                 unique_sequences_converged.update(scope_headers)
@@ -1145,8 +1151,8 @@ def iterative_refinement(
                 if seed_id in convergence_metrics_cache:
                     convergence_metrics_accumulator[seed_id] = convergence_metrics_cache[seed_id]
                 logger.info(f"Refinement Iter {global_iteration} ({seeds_processed} of {total_clusters}): "
-                          f"Skipping seed {seed_id} - prior convergence detected ({len(scope_headers)} sequences, "
-                          f"{len(scope_clustering_pattern)} clusters)")
+                          f"Skipping seed {seed_id} - scope converged ({len(scope_headers)} sequences, "
+                          f"{len(pre_refinement_clustering_pattern)} clusters)")
                 # Don't mark as processed - we didn't actually process anything
                 continue
 
@@ -1176,6 +1182,19 @@ def iterative_refinement(
                 convergence_metrics_accumulator.update(scope_convergence_metrics)
                 # Update cache with fresh metrics for future iterations
                 convergence_metrics_cache.update(scope_convergence_metrics)
+
+            # Create POST-refinement signature for caching
+            # This represents the stable output produced by gapHACk for these sequences
+            # Cache semantics: "Refining these sequences produces this clustering"
+            post_refinement_clustering_pattern = set()
+            for cluster_headers_list in refined_clusters.values():
+                if cluster_headers_list:  # Only add non-empty clusters
+                    post_refinement_clustering_pattern.add(frozenset(cluster_headers_list))
+
+            post_refinement_signature = (
+                frozenset(scope_headers),
+                frozenset(post_refinement_clustering_pattern)
+            )
 
             # Track statistics for this refinement
             num_input = len(scope_cluster_ids)
@@ -1215,11 +1234,12 @@ def iterative_refinement(
                        f"{num_input} -> {num_output} clusters.  {gap_info_str}.  AMI {ami:.3f}")
 
             # Store operation for batch execution
+            # Note: scope_signature is the POST-refinement signature (deterministic output)
             refinement_operations.append({
                 'seed_id': seed_id,
                 'input_cluster_ids': set(scope_cluster_ids),
                 'output_clusters': refined_clusters,
-                'scope_signature': scope_signature,
+                'scope_signature': post_refinement_signature,
                 'ami': ami
             })
 
