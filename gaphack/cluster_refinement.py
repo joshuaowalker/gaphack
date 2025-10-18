@@ -251,6 +251,205 @@ def compute_convergence_metrics(
     }
 
 
+def compute_scope_convergence_metrics(
+    output_clusters: Dict[str, List[str]],
+    scope_cluster_ids: List[str],
+    distance_matrix: np.ndarray,
+    scope_headers: List[str],
+    target_percentile: int = 95,
+    max_neighbors: int = 3,
+    max_lump: Optional[float] = None
+) -> Dict[str, Dict[str, float]]:
+    """Compute convergence metrics for output clusters using precomputed distance matrix.
+
+    This function reuses the distance matrix already computed during refinement to
+    calculate per-cluster gaps without requiring additional MSA computations.
+
+    Finds K nearest neighbors within the scope using the distance matrix directly,
+    since output clusters have new IDs that don't exist in the proximity graph yet.
+
+    Args:
+        output_clusters: Clusters produced by refinement (cluster_id -> headers)
+        scope_cluster_ids: All cluster IDs in the refinement scope (not used, kept for compatibility)
+        distance_matrix: Precomputed distance matrix for scope sequences
+        scope_headers: Headers for sequences in scope (indices match distance_matrix)
+        target_percentile: Percentile for gap calculation (default: 95)
+        max_neighbors: Maximum number of neighbor clusters to use (default: 3)
+        max_lump: Maximum lump threshold, used as inter-cluster estimate when no neighbors exist (default: None)
+
+    Returns:
+        Dict mapping cluster_id -> {gap, intra_upper, inter_lower, cluster_size, num_neighbors}
+    """
+    header_to_scope_idx = {h: i for i, h in enumerate(scope_headers)}
+    per_cluster_metrics = {}
+
+    # Build mapping of output clusters in scope
+    output_cluster_headers_in_scope = {}
+    for cluster_id, cluster_headers in output_clusters.items():
+        headers_in_scope = [h for h in cluster_headers if h in header_to_scope_idx]
+        if headers_in_scope:
+            output_cluster_headers_in_scope[cluster_id] = headers_in_scope
+
+    for cluster_id, cluster_headers in output_cluster_headers_in_scope.items():
+        cluster_size = len(cluster_headers)
+
+        # Get indices in distance matrix for this cluster
+        cluster_indices = [header_to_scope_idx[h] for h in cluster_headers]
+
+        # 1. Compute intra-cluster distances
+        intra_distances = []
+        if len(cluster_indices) > 1:
+            for i in range(len(cluster_indices)):
+                for j in range(i + 1, len(cluster_indices)):
+                    idx1, idx2 = cluster_indices[i], cluster_indices[j]
+                    dist = distance_matrix[idx1, idx2]
+                    if not np.isnan(dist):
+                        intra_distances.append(dist)
+
+        # Singleton case: intra = 0 (perfect cohesion)
+        if not intra_distances:
+            intra_upper = 0.0
+        else:
+            intra_upper = np.percentile(intra_distances, target_percentile)
+            if np.isnan(intra_upper):
+                intra_upper = 0.0
+
+        # 2. Find neighbor clusters within scope
+        # Since output clusters have new IDs that don't exist in proximity graph yet,
+        # we use distance matrix to find K nearest neighbors within the scope
+
+        # Compute distances from this cluster to all other clusters in scope
+        cluster_to_other_distances = []
+        for other_id in output_cluster_headers_in_scope.keys():
+            if other_id == cluster_id:
+                continue  # Skip self
+
+            other_headers = output_cluster_headers_in_scope[other_id]
+            other_indices = [header_to_scope_idx[h] for h in other_headers]
+
+            # Compute minimum distance between this cluster and other cluster
+            min_dist = float('inf')
+            for cluster_idx in cluster_indices:
+                for other_idx in other_indices:
+                    dist = distance_matrix[cluster_idx, other_idx]
+                    if not np.isnan(dist) and dist < min_dist:
+                        min_dist = dist
+
+            if min_dist != float('inf'):
+                cluster_to_other_distances.append((other_id, min_dist))
+
+        # Sort by distance and select K nearest
+        cluster_to_other_distances.sort(key=lambda x: x[1])
+        neighbor_cluster_ids = [
+            other_id for other_id, _ in cluster_to_other_distances[:max_neighbors]
+        ]
+
+        if not neighbor_cluster_ids:
+            # No neighbors available - use max_lump as conservative estimate if provided
+            if max_lump is not None:
+                inter_lower = max_lump
+                logger.debug(f"Cluster {cluster_id}: no neighbors in scope, using max_lump={max_lump:.4f} as inter-cluster estimate")
+            else:
+                # No max_lump provided - skip this cluster
+                logger.debug(f"Cluster {cluster_id}: no neighbors in scope and no max_lump provided, skipping")
+                continue
+        else:
+            # 3. Compute inter-cluster distances to selected neighbors
+            inter_distances = []
+            for neighbor_id in neighbor_cluster_ids:
+                neighbor_headers = output_cluster_headers_in_scope[neighbor_id]
+                neighbor_indices = [header_to_scope_idx[h] for h in neighbor_headers]
+
+                for cluster_idx in cluster_indices:
+                    for neighbor_idx in neighbor_indices:
+                        dist = distance_matrix[cluster_idx, neighbor_idx]
+                        if not np.isnan(dist):
+                            inter_distances.append(dist)
+
+            if not inter_distances:
+                logger.debug(f"Cluster {cluster_id}: no valid inter-cluster distances")
+                continue
+
+            inter_lower = np.percentile(inter_distances, 100 - target_percentile)
+            if np.isnan(inter_lower):
+                logger.debug(f"Cluster {cluster_id}: NaN inter_lower")
+                continue
+
+        # 4. Compute gap
+        gap = inter_lower - intra_upper
+
+        per_cluster_metrics[cluster_id] = {
+            'gap': float(gap),
+            'intra_upper': float(intra_upper),
+            'inter_lower': float(inter_lower),
+            'cluster_size': cluster_size,
+            'num_neighbors': len(neighbor_cluster_ids)
+        }
+
+    return per_cluster_metrics
+
+
+def aggregate_convergence_metrics(
+    per_cluster_metrics: Dict[str, Dict[str, float]]
+) -> Dict[str, float]:
+    """Aggregate per-cluster metrics into summary statistics.
+
+    Args:
+        per_cluster_metrics: Dict mapping cluster_id -> metric dict with keys:
+            - gap: barcode gap value
+            - cluster_size: number of sequences in cluster
+            - (other fields ignored for aggregation)
+
+    Returns:
+        Summary metrics:
+        - mean_gap: Unweighted mean gap across clusters
+        - weighted_gap: Mean gap weighted by cluster size
+        - gap_coverage: Fraction of clusters with positive gap
+        - gap_coverage_sequences: Fraction of sequences in positive-gap clusters
+        - clusters_with_metrics: Number of clusters with computed metrics
+    """
+    if not per_cluster_metrics:
+        logger.warning("No cluster metrics to aggregate")
+        return {
+            'mean_gap': 0.0,
+            'weighted_gap': 0.0,
+            'gap_coverage': 0.0,
+            'gap_coverage_sequences': 0.0,
+            'clusters_with_metrics': 0
+        }
+
+    gaps = []
+    sizes = []
+    positive_gap_clusters = 0
+    positive_gap_sequences = 0
+    total_sequences = 0
+
+    for cluster_id, metrics in per_cluster_metrics.items():
+        gap = metrics['gap']
+        size = metrics['cluster_size']
+
+        gaps.append(gap)
+        sizes.append(size)
+        total_sequences += size
+
+        if gap > 0:
+            positive_gap_clusters += 1
+            positive_gap_sequences += size
+
+    mean_gap = np.mean(gaps)
+    weighted_gap = np.average(gaps, weights=sizes)
+    gap_coverage = positive_gap_clusters / len(gaps)
+    gap_coverage_sequences = positive_gap_sequences / total_sequences if total_sequences > 0 else 0.0
+
+    return {
+        'mean_gap': float(mean_gap),
+        'weighted_gap': float(weighted_gap),
+        'gap_coverage': float(gap_coverage),
+        'gap_coverage_sequences': float(gap_coverage_sequences),
+        'clusters_with_metrics': len(per_cluster_metrics)
+    }
+
+
 def compute_ami_for_refinement(input_clusters: Set[str], output_clusters: Dict[str, List[str]],
                                 all_clusters: Dict[str, List[str]]) -> float:
     """Compute adjusted mutual information between input and output clusters.
@@ -542,7 +741,8 @@ def apply_full_gaphack_to_scope_with_metadata(scope_sequences: List[str], scope_
                                               min_split: float = 0.005, max_lump: float = 0.02,
                                               target_percentile: int = 95, cluster_id_generator=None,
                                               quiet: bool = True, gap_method: str = 'global',
-                                              alpha: float = 0.0) -> Tuple[Dict[str, List[str]], Dict]:
+                                              alpha: float = 0.0,
+                                              return_distance_data: bool = False) -> Tuple[Dict[str, List[str]], Dict]:
     """Apply full gapHACk clustering to a scope of sequences, returning clusters and metadata.
 
     Args:
@@ -555,9 +755,11 @@ def apply_full_gaphack_to_scope_with_metadata(scope_sequences: List[str], scope_
         quiet: If True, suppress verbose logging (default: True)
         gap_method: Gap calculation method ('global' or 'local')
         alpha: Parsimony parameter for local gap (default: 0.0)
+        return_distance_data: If True, include distance matrix in metadata for reuse (default: False)
 
     Returns:
-        Tuple of (cluster_dict, metadata_dict) where metadata includes gap_size
+        Tuple of (cluster_dict, metadata_dict) where metadata includes gap_size and
+        optionally distance_matrix and scope_headers if return_distance_data=True
     """
     # Create MSA-based distance provider for scope
     # This provides consistent alignment across all sequences in the scope
@@ -618,7 +820,16 @@ def apply_full_gaphack_to_scope_with_metadata(scope_sequences: List[str], scope_
     gap_size = metadata.get('best_config', {}).get('gap_size', float('-inf'))
 
     logger.debug(f"Classic gapHACk on scope: {len(scope_sequences)} sequences → {len(clusters)} clusters, gap={gap_size:.4f}")
-    return clusters, {'gap_size': gap_size, 'metadata': metadata}
+
+    # Build metadata dict
+    result_metadata = {'gap_size': gap_size, 'metadata': metadata}
+
+    # Include distance data if requested
+    if return_distance_data:
+        result_metadata['distance_matrix'] = distance_matrix
+        result_metadata['scope_headers'] = scope_headers
+
+    return clusters, result_metadata
 
 
 def apply_full_gaphack_to_scope(scope_sequences: List[str], scope_headers: List[str], min_split: float = 0.005,
@@ -794,6 +1005,10 @@ def iterative_refinement(
         sequence_recluster_count = defaultdict(int)  # sequence_id -> count
         converged_scopes = set()  # Set[frozenset[sequence_id]]
 
+    # Initialize convergence metrics cache (persists across iterations)
+    # Maps cluster_id -> metrics dict for reuse in skipped seeds
+    convergence_metrics_cache = {}
+
     while global_iteration < max_iterations:
         iteration_start = time.time()
         global_iteration += 1
@@ -811,28 +1026,8 @@ def iterative_refinement(
         graph_time = time.time() - graph_start
         timing['proximity_graphs'].append(graph_time)
 
-        # Compute convergence metrics at start of iteration (using fresh graph)
-        gap_metrics_start = time.time()
-        convergence_metrics = compute_convergence_metrics(
-            clusters=current_clusters,
-            proximity_graph=proximity_graph,
-            sequences=sequences,
-            headers=headers,
-            target_percentile=target_percentile,
-            show_progress=show_progress
-        )
-        gap_metrics_time = time.time() - gap_metrics_start
-
-        # Log aggregate gap metrics (pre-refinement)
-        mean_gap = convergence_metrics['mean_gap']
-        weighted_gap = convergence_metrics['weighted_gap']
-        gap_coverage = convergence_metrics['gap_coverage']
-        gap_coverage_sequences = convergence_metrics['gap_coverage_sequences']
-        total_sequences_in_clusters = sum(len(headers_list) for headers_list in current_clusters.values())
-        positive_gap_sequence_count = int(gap_coverage_sequences * total_sequences_in_clusters)
-
-        logger.info(f"Aggregate gap (pre-refinement): mean={mean_gap:.4f}, weighted={weighted_gap:.4f}, "
-                   f"cluster coverage={gap_coverage*100:.1f}%, sequence coverage={gap_coverage_sequences*100:.1f}%")
+        # Initialize incremental convergence metrics accumulator for this iteration
+        convergence_metrics_accumulator = {}
 
         # Track which clusters have been processed this iteration
         processed_this_iteration = set()
@@ -844,7 +1039,6 @@ def iterative_refinement(
         iteration_stats = {
             'best_gap': float('-inf'),
             'best_gap_info': None,
-            'convergence_metrics': convergence_metrics,  # Store for checkpointing
             'seeds_processed': 0,
             'seeds_skipped_already_processed': 0,  # Seed was in a processed scope
             'seeds_skipped_neighborhood_changed': 0,  # Neighborhood modified this iteration
@@ -919,6 +1113,9 @@ def iterative_refinement(
                 iteration_stats['seeds_skipped_neighborhood_changed'] += 1
                 # Track sequences in this scope (will be deduplicated against processed later)
                 unique_sequences_neighborhood_changed.update(scope_headers)
+                # Reuse cached convergence metrics for the seed only (neighbors will be seeds later)
+                if seed_id in convergence_metrics_cache:
+                    convergence_metrics_accumulator[seed_id] = convergence_metrics_cache[seed_id]
                 logger.info(f"Refinement Iter {global_iteration} ({seeds_processed} of {total_clusters}): "
                           f"Skipping seed {seed_id} - neighborhood changed")
                 continue
@@ -944,21 +1141,41 @@ def iterative_refinement(
                 iteration_stats['seeds_skipped_convergence'] += 1
                 # Track sequences in this converged scope
                 unique_sequences_converged.update(scope_headers)
+                # Reuse cached convergence metrics for the seed only (neighbors will be seeds later)
+                if seed_id in convergence_metrics_cache:
+                    convergence_metrics_accumulator[seed_id] = convergence_metrics_cache[seed_id]
                 logger.info(f"Refinement Iter {global_iteration} ({seeds_processed} of {total_clusters}): "
                           f"Skipping seed {seed_id} - prior convergence detected ({len(scope_headers)} sequences, "
                           f"{len(scope_clustering_pattern)} clusters)")
                 # Don't mark as processed - we didn't actually process anything
                 continue
 
-            # Apply full gapHACk to scope and get metadata
+            # Apply full gapHACk to scope and get metadata (including distance matrix for metrics)
             refined_clusters, metadata = apply_full_gaphack_to_scope_with_metadata(
                 scope_sequences, scope_headers,
                 min_split, max_lump, target_percentile,
                 cluster_id_generator=cluster_id_generator,
                 quiet=True,
                 gap_method=gap_method,
-                alpha=alpha
+                alpha=alpha,
+                return_distance_data=True  # Request distance data for incremental metrics
             )
+
+            # Compute convergence metrics for output clusters using scope distance matrix
+            if 'distance_matrix' in metadata and 'scope_headers' in metadata:
+                scope_convergence_metrics = compute_scope_convergence_metrics(
+                    output_clusters=refined_clusters,
+                    scope_cluster_ids=scope_cluster_ids,
+                    distance_matrix=metadata['distance_matrix'],
+                    scope_headers=metadata['scope_headers'],
+                    target_percentile=target_percentile,
+                    max_neighbors=CONVERGENCE_METRICS_K_NEIGHBORS,  # Use K=3 limit
+                    max_lump=max_lump  # For estimating inter-cluster distance when no neighbors
+                )
+                # Accumulate metrics (overwrites if cluster was seen before)
+                convergence_metrics_accumulator.update(scope_convergence_metrics)
+                # Update cache with fresh metrics for future iterations
+                convergence_metrics_cache.update(scope_convergence_metrics)
 
             # Track statistics for this refinement
             num_input = len(scope_cluster_ids)
@@ -1022,6 +1239,12 @@ def iterative_refinement(
 
         refinement_time = time.time() - refinement_start
         timing['refinements'].append(refinement_time)
+
+        # Aggregate convergence metrics from all processed scopes
+        convergence_metrics = aggregate_convergence_metrics(convergence_metrics_accumulator)
+
+        # Store convergence metrics in iteration stats for checkpointing
+        iteration_stats['convergence_metrics'] = convergence_metrics
 
         # Log reclustering count statistics for diagnostics
         if sequence_recluster_count:
@@ -1107,6 +1330,29 @@ def iterative_refinement(
                    f"{iteration_stats['sequences_skipped_convergence']} sequences")
         if iteration_stats['seeds_skipped_other'] != 0:
             logger.warning(f"    - Skipped (other/ERROR): {iteration_stats['seeds_skipped_other']}")
+
+        # Log convergence metrics (incremental, post-refinement)
+        mean_gap = convergence_metrics['mean_gap']
+        weighted_gap = convergence_metrics['weighted_gap']
+        gap_coverage = convergence_metrics['gap_coverage']
+        gap_coverage_sequences = convergence_metrics['gap_coverage_sequences']
+        clusters_with_metrics = convergence_metrics['clusters_with_metrics']
+        # Use next_clusters (post-refinement) as denominator since metrics are for output clusters
+        coverage_pct = (clusters_with_metrics / len(next_clusters) * 100) if next_clusters else 0
+
+        logger.info(f"  Convergence metrics (incremental):")
+        logger.info(f"    - Mean gap: {mean_gap:.4f}, Weighted gap: {weighted_gap:.4f}")
+        logger.info(f"    - Cluster coverage: {gap_coverage*100:.1f}%, Sequence coverage: {gap_coverage_sequences*100:.1f}%")
+        logger.info(f"    - Computed for: {clusters_with_metrics}/{len(next_clusters)} clusters ({coverage_pct:.1f}%)")
+
+        # Check if metrics are stabilized (all sequences processed at least once)
+        if sequence_recluster_count:
+            counts = list(sequence_recluster_count.values())
+            min_recluster_count = min(counts)
+            if min_recluster_count == 0:
+                # Some sequences haven't been processed yet
+                sequences_never_processed = sum(1 for c in counts if c == 0)
+                logger.info(f"    - NOTE: Metrics not yet stabilized - {sequences_never_processed} sequences not yet processed in any refinement scope")
 
         # Checkpoint if enabled and at checkpoint interval
         if checkpoint_frequency > 0 and global_iteration % checkpoint_frequency == 0:
