@@ -38,17 +38,19 @@ def main():
 Examples:
   gaphack input.fasta                          # Creates input.cluster_001.fasta, etc.
   gaphack input.fasta -o output_base           # Creates output_base.cluster_001.fasta, etc.
+  gaphack *.fasta -o combined                  # Load all FASTA files, cluster together
   gaphack input.fasta --format tsv -o results.tsv
   gaphack input.fasta --min-split 0.003 --max-lump 0.03
   gaphack input.fasta --export-metrics gap_analysis.json -v
   gaphack input.fasta --target seeds.fasta    # Target mode: grow cluster from seeds.fasta
         """
     )
-    
+
     # Required arguments
     parser.add_argument(
         'input',
-        help='Input FASTA file containing DNA sequences'
+        nargs='+',
+        help='Input FASTA file(s) containing DNA sequences. Multiple files will be concatenated.'
     )
     
     # Output options
@@ -147,12 +149,13 @@ Examples:
         sys.exit(1)
     
     try:
-        # Validate input file
-        input_path = Path(args.input)
-        if not input_path.exists():
-            logging.error(f"Input file not found: {args.input}")
-            sys.exit(1)
-        
+        # Validate input files
+        input_paths = [Path(f) for f in args.input]
+        for input_path in input_paths:
+            if not input_path.exists():
+                logging.error(f"Input file not found: {input_path}")
+                sys.exit(1)
+
         # Validate target file if specified
         target_sequences = None
         target_headers = None
@@ -179,13 +182,13 @@ Examples:
         # Set default output path based on input if not specified
         if args.output is None:
             if args.format == 'fasta':
-                # For FASTA, use input basename without extension
-                args.output = str(input_path.with_suffix(''))
+                # For FASTA, use first input basename without extension
+                args.output = str(input_paths[0].with_suffix(''))
             else:
                 # For TSV/text, add appropriate extension
                 ext = '.tsv' if args.format == 'tsv' else '.txt'
-                args.output = str(input_path.with_suffix(ext))
-        
+                args.output = str(input_paths[0].with_suffix(ext))
+
         # Load sequences or distance matrix
         if args.distance_matrix:
             # Load pre-computed distance matrix
@@ -195,10 +198,18 @@ Examples:
             headers = None  # Headers would need to be loaded separately
             logging.info(f"Loaded {len(distance_matrix)} x {len(distance_matrix)} distance matrix")
         else:
-            # Load sequences from FASTA
-            logging.info(f"Loading sequences from {args.input}")
-            sequences, headers, _ = load_sequences_from_fasta(str(input_path))
-            logging.info(f"Loaded {len(sequences)} sequences")
+            # Load sequences from FASTA file(s)
+            sequences = []
+            headers = []
+            for input_path in input_paths:
+                logging.info(f"Loading sequences from {input_path}")
+                file_sequences, file_headers, _ = load_sequences_from_fasta(str(input_path))
+                sequences.extend(file_sequences)
+                headers.extend(file_headers)
+                logging.info(f"Loaded {len(file_sequences)} sequences from {input_path.name}")
+
+            if len(input_paths) > 1:
+                logging.info(f"Total: {len(sequences)} sequences from {len(input_paths)} files")
             
             # Validate sequences
             is_valid, errors = validate_sequences(sequences)

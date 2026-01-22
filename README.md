@@ -181,6 +181,9 @@ gaphack input.fasta
 # Custom output base path
 gaphack input.fasta -o results/myclusters
 
+# Multiple input files (treated as concatenated)
+gaphack file1.fasta file2.fasta file3.fasta -o combined
+
 # Target mode clustering
 gaphack input.fasta --target seeds.fasta -o target_cluster
 ```
