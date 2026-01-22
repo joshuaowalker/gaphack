@@ -180,14 +180,15 @@ Examples:
                 sys.exit(1)
         
         # Set default output path based on input if not specified
+        # Output goes to current working directory using first input's basename
         if args.output is None:
             if args.format == 'fasta':
                 # For FASTA, use first input basename without extension
-                args.output = str(input_paths[0].with_suffix(''))
+                args.output = input_paths[0].stem
             else:
                 # For TSV/text, add appropriate extension
                 ext = '.tsv' if args.format == 'tsv' else '.txt'
-                args.output = str(input_paths[0].with_suffix(ext))
+                args.output = input_paths[0].stem + ext
 
         # Load sequences or distance matrix
         if args.distance_matrix:
@@ -312,9 +313,9 @@ Examples:
         
         # Save results
         if args.format == 'fasta':
-            logging.debug(f"Saving FASTA files with base path: {args.output}")
+            logging.info(f"Writing output files to: {args.output}.cluster_*.fasta")
         else:
-            logging.debug(f"Saving results to {args.output}")
+            logging.info(f"Writing results to: {args.output}")
         
         # Need sequences for FASTA format
         sequences_for_output = sequences if args.format == 'fasta' and not args.distance_matrix else None
