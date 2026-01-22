@@ -81,37 +81,44 @@ def calculate_percentiles(distances: np.ndarray,
                          percentiles: List[float] = [5, 10, 25, 50, 75, 90, 95, 99, 100]) -> Dict[str, float]:
     """
     Calculate key percentile values for a set of distances.
-    
+
     Args:
         distances: Array of distance values
         percentiles: List of percentiles to calculate
-        
+
     Returns:
         Dictionary mapping percentile names to values
     """
+    # Filter out NaN values
+    distances = distances[~np.isnan(distances)] if len(distances) > 0 else distances
+
     if len(distances) == 0:
         return {f"P{p}": np.nan for p in percentiles}
-    
+
     percentile_values = np.percentile(distances, percentiles)
     return {f"P{int(p)}": float(val) for p, val in zip(percentiles, percentile_values)}
 
 
-def calculate_barcode_gap_metrics(intra_distances: np.ndarray, 
+def calculate_barcode_gap_metrics(intra_distances: np.ndarray,
                                 inter_distances: np.ndarray,
                                 target_percentiles: List[int] = [90, 95]) -> Dict[str, Dict[str, float]]:
     """
     Calculate barcode gap metrics for given intra and inter-cluster distances.
-    
+
     Args:
         intra_distances: Array of intra-cluster distances
-        inter_distances: Array of inter-cluster distances  
+        inter_distances: Array of inter-cluster distances
         target_percentiles: Percentiles to calculate gaps for
-        
+
     Returns:
         Dictionary with gap metrics for each percentile
     """
     gap_metrics = {}
-    
+
+    # Filter out NaN values
+    intra_distances = intra_distances[~np.isnan(intra_distances)] if len(intra_distances) > 0 else intra_distances
+    inter_distances = inter_distances[~np.isnan(inter_distances)] if len(inter_distances) > 0 else inter_distances
+
     if len(intra_distances) == 0 or len(inter_distances) == 0:
         for percentile in target_percentiles:
             gap_metrics[f"P{percentile}"] = {
@@ -160,15 +167,18 @@ def create_histogram(distances: np.ndarray,
         matplotlib Figure object
     """
     fig, ax = plt.subplots(figsize=(10, 6))
-    
+
+    # Filter out NaN values
+    distances = distances[~np.isnan(distances)] if len(distances) > 0 else distances
+
     if len(distances) == 0:
-        ax.text(0.5, 0.5, 'No distances available', 
+        ax.text(0.5, 0.5, 'No distances available',
                 ha='center', va='center', transform=ax.transAxes)
         ax.set_title(title)
         ax.set_xlabel(xlabel)
         ax.set_ylabel("Frequency")
         return fig
-    
+
     # Create histogram
     counts, bin_edges, patches = ax.hist(distances, bins=bins, alpha=0.7, edgecolor='black')
     
@@ -225,16 +235,21 @@ def create_combined_histogram(intra_distances: np.ndarray,
     """
     fig, ax = plt.subplots(figsize=(12, 8))
     
-    # Determine common bin range
+    # Determine common bin range (filter out NaN values)
     all_distances = np.concatenate([intra_distances, inter_distances]) if len(intra_distances) > 0 and len(inter_distances) > 0 else np.array([])
-    
+    all_distances = all_distances[~np.isnan(all_distances)]
+
     if len(all_distances) == 0:
-        ax.text(0.5, 0.5, 'No distances available', 
+        ax.text(0.5, 0.5, 'No distances available',
                 ha='center', va='center', transform=ax.transAxes)
         ax.set_title(title)
         return fig
-    
+
     bin_range = (all_distances.min(), all_distances.max())
+
+    # Filter NaN from individual arrays for histograms
+    intra_distances = intra_distances[~np.isnan(intra_distances)] if len(intra_distances) > 0 else intra_distances
+    inter_distances = inter_distances[~np.isnan(inter_distances)] if len(inter_distances) > 0 else inter_distances
     
     # Create histograms
     if len(intra_distances) > 0:
