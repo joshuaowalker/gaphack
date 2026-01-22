@@ -741,6 +741,8 @@ gaphack/
 │   ├── refinement_types.py     # Refinement tracking types
 │   ├── cluster_graph.py        # Cluster proximity graph
 │   ├── blast_neighborhood.py   # BLAST neighborhood finder
+│   ├── vsearch_neighborhood.py # vsearch neighborhood finder
+│   ├── neighborhood_finder.py  # Neighborhood finding utilities
 │   ├── distance_providers.py   # Distance calculation providers
 │   ├── utils.py                # Utility functions and alignment
 │   ├── cli.py                  # Main gaphack CLI

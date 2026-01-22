@@ -5,7 +5,7 @@ This file contains development notes and future considerations for the gapHACk p
 ## Quick Reference
 
 ### Architecture Overview
-- **Distance Provider Architecture**: Three-tier system (global cache, scoped providers, precomputed) - see [Performance Considerations](#performance-considerations)
+- **Distance Provider Architecture**: Two-tier system (MSA-cached, precomputed) - see [Performance Considerations](#performance-considerations)
 - **Cluster Graph**: BLAST K-NN graph for O(K) proximity queries - see [Cluster Graph Infrastructure](#cluster-graph-infrastructure)
 - **Iterative Refinement**: Neighborhood-based refinement with convergence tracking - see [Refinement Implementation](#refinement-implementation)
 - **Result Tracking**: Comprehensive refinement tracking via ProcessingStageInfo - see [Result Tracking and Reproducibility](#result-tracking-and-reproducibility)
@@ -16,10 +16,10 @@ This file contains development notes and future considerations for the gapHACk p
 - **Refinement orchestration**: `cluster_refinement.py` (iterative neighborhood-based refinement)
 - **Refinement types**: `refinement_types.py` (ClusterIDGenerator, ProcessingStageInfo, cluster ID utilities)
 - **CLI entry points**: `cli.py` (main gaphack), `refine_cli.py` (gaphack-refine), `analyze_cli.py` (gaphack-analyze)
-- **Distance computation**: `lazy_distances.py` (LazyDistanceProvider, PrecomputedDistanceProvider)
-- **Scoped operations**: `scoped_distances.py` (ScopedDistanceProvider for refinement)
+- **Distance computation**: `distance_providers.py` (MSACachedDistanceProvider, PrecomputedDistanceProvider)
 - **Cluster proximity**: `cluster_graph.py` (ClusterGraph with BLAST K-NN)
 - **BLAST integration**: `blast_neighborhood.py`
+- **Neighborhood finding**: `neighborhood_finder.py`, `vsearch_neighborhood.py`
 
 ### Testing
 - **Comprehensive test suite** with integration, performance, and quality tests
@@ -64,30 +64,24 @@ The beam search implementation can be found in git history if needed for future 
 ### Performance Considerations
 
 #### Distance Provider Architecture
-The codebase implements a three-tier distance computation system for efficient large-scale clustering:
+The codebase implements a two-tier distance computation system (`distance_providers.py`):
 
-**1. Global Distance Provider** (`lazy_distances.py::LazyDistanceProvider`)
-- Computes distances on-demand using hardcoded MycoBLAST-style adjustment parameters
-- Maintains global cache (`_distance_cache`) of all computed distances
-- Tracks unique computations to monitor cache effectiveness
-- Prevents redundant distance calculations across refinement operations
+**1. MSA-Cached Distance Provider** (`MSACachedDistanceProvider`)
+- Creates SPOA multiple sequence alignment once for all sequences in scope
+- Computes pairwise distances on-demand from the shared MSA
+- Maintains cache (`_distance_cache`) of computed distances
+- Uses median sequence length for distance normalization
+- Raises `MSAAlignmentError` if SPOA fails
 
-**2. Scoped Distance Provider** (`scoped_distances.py::ScopedDistanceProvider`)
-- Maps local indices within refinement scopes to global indices
-- Enables classic gapHACk to work on sequence subsets while reusing global cache
-- Maintains bidirectional mappings: `scope_to_global` and `global_to_scope`
-- Includes local cache for frequently accessed computations within scope
-- Critical for conflict resolution and close cluster refinement performance
-
-**3. Precomputed Distance Provider** (`lazy_distances.py::PrecomputedDistanceProvider`)
+**2. Precomputed Distance Provider** (`PrecomputedDistanceProvider`)
 - Wraps full precomputed distance matrices for classic gaphack usage
 - No-op for `ensure_distances_computed()` since all distances exist
 - Used by core algorithm and when full matrix is available
 
-This architecture is critical for performance with 100K+ sequences, as it:
-- Avoids redundant distance calculations across all refinement operations
-- Enables efficient subset operations without recomputing distances
-- Supports incremental clustering with persistent caching
+This architecture provides:
+- Consistent distances within refinement scopes (all pairs share same MSA context)
+- Efficient on-demand computation with caching
+- Clean abstraction via `DistanceProvider` base class
 
 #### Distance Cache in Core Algorithm
 The multiprocessing implementation uses a specialized `DistanceCache` class (`core.py:171`):
