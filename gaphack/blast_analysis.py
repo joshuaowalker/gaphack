@@ -51,7 +51,7 @@ class BlastAnalysisResult:
     intra_cluster_identity: Dict[str, Optional[float]]  # min, p5, median, p95, max (in %)
 
     # Identity to nearest sequence outside query cluster
-    nearest_other_identity: Optional[float]
+    nearest_non_member_identity: Optional[float]
 
     # Per-sequence results
     sequences: List[SequenceResult]
@@ -88,7 +88,7 @@ class BlastAnalysisResult:
                 "medoid_id": self.medoid_id,
                 "medoid_index": self.medoid_index,
                 "intra_cluster_identity": intra_rounded,
-                "nearest_other_identity": round_identity(self.nearest_other_identity)
+                "nearest_non_member_identity": round_identity(self.nearest_non_member_identity)
             },
             "sequences": [
                 {
@@ -264,7 +264,7 @@ class BlastAnalyzer:
             medoid_id=medoid_id,
             medoid_index=medoid_idx,
             intra_cluster_identity=gap_metrics['intra_cluster_identity'],
-            nearest_other_identity=gap_metrics['nearest_other_identity'],
+            nearest_non_member_identity=gap_metrics['nearest_non_member_identity'],
             sequences=sequence_results,
             method="gap-optimized-target-clustering",
             min_split=self.min_split,
@@ -452,15 +452,15 @@ class BlastAnalyzer:
 
         # Compute nearest identity outside query cluster (highest identity = closest)
         if inter_identities:
-            nearest_other = float(np.max(inter_identities))
+            nearest_non_member = float(np.max(inter_identities))
         else:
-            nearest_other = None
+            nearest_non_member = None
 
         # Calculate gap (in identity percentage points)
         # Gap = min intra identity - max inter identity
         # Positive means clear separation
-        if nearest_other is not None and intra_min is not None:
-            gap_size_percent = intra_min - nearest_other
+        if nearest_non_member is not None and intra_min is not None:
+            gap_size_percent = intra_min - nearest_non_member
             gap_found = gap_size_percent > 0
         else:
             gap_found = False
@@ -470,7 +470,7 @@ class BlastAnalyzer:
             "gap_found": gap_found,
             "gap_size_percent": gap_size_percent,
             "intra_cluster_identity": intra_stats,
-            "nearest_other_identity": nearest_other
+            "nearest_non_member_identity": nearest_non_member
         }
 
     def _classify_sequences(self,
@@ -528,7 +528,7 @@ class BlastAnalyzer:
             medoid_id=query_id if headers else None,
             medoid_index=0 if headers else None,
             intra_cluster_identity={"min": None, "p5": None, "median": None, "p95": None, "max": None},
-            nearest_other_identity=None,
+            nearest_non_member_identity=None,
             sequences=sequence_results,
             method="gap-optimized-target-clustering",
             min_split=self.min_split,
@@ -569,7 +569,7 @@ class BlastAnalyzer:
             medoid_id=query_id if headers else None,
             medoid_index=0 if headers else None,
             intra_cluster_identity={"min": None, "p5": None, "median": None, "p95": None, "max": None},
-            nearest_other_identity=None,
+            nearest_non_member_identity=None,
             sequences=sequence_results,
             method="gap-optimized-target-clustering",
             min_split=self.min_split,
@@ -609,8 +609,8 @@ def format_text_output(result: BlastAnalysisResult) -> str:
     if result.gap_size_percent is not None:
         lines.append(f"Gap size: {result.gap_size_percent:.2f}%")
 
-    if result.nearest_other_identity is not None:
-        lines.append(f"Nearest outside cluster: {result.nearest_other_identity:.2f}%")
+    if result.nearest_non_member_identity is not None:
+        lines.append(f"Nearest outside cluster: {result.nearest_non_member_identity:.2f}%")
 
     intra = result.intra_cluster_identity
     if intra.get('median') is not None:
