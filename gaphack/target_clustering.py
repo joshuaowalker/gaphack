@@ -268,37 +268,36 @@ class TargetModeClustering:
             'gap_history': gap_history
         }
     
-    def _find_closest_to_target(self, target_cluster: Set[int], remaining: Set[int], 
+    def _find_closest_to_target(self, target_cluster: Set[int], remaining: Set[int],
                                distance_provider: DistanceProvider) -> Tuple[int, float]:
         """
         Find the sequence in remaining that is closest to the target cluster.
-        Uses 95th percentile linkage distance (consistent with gap calculation percentiles).
-        
+        Uses target_percentile linkage distance (consistent with gap calculation percentiles).
+
         Args:
             target_cluster: Set of indices in current target cluster
             remaining: Set of indices of remaining sequences
             distance_provider: Provider for distance calculations
-            
+
         Returns:
-            Tuple of (closest_sequence_index, p95_distance_to_cluster)
+            Tuple of (closest_sequence_index, linkage_distance_to_cluster)
         """
         closest_seq = -1
         min_distance = float('inf')
-        
+
         for seq_idx in remaining:
             # Get distances from this sequence to all target cluster members
             distances_to_cluster = distance_provider.get_distances_from_sequence(seq_idx, target_cluster)
 
-            # Calculate p95 linkage distance to target cluster
+            # Calculate linkage distance to target cluster using configured percentile
             import numpy as np
 
-            # Use p95 of distances (consistent with gap calculation)
             cluster_distances = list(distances_to_cluster.values())
-            p95_distance_to_cluster = np.percentile(cluster_distances, 95)
+            linkage_distance = np.percentile(cluster_distances, self.target_percentile)
 
-            # Track minimum of the p95 distances (p95 linkage)
-            if p95_distance_to_cluster < min_distance:
-                min_distance = p95_distance_to_cluster
+            # Track minimum linkage distance
+            if linkage_distance < min_distance:
+                min_distance = linkage_distance
                 closest_seq = seq_idx
         
         return closest_seq, min_distance

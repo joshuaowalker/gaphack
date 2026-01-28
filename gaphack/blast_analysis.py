@@ -135,7 +135,7 @@ class BlastAnalyzer:
     def __init__(self,
                  min_split: float = 0.005,
                  max_lump: float = 0.02,
-                 target_percentile: int = 95,
+                 target_percentile: int = 100,
                  show_progress: bool = True):
         """
         Initialize the BLAST analyzer.
@@ -143,7 +143,7 @@ class BlastAnalyzer:
         Args:
             min_split: Minimum distance to split clusters (sequences closer are lumped)
             max_lump: Maximum distance to lump clusters (sequences farther are split)
-            target_percentile: Percentile for gap optimization (default: 95)
+            target_percentile: Percentile for gap optimization (default: 100 for complete linkage)
             show_progress: Whether to show progress bars
         """
         self.min_split = min_split
