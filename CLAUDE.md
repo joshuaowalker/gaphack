@@ -169,11 +169,12 @@ The `ProcessingStageInfo` dataclass (`refinement_types.py`) provides comprehensi
 - Located in: `examples/data/Russula_INxx.fasta`
 
 **Test Subsets** (for faster iteration):
-- `tests/test_data/russula_50.fasta` (50 sequences)
-- `tests/test_data/russula_100.fasta` (100 sequences)
-- `tests/test_data/russula_200.fasta` (200 sequences)
-- `tests/test_data/russula_300.fasta` (300 sequences)
-- `tests/test_data/russula_500.fasta` (500 sequences)
+- `tests/test_data/russula_diverse_50.fasta` (50 sequences)
+- `tests/test_data/russula_diverse_100.fasta` (100 sequences)
+- `tests/test_data/russula_diverse_200.fasta` (200 sequences)
+- `tests/test_data/russula_diverse_300.fasta` (300 sequences)
+- `tests/test_data/russula_diverse_500.fasta` (500 sequences)
+- `tests/test_data/russula_300.fasta` (300 sequences, older subset)
 
 ### Performance Baselines
 **Established Thresholds** (for regression detection):

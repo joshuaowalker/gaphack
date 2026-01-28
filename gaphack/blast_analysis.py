@@ -40,7 +40,6 @@ class BlastAnalysisResult:
     total_sequences: int
     query_cluster_size: int
     barcode_gap_found: bool
-    gap_size: Optional[float]  # Inter min - intra max (in distance units)
     gap_size_percent: Optional[float]  # Gap size as percentage
 
     # Query cluster medoid (most representative sequence)
@@ -145,7 +144,17 @@ class BlastAnalyzer:
             max_lump: Maximum distance to lump clusters (sequences farther are split)
             target_percentile: Percentile for gap optimization (default: 100 for complete linkage)
             show_progress: Whether to show progress bars
+
+        Raises:
+            ValueError: If min_split or max_lump are negative, or if min_split >= max_lump
         """
+        if min_split < 0:
+            raise ValueError("min_split must be non-negative")
+        if max_lump < 0:
+            raise ValueError("max_lump must be non-negative")
+        if min_split >= max_lump:
+            raise ValueError("min_split must be less than max_lump")
+
         self.min_split = min_split
         self.max_lump = max_lump
         self.target_percentile = target_percentile
@@ -259,7 +268,6 @@ class BlastAnalyzer:
             total_sequences=len(sequences),
             query_cluster_size=len(target_cluster),
             barcode_gap_found=gap_metrics['gap_found'],
-            gap_size=None,  # Deprecated, use gap_size_percent
             gap_size_percent=gap_metrics['gap_size_percent'],
             medoid_id=medoid_id,
             medoid_index=medoid_idx,
@@ -523,7 +531,6 @@ class BlastAnalyzer:
             total_sequences=len(sequences),
             query_cluster_size=1 if sequences else 0,
             barcode_gap_found=False,
-            gap_size=None,
             gap_size_percent=None,
             medoid_id=query_id if headers else None,
             medoid_index=0 if headers else None,
@@ -564,7 +571,6 @@ class BlastAnalyzer:
             total_sequences=len(sequences),
             query_cluster_size=1,
             barcode_gap_found=False,
-            gap_size=None,
             gap_size_percent=None,
             medoid_id=query_id if headers else None,
             medoid_index=0 if headers else None,

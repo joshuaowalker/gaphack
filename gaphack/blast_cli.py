@@ -11,7 +11,8 @@ import sys
 from typing import List, Tuple
 
 from Bio import SeqIO
-from Bio.SeqRecord import SeqRecord
+
+from .version import __version__
 
 
 def setup_logging(verbose: bool = False, quiet: bool = False):
@@ -135,6 +136,11 @@ Output fields:
         '-q', '--quiet',
         action='store_true',
         help='Suppress progress output'
+    )
+    parser.add_argument(
+        '--version',
+        action='version',
+        version=f'%(prog)s {__version__}'
     )
 
     args = parser.parse_args()
