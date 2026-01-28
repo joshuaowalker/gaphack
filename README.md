@@ -11,10 +11,11 @@ gapHACk implements a two-phase clustering algorithm designed for DNA barcoding a
 
 The algorithm focuses on maximizing the "barcode gap" - the separation between intra-species and inter-species distances at a specified percentile (default P95) to handle outliers robustly.
 
-**gapHACk provides three complementary tools**:
+**gapHACk provides four complementary tools**:
 - **`gaphack`**: Core clustering for medium-sized datasets (up to ~1,000 sequences)
 - **`gaphack-refine`**: Iterative refinement to optimize cluster boundaries
 - **`gaphack-analyze`**: Quality assessment for pre-clustered FASTA files
+- **`gaphack-blast`**: Analyze BLAST results to identify conspecific sequences
 
 ## Clustering Workflows
 
@@ -85,6 +86,13 @@ This workflow is useful for taxonomic investigations, quality control, or detail
 - **Barcode Gap Metrics**: Assess gap quality at P90/P95 levels
 - **Visualization**: Generate histograms with percentile markers
 - **Multiple Output Formats**: Text reports, JSON data, or TSV tables
+
+### BLAST Analysis (`gaphack-blast`)
+- **Conspecific Classification**: Identify which BLAST hits are same-species as your query
+- **Barcode Gap Detection**: Find natural boundaries between species in search results
+- **Structured Output**: JSON, TSV, or text formats for easy integration
+- **Web-Service Ready**: Single-threaded design suitable for concurrent web requests
+- **Stdin/Stdout Support**: Pipe-friendly for workflow integration
 
 ## Performance
 
@@ -345,6 +353,32 @@ gaphack-analyze clusters/*.fasta --no-plots --format tsv -o results.tsv
 - **Percentile analysis**: P5, P25, P50, P75, P95 values for all distance sets
 - **Barcode gap metrics**: Gap size and existence at P90/P95 levels
 - **Multiple formats**: Text reports, JSON data, or TSV tables
+
+### BLAST Analysis (`gaphack-blast`)
+
+The `gaphack-blast` tool analyzes BLAST search results to identify conspecific sequences - hits that belong to the same species/OTU as your query:
+
+```bash
+# Basic usage - query is first sequence in FASTA
+cat query.fa blast_hits.fa | gaphack-blast > results.json
+
+# From file
+gaphack-blast combined_sequences.fasta -o results.json
+
+# Human-readable output
+gaphack-blast sequences.fasta --format text
+
+# Tab-separated for spreadsheets
+gaphack-blast sequences.fasta --format tsv
+```
+
+**Key output fields:**
+- `in_query_cluster`: Boolean indicating if sequence is conspecific with query
+- `identity_to_query`: MycoBLAST-adjusted identity percentage
+- `barcode_gap_found`: Whether a clear species boundary was detected
+- `gap_size_percent`: Magnitude of the barcode gap
+
+For detailed field documentation and integration patterns, see [docs/blast_analysis_integration.md](docs/blast_analysis_integration.md).
 
 ### Python API
 
@@ -751,7 +785,11 @@ gaphack/
 │   ├── cli.py                  # Main gaphack CLI
 │   ├── refine_cli.py           # Refinement CLI
 │   ├── analyze.py              # Analysis functions
-│   └── analyze_cli.py          # Analysis tool CLI
+│   ├── analyze_cli.py          # Analysis tool CLI
+│   ├── blast_analysis.py       # BLAST result analysis
+│   └── blast_cli.py            # BLAST analysis CLI
+├── docs/                        # Documentation
+│   └── blast_analysis_integration.md  # BLAST integration guide
 ├── tests/                       # Unit tests
 ├── examples/                    # Example datasets and documentation
 │   ├── data/                   # Sample FASTA files
