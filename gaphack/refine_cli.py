@@ -21,7 +21,7 @@ from .cluster_refinement import (
     RefinementConfig, verify_no_conflicts
 )
 from .refinement_types import ClusterIDGenerator, ProcessingStageInfo
-from . import __version__
+from .version import __version__
 
 logger = logging.getLogger(__name__)
 
@@ -598,6 +598,11 @@ def main():
                        help='Show progress bars (default: True)')
     parser.add_argument('--log-level', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
                        default='INFO', help='Logging verbosity (default: INFO)')
+    parser.add_argument(
+        '--version',
+        action='version',
+        version=f'%(prog)s {__version__}'
+    )
 
     args = parser.parse_args()
 

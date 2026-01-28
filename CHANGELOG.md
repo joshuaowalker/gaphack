@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-01-27
+
+### Added
+- **New CLI tool**: `gaphack-blast` for analyzing BLAST search results to identify conspecific sequences
+  - Gap-optimized clustering to find natural species boundaries in BLAST hits
+  - JSON, TSV, and text output formats
+  - Pre-binned identity histograms for barcode gap visualization (intra-cluster and inter-cluster)
+  - Medoid identification for representative sequence selection
+  - Comprehensive per-sequence classification with identity metrics
+- **Version introspection**: All CLI tools now support `--version` flag
+  - `gaphack --version`
+  - `gaphack-analyze --version`
+  - `gaphack-refine --version`
+  - `gaphack-blast --version`
+- **Centralized version management**: New `gaphack/version.py` module for consistent version across all tools
+- **Histogram output**: Pre-binned identity distributions in `gaphack-blast` diagnostics
+  - 0.5% bin width with empty bins omitted
+  - Both raw counts and normalized frequencies for overlay visualization
+  - Supports rendering barcode gap charts in integrating applications
+
+### Documentation
+- New integration guide: `docs/blast_analysis_integration.md` with:
+  - Complete field reference for JSON output
+  - Python integration examples
+  - Histogram visualization code samples
+  - Algorithm parameter tuning guidance
+
+### Tests
+- Comprehensive test suite for `gaphack-blast` (26 tests)
+  - Unit tests with mocked MSA for fast execution
+  - Integration tests with real biological sequences
+  - Histogram functionality tests
+
 ## [0.6.0] - 2025-10-17
 
 ### Changed

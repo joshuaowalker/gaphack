@@ -25,6 +25,7 @@ from .analyze import (
     format_analysis_report
 )
 from .utils import load_sequences_from_fasta
+from .version import __version__
 
 
 def setup_logging(verbose: bool = False):
@@ -183,7 +184,12 @@ Examples:
         action='store_true',
         help='Enable verbose logging'
     )
-    
+    parser.add_argument(
+        '--version',
+        action='version',
+        version=f'%(prog)s {__version__}'
+    )
+
     args = parser.parse_args()
     
     # Setup logging

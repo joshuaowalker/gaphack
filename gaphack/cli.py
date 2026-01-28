@@ -11,6 +11,7 @@ from typing import Optional
 
 from .core import GapOptimizedClustering
 from .target_clustering import TargetModeClustering
+from .version import __version__
 from .utils import (
     load_sequences_from_fasta,
     calculate_distance_matrix,
@@ -132,7 +133,12 @@ Examples:
         action='store_true',
         help='Enable verbose logging'
     )
-    
+    parser.add_argument(
+        '--version',
+        action='version',
+        version=f'%(prog)s {__version__}'
+    )
+
     args = parser.parse_args()
 
     # Setup logging
