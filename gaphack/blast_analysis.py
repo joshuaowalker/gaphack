@@ -23,10 +23,10 @@ class SequenceResult:
     index: int  # 0-based position in input (index 0 is the query)
     id: str
     in_query_cluster: bool
-    distance_to_query: Optional[float]  # Pairwise distance (comparable to BLAST)
-    distance_to_query_normalized: Optional[float]  # Normalized distance (used by clustering)
-    distance_to_medoid_normalized: Optional[float]  # Distance to query cluster medoid
-    distance_to_nearest_non_member_normalized: Optional[float]  # For members: distance to nearest non-member
+    identity_to_query: Optional[float]  # Pairwise identity % (comparable to BLAST)
+    identity_to_query_normalized: Optional[float]  # Normalized identity % (used by clustering)
+    identity_to_medoid_normalized: Optional[float]  # Identity % to query cluster medoid
+    identity_to_nearest_non_member_normalized: Optional[float]  # For members: identity % to nearest non-member
 
 
 @dataclass
@@ -47,11 +47,11 @@ class BlastAnalysisResult:
     medoid_id: Optional[str]  # Header of the medoid sequence
     medoid_index: Optional[int]  # 0-based index of the medoid in input
 
-    # Intra-cluster distance distribution (within query cluster)
-    intra_cluster_distance: Dict[str, Optional[float]]  # min, p5, median, p95, max
+    # Intra-cluster identity distribution (within query cluster)
+    intra_cluster_identity: Dict[str, Optional[float]]  # min, p5, median, p95, max (in %)
 
-    # Distance to nearest sequence outside query cluster
-    nearest_other_distance: Optional[float]
+    # Identity to nearest sequence outside query cluster
+    nearest_other_identity: Optional[float]
 
     # Per-sequence results
     sequences: List[SequenceResult]
@@ -66,13 +66,13 @@ class BlastAnalysisResult:
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
-        def round_distance(val: Optional[float]) -> Optional[float]:
-            """Round distance to 4 decimal places (sufficient for 1 nt resolution)."""
-            return round(val, 4) if val is not None else None
+        def round_identity(val: Optional[float]) -> Optional[float]:
+            """Round identity to 2 decimal places (e.g., 99.63%)."""
+            return round(val, 2) if val is not None else None
 
-        # Round intra_cluster_distance values
+        # Round intra_cluster_identity values
         intra_rounded = {
-            k: round_distance(v) for k, v in self.intra_cluster_distance.items()
+            k: round_identity(v) for k, v in self.intra_cluster_identity.items()
         }
 
         return {
@@ -84,22 +84,21 @@ class BlastAnalysisResult:
                 "total_sequences": self.total_sequences,
                 "query_cluster_size": self.query_cluster_size,
                 "barcode_gap_found": self.barcode_gap_found,
-                "gap_size": round_distance(self.gap_size),
                 "gap_size_percent": round(self.gap_size_percent, 2) if self.gap_size_percent is not None else None,
                 "medoid_id": self.medoid_id,
                 "medoid_index": self.medoid_index,
-                "intra_cluster_distance": intra_rounded,
-                "nearest_other_distance": round_distance(self.nearest_other_distance)
+                "intra_cluster_identity": intra_rounded,
+                "nearest_other_identity": round_identity(self.nearest_other_identity)
             },
             "sequences": [
                 {
                     "index": seq.index,
                     "id": seq.id,
                     "in_query_cluster": seq.in_query_cluster,
-                    "distance_to_query": round_distance(seq.distance_to_query),
-                    "distance_to_query_normalized": round_distance(seq.distance_to_query_normalized),
-                    "distance_to_medoid_normalized": round_distance(seq.distance_to_medoid_normalized),
-                    "distance_to_nearest_non_member_normalized": round_distance(seq.distance_to_nearest_non_member_normalized)
+                    "identity_to_query": round_identity(seq.identity_to_query),
+                    "identity_to_query_normalized": round_identity(seq.identity_to_query_normalized),
+                    "identity_to_medoid_normalized": round_identity(seq.identity_to_medoid_normalized),
+                    "identity_to_nearest_non_member_normalized": round_identity(seq.identity_to_nearest_non_member_normalized)
                 }
                 for seq in self.sequences
             ],
@@ -108,10 +107,21 @@ class BlastAnalysisResult:
                 "min_split": self.min_split,
                 "max_lump": self.max_lump,
                 "normalization_length": self.normalization_length,
-                "distance_metric": self.distance_metric,
+                "identity_metric": self.distance_metric,
                 "warnings": self.warnings
             }
         }
+
+
+def _distance_to_identity(distance: Optional[float]) -> Optional[float]:
+    """Convert distance (0-1) to identity percentage (0-100).
+
+    Identity = (1 - distance) * 100
+    e.g., distance 0.0037 → identity 99.63%
+    """
+    if distance is None or np.isnan(distance):
+        return None
+    return (1.0 - distance) * 100.0
 
 
 class BlastAnalyzer:
@@ -186,8 +196,8 @@ class BlastAnalyzer:
             sequences=sequences
         )
 
-        # Extract distances to query for all sequences
-        distances_to_query = self._extract_distances_to_query(distance_provider, len(sequences))
+        # Extract identities to query for all sequences
+        identities_to_query = self._extract_identities_to_query(distance_provider, len(sequences))
 
         # Determine query cluster set (sequences in target cluster)
         query_cluster_set = set(target_cluster)
@@ -199,16 +209,16 @@ class BlastAnalyzer:
         )
         medoid_id = headers[medoid_idx]
 
-        # Extract distances to medoid for all sequences
-        distances_to_medoid = self._extract_distances_to_medoid(
+        # Extract identities to medoid for all sequences
+        identities_to_medoid = self._extract_identities_to_medoid(
             distance_provider,
             medoid_idx,
             len(sequences)
         )
 
-        # Compute distances to nearest non-member for cluster members
+        # Compute identities to nearest non-member for cluster members
         remaining_set = set(remaining)
-        distances_to_nearest_non_member = self._compute_distances_to_nearest_non_member(
+        identities_to_nearest_non_member = self._compute_identities_to_nearest_non_member(
             distance_provider,
             query_cluster_set,
             remaining_set,
@@ -219,7 +229,7 @@ class BlastAnalyzer:
         gap_metrics = self._compute_gap_metrics(
             query_cluster_set,
             remaining_set,
-            distances_to_query,
+            identities_to_query,
             metrics
         )
 
@@ -227,17 +237,17 @@ class BlastAnalyzer:
         sequence_results = self._classify_sequences(
             headers,
             query_cluster_set,
-            distances_to_query,
-            distances_to_medoid,
-            distances_to_nearest_non_member
+            identities_to_query,
+            identities_to_medoid,
+            identities_to_nearest_non_member
         )
 
         # Check for warnings
         if len(target_cluster) == 1:
             warnings.append("Query has no close matches")
 
-        # Check for NaN distances (check the pairwise distance)
-        nan_count = sum(1 for d in distances_to_query.values()
+        # Check for NaN identities (check the pairwise identity)
+        nan_count = sum(1 for d in identities_to_query.values()
                         if d.get('pairwise') is None or
                         (isinstance(d.get('pairwise'), float) and np.isnan(d.get('pairwise'))))
         if nan_count > 0:
@@ -249,12 +259,12 @@ class BlastAnalyzer:
             total_sequences=len(sequences),
             query_cluster_size=len(target_cluster),
             barcode_gap_found=gap_metrics['gap_found'],
-            gap_size=gap_metrics['gap_size'],
+            gap_size=None,  # Deprecated, use gap_size_percent
             gap_size_percent=gap_metrics['gap_size_percent'],
             medoid_id=medoid_id,
             medoid_index=medoid_idx,
-            intra_cluster_distance=gap_metrics['intra_cluster_distance'],
-            nearest_other_distance=gap_metrics['nearest_other_distance'],
+            intra_cluster_identity=gap_metrics['intra_cluster_identity'],
+            nearest_other_identity=gap_metrics['nearest_other_identity'],
             sequences=sequence_results,
             method="gap-optimized-target-clustering",
             min_split=self.min_split,
@@ -264,28 +274,28 @@ class BlastAnalyzer:
             warnings=warnings
         )
 
-    def _extract_distances_to_query(self,
-                                     distance_provider: MSACachedDistanceProvider,
-                                     n: int) -> Dict[int, Dict[str, Optional[float]]]:
-        """Extract distances from all sequences to the query (index 0).
+    def _extract_identities_to_query(self,
+                                      distance_provider: MSACachedDistanceProvider,
+                                      n: int) -> Dict[int, Dict[str, Optional[float]]]:
+        """Extract identities from all sequences to the query (index 0).
 
         Returns:
-            Dict mapping sequence index to dict with 'pairwise' and 'normalized' distances
+            Dict mapping sequence index to dict with 'pairwise' and 'normalized' identity %
         """
-        distances = {}
+        identities = {}
         for i in range(n):
             if i == 0:
-                distances[i] = {'pairwise': 0.0, 'normalized': 0.0}
+                identities[i] = {'pairwise': 100.0, 'normalized': 100.0}
             else:
                 result = distance_provider.get_distance_detailed(0, i)
                 if result.is_valid:
-                    distances[i] = {
-                        'pairwise': result.distance_pairwise,
-                        'normalized': result.distance_normalized
+                    identities[i] = {
+                        'pairwise': _distance_to_identity(result.distance_pairwise),
+                        'normalized': _distance_to_identity(result.distance_normalized)
                     }
                 else:
-                    distances[i] = {'pairwise': None, 'normalized': None}
-        return distances
+                    identities[i] = {'pairwise': None, 'normalized': None}
+        return identities
 
     def _find_query_cluster_medoid(self,
                                     distance_provider: MSACachedDistanceProvider,
@@ -324,11 +334,11 @@ class BlastAnalyzer:
 
         return medoid_idx
 
-    def _extract_distances_to_medoid(self,
-                                      distance_provider: MSACachedDistanceProvider,
-                                      medoid_idx: int,
-                                      n: int) -> Dict[int, Optional[float]]:
-        """Extract normalized distances from all sequences to the medoid.
+    def _extract_identities_to_medoid(self,
+                                       distance_provider: MSACachedDistanceProvider,
+                                       medoid_idx: int,
+                                       n: int) -> Dict[int, Optional[float]]:
+        """Extract normalized identities from all sequences to the medoid.
 
         Args:
             distance_provider: MSA-based distance provider
@@ -336,26 +346,26 @@ class BlastAnalyzer:
             n: Total number of sequences
 
         Returns:
-            Dict mapping sequence index to normalized distance to medoid
+            Dict mapping sequence index to normalized identity % to medoid
         """
-        distances = {}
+        identities = {}
         for i in range(n):
             if i == medoid_idx:
-                distances[i] = 0.0
+                identities[i] = 100.0
             else:
                 result = distance_provider.get_distance_detailed(medoid_idx, i)
                 if result.is_valid:
-                    distances[i] = result.distance_normalized
+                    identities[i] = _distance_to_identity(result.distance_normalized)
                 else:
-                    distances[i] = None
-        return distances
+                    identities[i] = None
+        return identities
 
-    def _compute_distances_to_nearest_non_member(self,
-                                                  distance_provider: MSACachedDistanceProvider,
-                                                  query_cluster_set: set,
-                                                  non_member_set: set,
-                                                  n: int) -> Dict[int, Optional[float]]:
-        """Compute distance to nearest non-member for each cluster member.
+    def _compute_identities_to_nearest_non_member(self,
+                                                   distance_provider: MSACachedDistanceProvider,
+                                                   query_cluster_set: set,
+                                                   non_member_set: set,
+                                                   n: int) -> Dict[int, Optional[float]]:
+        """Compute identity to nearest non-member for each cluster member.
 
         Args:
             distance_provider: MSA-based distance provider
@@ -364,21 +374,21 @@ class BlastAnalyzer:
             n: Total number of sequences
 
         Returns:
-            Dict mapping sequence index to distance to nearest non-member.
+            Dict mapping sequence index to identity % to nearest non-member.
             Only cluster members have values; non-members get None.
         """
-        distances = {}
+        identities = {}
 
         # Non-members get None
         for idx in range(n):
             if idx not in query_cluster_set:
-                distances[idx] = None
+                identities[idx] = None
                 continue
 
-            # For cluster members, find the nearest non-member
+            # For cluster members, find the nearest non-member (highest identity)
             if not non_member_set:
                 # No non-members exist
-                distances[idx] = None
+                identities[idx] = None
                 continue
 
             min_distance = float('inf')
@@ -388,100 +398,102 @@ class BlastAnalyzer:
                     min_distance = result.distance_normalized
 
             if min_distance == float('inf'):
-                distances[idx] = None
+                identities[idx] = None
             else:
-                distances[idx] = min_distance
+                identities[idx] = _distance_to_identity(min_distance)
 
-        return distances
+        return identities
 
     def _compute_gap_metrics(self,
                              query_cluster_set: set,
                              remaining_set: set,
-                             distances_to_query: Dict[int, Dict[str, Optional[float]]],
+                             identities_to_query: Dict[int, Dict[str, Optional[float]]],
                              clustering_metrics: Dict) -> Dict[str, Any]:
         """Compute barcode gap metrics from clustering results.
 
-        Uses normalized distances since that's what the clustering algorithm uses.
+        Uses normalized identities since that's what the clustering algorithm uses.
+        Gap is computed as: min intra-cluster identity - max inter-cluster identity.
+        A positive gap means the lowest identity within the cluster is higher than
+        the highest identity outside the cluster.
         """
 
-        # Get intra-cluster distances (query cluster members to query)
-        # Use normalized distances since that's what clustering uses
-        intra_distances = []
+        # Get intra-cluster identities (query cluster members to query)
+        # Use normalized identities since that's what clustering uses
+        intra_identities = []
         for idx in query_cluster_set:
             if idx == 0:
                 continue  # Skip query itself
-            dist_info = distances_to_query.get(idx, {})
-            dist = dist_info.get('normalized')
-            if dist is not None and not np.isnan(dist):
-                intra_distances.append(dist)
+            id_info = identities_to_query.get(idx, {})
+            identity = id_info.get('normalized')
+            if identity is not None and not np.isnan(identity):
+                intra_identities.append(identity)
 
-        # Get inter-cluster distances (sequences outside query cluster to query)
-        inter_distances = []
+        # Get inter-cluster identities (sequences outside query cluster to query)
+        inter_identities = []
         for idx in remaining_set:
-            dist_info = distances_to_query.get(idx, {})
-            dist = dist_info.get('normalized')
-            if dist is not None and not np.isnan(dist):
-                inter_distances.append(dist)
+            id_info = identities_to_query.get(idx, {})
+            identity = id_info.get('normalized')
+            if identity is not None and not np.isnan(identity):
+                inter_identities.append(identity)
 
-        # Compute intra-cluster statistics
-        if intra_distances:
+        # Compute intra-cluster statistics (in identity %)
+        if intra_identities:
             intra_stats = {
-                "min": float(np.min(intra_distances)),
-                "p5": float(np.percentile(intra_distances, 5)),
-                "median": float(np.median(intra_distances)),
-                "p95": float(np.percentile(intra_distances, 95)),
-                "max": float(np.max(intra_distances))
+                "min": float(np.min(intra_identities)),
+                "p5": float(np.percentile(intra_identities, 5)),
+                "median": float(np.median(intra_identities)),
+                "p95": float(np.percentile(intra_identities, 95)),
+                "max": float(np.max(intra_identities))
             }
-            intra_max = intra_stats["max"]
+            intra_min = intra_stats["min"]
         else:
             intra_stats = {"min": None, "p5": None, "median": None, "p95": None, "max": None}
-            intra_max = 0.0
+            intra_min = 100.0  # Default to 100% if no intra-cluster sequences
 
-        # Compute nearest distance outside query cluster
-        if inter_distances:
-            nearest_other = float(np.min(inter_distances))
+        # Compute nearest identity outside query cluster (highest identity = closest)
+        if inter_identities:
+            nearest_other = float(np.max(inter_identities))
         else:
             nearest_other = None
 
-        # Calculate gap
-        if nearest_other is not None and intra_max is not None:
-            gap_size = nearest_other - intra_max
-            gap_found = gap_size > 0
-            gap_size_percent = gap_size * 100  # Convert to percentage
+        # Calculate gap (in identity percentage points)
+        # Gap = min intra identity - max inter identity
+        # Positive means clear separation
+        if nearest_other is not None and intra_min is not None:
+            gap_size_percent = intra_min - nearest_other
+            gap_found = gap_size_percent > 0
         else:
-            gap_size = None
             gap_found = False
             gap_size_percent = None
 
         return {
             "gap_found": gap_found,
-            "gap_size": gap_size,
             "gap_size_percent": gap_size_percent,
-            "intra_cluster_distance": intra_stats,
-            "nearest_other_distance": nearest_other
+            "intra_cluster_identity": intra_stats,
+            "nearest_other_identity": nearest_other
         }
 
     def _classify_sequences(self,
                             headers: List[str],
                             query_cluster_set: set,
-                            distances_to_query: Dict[int, Dict[str, Optional[float]]],
-                            distances_to_medoid: Dict[int, Optional[float]],
-                            distances_to_nearest_non_member: Dict[int, Optional[float]]) -> List[SequenceResult]:
+                            identities_to_query: Dict[int, Dict[str, Optional[float]]],
+                            identities_to_medoid: Dict[int, Optional[float]],
+                            identities_to_nearest_non_member: Dict[int, Optional[float]]) -> List[SequenceResult]:
         """Classify each sequence based on clustering results."""
         results = []
 
         for idx, header in enumerate(headers):
             in_cluster = idx in query_cluster_set
-            dist_info = distances_to_query.get(idx, {})
+            id_info = identities_to_query.get(idx, {})
 
             results.append(SequenceResult(
                 index=idx,
                 id=header,
                 in_query_cluster=in_cluster,
-                distance_to_query=dist_info.get('pairwise'),
-                distance_to_query_normalized=dist_info.get('normalized'),
-                distance_to_medoid_normalized=distances_to_medoid.get(idx),
-                distance_to_nearest_non_member_normalized=distances_to_nearest_non_member.get(idx)
+                identity_to_query=id_info.get('pairwise'),
+                identity_to_query_normalized=id_info.get('normalized'),
+                identity_to_medoid_normalized=identities_to_medoid.get(idx),
+                identity_to_nearest_non_member_normalized=identities_to_nearest_non_member.get(idx)
             ))
 
         return results
@@ -499,10 +511,10 @@ class BlastAnalyzer:
                 index=0,
                 id=headers[0],
                 in_query_cluster=True,
-                distance_to_query=0.0,
-                distance_to_query_normalized=0.0,
-                distance_to_medoid_normalized=0.0,  # Query is its own medoid
-                distance_to_nearest_non_member_normalized=None  # No non-members exist
+                identity_to_query=100.0,
+                identity_to_query_normalized=100.0,
+                identity_to_medoid_normalized=100.0,  # Query is its own medoid
+                identity_to_nearest_non_member_normalized=None  # No non-members exist
             ))
 
         return BlastAnalysisResult(
@@ -515,8 +527,8 @@ class BlastAnalyzer:
             gap_size_percent=None,
             medoid_id=query_id if headers else None,
             medoid_index=0 if headers else None,
-            intra_cluster_distance={"min": None, "p5": None, "median": None, "p95": None, "max": None},
-            nearest_other_distance=None,
+            intra_cluster_identity={"min": None, "p5": None, "median": None, "p95": None, "max": None},
+            nearest_other_identity=None,
             sequences=sequence_results,
             method="gap-optimized-target-clustering",
             min_split=self.min_split,
@@ -540,10 +552,10 @@ class BlastAnalyzer:
                 index=i,
                 id=header,
                 in_query_cluster=(i == 0),  # Only query is in cluster
-                distance_to_query=0.0 if i == 0 else None,
-                distance_to_query_normalized=0.0 if i == 0 else None,
-                distance_to_medoid_normalized=0.0 if i == 0 else None,  # Query is its own medoid
-                distance_to_nearest_non_member_normalized=None  # Cannot compute without alignment
+                identity_to_query=100.0 if i == 0 else None,
+                identity_to_query_normalized=100.0 if i == 0 else None,
+                identity_to_medoid_normalized=100.0 if i == 0 else None,  # Query is its own medoid
+                identity_to_nearest_non_member_normalized=None  # Cannot compute without alignment
             ))
 
         return BlastAnalysisResult(
@@ -556,8 +568,8 @@ class BlastAnalyzer:
             gap_size_percent=None,
             medoid_id=query_id if headers else None,
             medoid_index=0 if headers else None,
-            intra_cluster_distance={"min": None, "p5": None, "median": None, "p95": None, "max": None},
-            nearest_other_distance=None,
+            intra_cluster_identity={"min": None, "p5": None, "median": None, "p95": None, "max": None},
+            nearest_other_identity=None,
             sequences=sequence_results,
             method="gap-optimized-target-clustering",
             min_split=self.min_split,
@@ -594,15 +606,15 @@ def format_text_output(result: BlastAnalysisResult) -> str:
         medoid_is_query = " (query)" if result.medoid_index == 0 else ""
         lines.append(f"Cluster medoid: {result.medoid_id} (index {result.medoid_index}){medoid_is_query}")
 
-    if result.gap_size is not None:
-        lines.append(f"Gap size: {result.gap_size:.4f} ({result.gap_size_percent:.2f}%)")
+    if result.gap_size_percent is not None:
+        lines.append(f"Gap size: {result.gap_size_percent:.2f}%")
 
-    if result.nearest_other_distance is not None:
-        lines.append(f"Nearest outside cluster: {result.nearest_other_distance:.4f}")
+    if result.nearest_other_identity is not None:
+        lines.append(f"Nearest outside cluster: {result.nearest_other_identity:.2f}%")
 
-    intra = result.intra_cluster_distance
+    intra = result.intra_cluster_identity
     if intra.get('median') is not None:
-        lines.append(f"Intra-cluster distances: min={intra['min']:.4f}, median={intra['median']:.4f}, max={intra['max']:.4f}")
+        lines.append(f"Intra-cluster identity: min={intra['min']:.2f}%, median={intra['median']:.2f}%, max={intra['max']:.2f}%")
 
     lines.append("")
 
@@ -615,10 +627,10 @@ def format_text_output(result: BlastAnalysisResult) -> str:
 
     for seq in result.sequences:
         in_cluster = "Yes" if seq.in_query_cluster else "No"
-        dist_query = f"{seq.distance_to_query_normalized:.4f}" if seq.distance_to_query_normalized is not None else "N/A"
-        dist_medoid = f"{seq.distance_to_medoid_normalized:.4f}" if seq.distance_to_medoid_normalized is not None else "N/A"
-        dist_non_mem = f"{seq.distance_to_nearest_non_member_normalized:.4f}" if seq.distance_to_nearest_non_member_normalized is not None else "N/A"
-        lines.append(f"{seq.index:<5} {seq.id:<30} {in_cluster:<8} {dist_query:<10} {dist_medoid:<10} {dist_non_mem:<10}")
+        id_query = f"{seq.identity_to_query_normalized:.2f}%" if seq.identity_to_query_normalized is not None else "N/A"
+        id_medoid = f"{seq.identity_to_medoid_normalized:.2f}%" if seq.identity_to_medoid_normalized is not None else "N/A"
+        id_non_mem = f"{seq.identity_to_nearest_non_member_normalized:.2f}%" if seq.identity_to_nearest_non_member_normalized is not None else "N/A"
+        lines.append(f"{seq.index:<5} {seq.id:<30} {in_cluster:<8} {id_query:<10} {id_medoid:<10} {id_non_mem:<10}")
 
     lines.append("")
 
@@ -630,7 +642,7 @@ def format_text_output(result: BlastAnalysisResult) -> str:
     lines.append(f"min_split: {result.min_split}")
     lines.append(f"max_lump: {result.max_lump}")
     lines.append(f"Normalization length: {result.normalization_length} bp")
-    lines.append(f"Distance metric: {result.distance_metric}")
+    lines.append(f"Identity metric: {result.distance_metric}")
 
     if result.warnings:
         lines.append("")
@@ -648,15 +660,15 @@ def format_tsv_output(result: BlastAnalysisResult) -> str:
     lines = []
 
     # Header
-    lines.append("index\tid\tin_query_cluster\tdistance_to_query\tdistance_to_query_normalized\tdistance_to_medoid_normalized\tdistance_to_nearest_non_member_normalized")
+    lines.append("index\tid\tin_query_cluster\tidentity_to_query\tidentity_to_query_normalized\tidentity_to_medoid_normalized\tidentity_to_nearest_non_member_normalized")
 
     # Data rows
     for seq in result.sequences:
         in_cluster = "true" if seq.in_query_cluster else "false"
-        dist = f"{seq.distance_to_query:.4f}" if seq.distance_to_query is not None else ""
-        dist_norm = f"{seq.distance_to_query_normalized:.4f}" if seq.distance_to_query_normalized is not None else ""
-        dist_medoid = f"{seq.distance_to_medoid_normalized:.4f}" if seq.distance_to_medoid_normalized is not None else ""
-        dist_non_mem = f"{seq.distance_to_nearest_non_member_normalized:.4f}" if seq.distance_to_nearest_non_member_normalized is not None else ""
-        lines.append(f"{seq.index}\t{seq.id}\t{in_cluster}\t{dist}\t{dist_norm}\t{dist_medoid}\t{dist_non_mem}")
+        identity = f"{seq.identity_to_query:.2f}" if seq.identity_to_query is not None else ""
+        identity_norm = f"{seq.identity_to_query_normalized:.2f}" if seq.identity_to_query_normalized is not None else ""
+        identity_medoid = f"{seq.identity_to_medoid_normalized:.2f}" if seq.identity_to_medoid_normalized is not None else ""
+        identity_non_mem = f"{seq.identity_to_nearest_non_member_normalized:.2f}" if seq.identity_to_nearest_non_member_normalized is not None else ""
+        lines.append(f"{seq.index}\t{seq.id}\t{in_cluster}\t{identity}\t{identity_norm}\t{identity_medoid}\t{identity_non_mem}")
 
     return "\n".join(lines)

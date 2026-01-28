@@ -87,8 +87,8 @@ Examples:
 
 Output fields:
   - in_query_cluster: Whether the sequence clusters with the query
-  - distance_to_query: MycoBLAST-adjusted distance (0.01 = 99% effective identity)
-  - gap_size: Barcode gap magnitude (inter_min - intra_max)
+  - identity_to_query: MycoBLAST-adjusted identity (e.g., 99.63%)
+  - gap_size_percent: Barcode gap magnitude in percentage points
         """
     )
 
