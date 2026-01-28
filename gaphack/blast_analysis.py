@@ -25,6 +25,8 @@ class SequenceResult:
     in_query_cluster: bool
     distance_to_query: Optional[float]  # Pairwise distance (comparable to BLAST)
     distance_to_query_normalized: Optional[float]  # Normalized distance (used by clustering)
+    distance_to_medoid_normalized: Optional[float]  # Distance to query cluster medoid
+    distance_to_nearest_non_member_normalized: Optional[float]  # For members: distance to nearest non-member
 
 
 @dataclass
@@ -40,6 +42,10 @@ class BlastAnalysisResult:
     barcode_gap_found: bool
     gap_size: Optional[float]  # Inter min - intra max (in distance units)
     gap_size_percent: Optional[float]  # Gap size as percentage
+
+    # Query cluster medoid (most representative sequence)
+    medoid_id: Optional[str]  # Header of the medoid sequence
+    medoid_index: Optional[int]  # 0-based index of the medoid in input
 
     # Intra-cluster distance distribution (within query cluster)
     intra_cluster_distance: Dict[str, Optional[float]]  # min, p5, median, p95, max
@@ -80,6 +86,8 @@ class BlastAnalysisResult:
                 "barcode_gap_found": self.barcode_gap_found,
                 "gap_size": round_distance(self.gap_size),
                 "gap_size_percent": round(self.gap_size_percent, 2) if self.gap_size_percent is not None else None,
+                "medoid_id": self.medoid_id,
+                "medoid_index": self.medoid_index,
                 "intra_cluster_distance": intra_rounded,
                 "nearest_other_distance": round_distance(self.nearest_other_distance)
             },
@@ -89,7 +97,9 @@ class BlastAnalysisResult:
                     "id": seq.id,
                     "in_query_cluster": seq.in_query_cluster,
                     "distance_to_query": round_distance(seq.distance_to_query),
-                    "distance_to_query_normalized": round_distance(seq.distance_to_query_normalized)
+                    "distance_to_query_normalized": round_distance(seq.distance_to_query_normalized),
+                    "distance_to_medoid_normalized": round_distance(seq.distance_to_medoid_normalized),
+                    "distance_to_nearest_non_member_normalized": round_distance(seq.distance_to_nearest_non_member_normalized)
                 }
                 for seq in self.sequences
             ],
@@ -182,10 +192,33 @@ class BlastAnalyzer:
         # Determine query cluster set (sequences in target cluster)
         query_cluster_set = set(target_cluster)
 
+        # Find the medoid of the query cluster
+        medoid_idx = self._find_query_cluster_medoid(
+            distance_provider,
+            list(query_cluster_set)
+        )
+        medoid_id = headers[medoid_idx]
+
+        # Extract distances to medoid for all sequences
+        distances_to_medoid = self._extract_distances_to_medoid(
+            distance_provider,
+            medoid_idx,
+            len(sequences)
+        )
+
+        # Compute distances to nearest non-member for cluster members
+        remaining_set = set(remaining)
+        distances_to_nearest_non_member = self._compute_distances_to_nearest_non_member(
+            distance_provider,
+            query_cluster_set,
+            remaining_set,
+            len(sequences)
+        )
+
         # Compute gap metrics
         gap_metrics = self._compute_gap_metrics(
             query_cluster_set,
-            set(remaining),
+            remaining_set,
             distances_to_query,
             metrics
         )
@@ -194,7 +227,9 @@ class BlastAnalyzer:
         sequence_results = self._classify_sequences(
             headers,
             query_cluster_set,
-            distances_to_query
+            distances_to_query,
+            distances_to_medoid,
+            distances_to_nearest_non_member
         )
 
         # Check for warnings
@@ -216,6 +251,8 @@ class BlastAnalyzer:
             barcode_gap_found=gap_metrics['gap_found'],
             gap_size=gap_metrics['gap_size'],
             gap_size_percent=gap_metrics['gap_size_percent'],
+            medoid_id=medoid_id,
+            medoid_index=medoid_idx,
             intra_cluster_distance=gap_metrics['intra_cluster_distance'],
             nearest_other_distance=gap_metrics['nearest_other_distance'],
             sequences=sequence_results,
@@ -248,6 +285,113 @@ class BlastAnalyzer:
                     }
                 else:
                     distances[i] = {'pairwise': None, 'normalized': None}
+        return distances
+
+    def _find_query_cluster_medoid(self,
+                                    distance_provider: MSACachedDistanceProvider,
+                                    query_cluster_indices: List[int]) -> int:
+        """Find the medoid of the query cluster.
+
+        The medoid is the sequence with minimum total distance to all other members.
+
+        Args:
+            distance_provider: MSA-based distance provider
+            query_cluster_indices: List of sequence indices in the query cluster
+
+        Returns:
+            Index of the medoid sequence
+        """
+        if len(query_cluster_indices) == 0:
+            raise ValueError("Cannot find medoid of empty cluster")
+
+        if len(query_cluster_indices) == 1:
+            return query_cluster_indices[0]
+
+        min_total_distance = float('inf')
+        medoid_idx = query_cluster_indices[0]
+
+        for candidate_idx in query_cluster_indices:
+            total_distance = 0.0
+            for other_idx in query_cluster_indices:
+                if candidate_idx != other_idx:
+                    distance = distance_provider.get_distance(candidate_idx, other_idx)
+                    if not np.isnan(distance):
+                        total_distance += distance
+
+            if total_distance < min_total_distance:
+                min_total_distance = total_distance
+                medoid_idx = candidate_idx
+
+        return medoid_idx
+
+    def _extract_distances_to_medoid(self,
+                                      distance_provider: MSACachedDistanceProvider,
+                                      medoid_idx: int,
+                                      n: int) -> Dict[int, Optional[float]]:
+        """Extract normalized distances from all sequences to the medoid.
+
+        Args:
+            distance_provider: MSA-based distance provider
+            medoid_idx: Index of the medoid sequence
+            n: Total number of sequences
+
+        Returns:
+            Dict mapping sequence index to normalized distance to medoid
+        """
+        distances = {}
+        for i in range(n):
+            if i == medoid_idx:
+                distances[i] = 0.0
+            else:
+                result = distance_provider.get_distance_detailed(medoid_idx, i)
+                if result.is_valid:
+                    distances[i] = result.distance_normalized
+                else:
+                    distances[i] = None
+        return distances
+
+    def _compute_distances_to_nearest_non_member(self,
+                                                  distance_provider: MSACachedDistanceProvider,
+                                                  query_cluster_set: set,
+                                                  non_member_set: set,
+                                                  n: int) -> Dict[int, Optional[float]]:
+        """Compute distance to nearest non-member for each cluster member.
+
+        Args:
+            distance_provider: MSA-based distance provider
+            query_cluster_set: Set of indices in the query cluster
+            non_member_set: Set of indices NOT in the query cluster
+            n: Total number of sequences
+
+        Returns:
+            Dict mapping sequence index to distance to nearest non-member.
+            Only cluster members have values; non-members get None.
+        """
+        distances = {}
+
+        # Non-members get None
+        for idx in range(n):
+            if idx not in query_cluster_set:
+                distances[idx] = None
+                continue
+
+            # For cluster members, find the nearest non-member
+            if not non_member_set:
+                # No non-members exist
+                distances[idx] = None
+                continue
+
+            min_distance = float('inf')
+            for non_member_idx in non_member_set:
+                result = distance_provider.get_distance_detailed(idx, non_member_idx)
+                if result.is_valid and result.distance_normalized < min_distance:
+                    min_distance = result.distance_normalized
+
+            if min_distance == float('inf'):
+                distances[idx] = None
+            else:
+                distances[idx] = min_distance
+
         return distances
 
     def _compute_gap_metrics(self,
@@ -320,7 +464,9 @@ class BlastAnalyzer:
     def _classify_sequences(self,
                             headers: List[str],
                             query_cluster_set: set,
-                            distances_to_query: Dict[int, Dict[str, Optional[float]]]) -> List[SequenceResult]:
+                            distances_to_query: Dict[int, Dict[str, Optional[float]]],
+                            distances_to_medoid: Dict[int, Optional[float]],
+                            distances_to_nearest_non_member: Dict[int, Optional[float]]) -> List[SequenceResult]:
         """Classify each sequence based on clustering results."""
         results = []
 
@@ -333,7 +479,9 @@ class BlastAnalyzer:
                 id=header,
                 in_query_cluster=in_cluster,
                 distance_to_query=dist_info.get('pairwise'),
-                distance_to_query_normalized=dist_info.get('normalized')
+                distance_to_query_normalized=dist_info.get('normalized'),
+                distance_to_medoid_normalized=distances_to_medoid.get(idx),
+                distance_to_nearest_non_member_normalized=distances_to_nearest_non_member.get(idx)
             ))
 
         return results
@@ -352,7 +500,9 @@ class BlastAnalyzer:
                 id=headers[0],
                 in_query_cluster=True,
                 distance_to_query=0.0,
-                distance_to_query_normalized=0.0
+                distance_to_query_normalized=0.0,
+                distance_to_medoid_normalized=0.0,  # Query is its own medoid
+                distance_to_nearest_non_member_normalized=None  # No non-members exist
             ))
 
         return BlastAnalysisResult(
@@ -363,6 +513,8 @@ class BlastAnalyzer:
             barcode_gap_found=False,
             gap_size=None,
             gap_size_percent=None,
+            medoid_id=query_id if headers else None,
+            medoid_index=0 if headers else None,
             intra_cluster_distance={"min": None, "p5": None, "median": None, "p95": None, "max": None},
             nearest_other_distance=None,
             sequences=sequence_results,
@@ -389,7 +541,9 @@ class BlastAnalyzer:
                 id=header,
                 in_query_cluster=(i == 0),  # Only query is in cluster
                 distance_to_query=0.0 if i == 0 else None,
-                distance_to_query_normalized=0.0 if i == 0 else None
+                distance_to_query_normalized=0.0 if i == 0 else None,
+                distance_to_medoid_normalized=0.0 if i == 0 else None,  # Query is its own medoid
+                distance_to_nearest_non_member_normalized=None  # Cannot compute without alignment
             ))
 
         return BlastAnalysisResult(
@@ -400,6 +554,8 @@ class BlastAnalyzer:
             barcode_gap_found=False,
             gap_size=None,
             gap_size_percent=None,
+            medoid_id=query_id if headers else None,
+            medoid_index=0 if headers else None,
             intra_cluster_distance={"min": None, "p5": None, "median": None, "p95": None, "max": None},
             nearest_other_distance=None,
             sequences=sequence_results,
@@ -434,6 +590,10 @@ def format_text_output(result: BlastAnalysisResult) -> str:
     lines.append(f"Query cluster size: {result.query_cluster_size}")
     lines.append(f"Barcode gap found: {'Yes' if result.barcode_gap_found else 'No'}")
 
+    if result.medoid_id is not None:
+        medoid_is_query = " (query)" if result.medoid_index == 0 else ""
+        lines.append(f"Cluster medoid: {result.medoid_id} (index {result.medoid_index}){medoid_is_query}")
+
     if result.gap_size is not None:
         lines.append(f"Gap size: {result.gap_size:.4f} ({result.gap_size_percent:.2f}%)")
 
@@ -450,14 +610,15 @@ def format_text_output(result: BlastAnalysisResult) -> str:
     lines.append("-" * 40)
     lines.append("Sequence Classifications")
     lines.append("-" * 40)
-    lines.append(f"{'Idx':<5} {'ID':<30} {'In Cluster':<12} {'Distance':<10} {'Dist (norm)':<12}")
-    lines.append("-" * 70)
+    lines.append(f"{'Idx':<5} {'ID':<30} {'Member':<8} {'To Query':<10} {'To Medoid':<10} {'To Non-Mem':<10}")
+    lines.append("-" * 85)
 
     for seq in result.sequences:
         in_cluster = "Yes" if seq.in_query_cluster else "No"
-        dist = f"{seq.distance_to_query:.4f}" if seq.distance_to_query is not None else "N/A"
-        dist_norm = f"{seq.distance_to_query_normalized:.4f}" if seq.distance_to_query_normalized is not None else "N/A"
-        lines.append(f"{seq.index:<5} {seq.id:<30} {in_cluster:<12} {dist:<10} {dist_norm:<12}")
+        dist_query = f"{seq.distance_to_query_normalized:.4f}" if seq.distance_to_query_normalized is not None else "N/A"
+        dist_medoid = f"{seq.distance_to_medoid_normalized:.4f}" if seq.distance_to_medoid_normalized is not None else "N/A"
+        dist_non_mem = f"{seq.distance_to_nearest_non_member_normalized:.4f}" if seq.distance_to_nearest_non_member_normalized is not None else "N/A"
+        lines.append(f"{seq.index:<5} {seq.id:<30} {in_cluster:<8} {dist_query:<10} {dist_medoid:<10} {dist_non_mem:<10}")
 
     lines.append("")
 
@@ -487,13 +648,15 @@ def format_tsv_output(result: BlastAnalysisResult) -> str:
     lines = []
 
     # Header
-    lines.append("index\tid\tin_query_cluster\tdistance_to_query\tdistance_to_query_normalized")
+    lines.append("index\tid\tin_query_cluster\tdistance_to_query\tdistance_to_query_normalized\tdistance_to_medoid_normalized\tdistance_to_nearest_non_member_normalized")
 
     # Data rows
     for seq in result.sequences:
         in_cluster = "true" if seq.in_query_cluster else "false"
         dist = f"{seq.distance_to_query:.4f}" if seq.distance_to_query is not None else ""
         dist_norm = f"{seq.distance_to_query_normalized:.4f}" if seq.distance_to_query_normalized is not None else ""
-        lines.append(f"{seq.index}\t{seq.id}\t{in_cluster}\t{dist}\t{dist_norm}")
+        dist_medoid = f"{seq.distance_to_medoid_normalized:.4f}" if seq.distance_to_medoid_normalized is not None else ""
+        dist_non_mem = f"{seq.distance_to_nearest_non_member_normalized:.4f}" if seq.distance_to_nearest_non_member_normalized is not None else ""
+        lines.append(f"{seq.index}\t{seq.id}\t{in_cluster}\t{dist}\t{dist_norm}\t{dist_medoid}\t{dist_non_mem}")
 
     return "\n".join(lines)
