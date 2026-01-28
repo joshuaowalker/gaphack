@@ -38,6 +38,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Integration tests with real biological sequences
   - Histogram functionality tests
 
+### Changed
+- **Default output location**: `gaphack` now writes output files to the current working directory instead of the input file's directory
+  - Before: `gaphack /data/seqs.fasta` → `/data/seqs.cluster_001.fasta`
+  - After: `gaphack /data/seqs.fasta` → `./seqs.cluster_001.fasta`
+  - Use `-o /path/to/output` to specify a different location
+- Output path now logged at INFO level (previously DEBUG) so users can see where files are written
+
+### Fixed
+- `--target-percentile` now correctly affects linkage distance calculation in target mode (previously hardcoded to P95 regardless of setting)
+
 ## [0.6.0] - 2025-10-17
 
 ### Changed
