@@ -14,9 +14,11 @@ from gaphack.blast_analysis import (
     BlastAnalyzer,
     BlastAnalysisResult,
     SequenceResult,
+    HistogramData,
     format_text_output,
     format_tsv_output,
-    _distance_to_identity
+    _distance_to_identity,
+    _build_histogram
 )
 from gaphack.utils import MSADistanceResult
 
@@ -796,3 +798,174 @@ class TestBlastAnalyzerIntegration:
                 f"Only {same_species_in_cluster}/{same_species_total} "
                 f"conspecifics in cluster (expected >50%)"
             )
+
+
+class TestHistograms:
+    """Test suite for histogram functionality."""
+
+    def test_build_histogram_basic(self):
+        """Test basic histogram building."""
+        values = [99.0, 99.2, 99.5, 99.7, 100.0]
+        histogram = _build_histogram(values, bin_width=0.5)
+
+        assert histogram is not None
+        assert histogram.bin_width_percent == 0.5
+        # Values span 99.0-100.0, should have bins at 99.0, 99.5, 100.0
+        assert len(histogram.bin_starts) > 0
+        assert sum(histogram.counts) == 5  # All values accounted for
+        # Frequencies should sum to 1.0
+        assert abs(sum(histogram.frequencies) - 1.0) < 0.0001
+
+    def test_build_histogram_empty_input(self):
+        """Test histogram with empty input."""
+        histogram = _build_histogram([])
+        assert histogram is None
+
+        histogram = _build_histogram([None, None])
+        assert histogram is None
+
+    def test_build_histogram_single_value(self):
+        """Test histogram with single value."""
+        histogram = _build_histogram([99.5])
+        assert histogram is not None
+        assert len(histogram.bin_starts) == 1
+        assert histogram.counts == [1]
+        assert histogram.frequencies == [1.0]
+
+    def test_build_histogram_omits_empty_bins(self):
+        """Test that empty bins are omitted."""
+        # Values at 95% and 99% with gap in between
+        values = [95.0, 95.1, 99.0, 99.1]
+        histogram = _build_histogram(values, bin_width=0.5)
+
+        assert histogram is not None
+        # Should only have bins at 95.0 and 99.0, not the empty ones in between
+        assert 96.0 not in histogram.bin_starts
+        assert 97.0 not in histogram.bin_starts
+        assert sum(histogram.counts) == 4
+
+    def test_histogram_in_json_output(self):
+        """Test that histograms appear in JSON output."""
+        result = BlastAnalysisResult(
+            query_id="query",
+            query_length=100,
+            total_sequences=5,
+            query_cluster_size=3,
+            barcode_gap_found=True,
+            gap_size_percent=2.0,
+            medoid_id="query",
+            medoid_index=0,
+            intra_cluster_identity={"min": 98.0, "p5": 98.5, "median": 99.0, "p95": 99.5, "max": 100.0},
+            nearest_non_member_identity=96.0,
+            sequences=[],
+            method="gap-optimized-target-clustering",
+            min_split=0.005,
+            max_lump=0.02,
+            normalization_length=100,
+            distance_metric="test",
+            warnings=[],
+            intra_cluster_histogram=HistogramData(
+                bin_width_percent=0.5,
+                bin_starts=[99.0, 99.5, 100.0],
+                counts=[2, 3, 1],
+                frequencies=[2/6, 3/6, 1/6]
+            ),
+            inter_cluster_histogram=HistogramData(
+                bin_width_percent=0.5,
+                bin_starts=[95.5, 96.0],
+                counts=[1, 2],
+                frequencies=[1/3, 2/3]
+            )
+        )
+
+        json_dict = result.to_dict()
+
+        # Check histogram structure in diagnostics
+        assert "histograms" in json_dict["diagnostics"]
+        histograms = json_dict["diagnostics"]["histograms"]
+
+        assert "intra_cluster" in histograms
+        assert "inter_cluster" in histograms
+
+        intra = histograms["intra_cluster"]
+        assert intra["bin_width_percent"] == 0.5
+        assert intra["bin_starts"] == [99.0, 99.5, 100.0]
+        assert intra["counts"] == [2, 3, 1]
+        assert "frequencies" in intra
+        assert abs(sum(intra["frequencies"]) - 1.0) < 0.0001
+
+        inter = histograms["inter_cluster"]
+        assert inter["bin_starts"] == [95.5, 96.0]
+        assert inter["counts"] == [1, 2]
+        assert "frequencies" in inter
+        assert abs(sum(inter["frequencies"]) - 1.0) < 0.0001
+
+    def test_histogram_none_when_insufficient_data(self):
+        """Test that histograms are None for edge cases."""
+        result = BlastAnalysisResult(
+            query_id="query",
+            query_length=100,
+            total_sequences=1,
+            query_cluster_size=1,
+            barcode_gap_found=False,
+            gap_size_percent=None,
+            medoid_id="query",
+            medoid_index=0,
+            intra_cluster_identity={"min": None, "p5": None, "median": None, "p95": None, "max": None},
+            nearest_non_member_identity=None,
+            sequences=[],
+            method="gap-optimized-target-clustering",
+            min_split=0.005,
+            max_lump=0.02,
+            normalization_length=100,
+            distance_metric="test",
+            warnings=[],
+            intra_cluster_histogram=None,
+            inter_cluster_histogram=None
+        )
+
+        json_dict = result.to_dict()
+        assert json_dict["diagnostics"]["histograms"]["intra_cluster"] is None
+        assert json_dict["diagnostics"]["histograms"]["inter_cluster"] is None
+
+    @pytest.mark.integration
+    def test_histogram_integration_with_real_sequences(self):
+        """Test histograms are computed correctly with real sequences."""
+        fasta_path = TEST_DATA_DIR / "russula_diverse_50.fasta"
+        if not fasta_path.exists():
+            pytest.skip(f"Test data not found: {fasta_path}")
+
+        # Load first 20 sequences
+        sequences = []
+        headers = []
+        for i, record in enumerate(SeqIO.parse(fasta_path, "fasta")):
+            if i >= 20:
+                break
+            sequences.append(str(record.seq).upper())
+            headers.append(record.id)
+
+        analyzer = BlastAnalyzer(
+            min_split=0.005,
+            max_lump=0.02,
+            show_progress=False
+        )
+
+        result = analyzer.analyze(sequences, headers)
+
+        # Should have histograms if cluster has multiple members
+        if result.query_cluster_size > 1:
+            assert result.intra_cluster_histogram is not None
+            assert result.intra_cluster_histogram.bin_width_percent == 0.5
+            assert len(result.intra_cluster_histogram.bin_starts) > 0
+            assert sum(result.intra_cluster_histogram.counts) > 0
+
+            # Number of intra-cluster pairs = n*(n-1)/2
+            n = result.query_cluster_size
+            expected_pairs = n * (n - 1) // 2
+            assert sum(result.intra_cluster_histogram.counts) == expected_pairs
+
+        # Should have inter-cluster histogram if there are non-members
+        if result.query_cluster_size < result.total_sequences:
+            assert result.inter_cluster_histogram is not None
+            # One entry per cluster member
+            assert sum(result.inter_cluster_histogram.counts) == result.query_cluster_size

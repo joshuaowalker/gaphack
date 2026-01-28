@@ -87,7 +87,21 @@ gaphack-blast input.fasta --format json
     "max_lump": 0.02,
     "normalization_length": 650,
     "identity_metric": "MycoBLAST-adjusted (homopolymer-normalized, indel-normalized)",
-    "warnings": []
+    "warnings": [],
+    "histograms": {
+      "intra_cluster": {
+        "bin_width_percent": 0.5,
+        "bin_starts": [98.5, 99.0, 99.5, 100.0],
+        "counts": [2, 15, 42, 12],
+        "frequencies": [0.0282, 0.2113, 0.5915, 0.1690]
+      },
+      "inter_cluster": {
+        "bin_width_percent": 0.5,
+        "bin_starts": [92.0, 92.5, 93.0, 94.5, 95.0, 97.5],
+        "counts": [3, 8, 2, 1, 5, 1],
+        "frequencies": [0.15, 0.4, 0.1, 0.05, 0.25, 0.05]
+      }
+    }
   }
 }
 ```
@@ -145,6 +159,27 @@ Human-readable report for debugging.
 | `normalization_length` | int | Median sequence length used for normalization |
 | `identity_metric` | string | Description of identity calculation method |
 | `warnings` | array | Any issues encountered during analysis |
+| `histograms` | object | Identity distribution histograms (see below) |
+
+### Histogram Fields
+
+The `histograms` object contains pre-binned identity distributions for visualization:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `intra_cluster` | object | Distribution of identities within query cluster |
+| `inter_cluster` | object | Distribution of identities from cluster members to non-members |
+
+Each histogram object contains:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `bin_width_percent` | float | Width of each bin in identity percentage points (0.5%) |
+| `bin_starts` | array | Starting identity % for each non-empty bin |
+| `counts` | array | Raw count of values in each bin |
+| `frequencies` | array | Normalized frequencies (sum to 1.0) |
+
+**Note**: Empty bins are omitted from the output for compactness.
 
 ## Understanding the Metrics
 
@@ -177,6 +212,36 @@ Example:
 - Intra-cluster min: 98.5% (most distant conspecific)
 - Nearest non-member: 97.68% (closest non-conspecific)
 - Gap: 98.5 - 97.68 = **0.82%**
+
+### Histograms for Visualization
+
+The `diagnostics.histograms` field provides pre-binned identity distributions for rendering barcode gap visualizations:
+
+- **`intra_cluster`**: Pairwise identities among sequences within the query cluster (O(N²) comparisons)
+- **`inter_cluster`**: Identities from each cluster member to the nearest non-member (O(N) comparisons)
+
+**Bin structure**: Fixed 0.5% bin width. Each bin is defined by its starting identity percentage. Empty bins are omitted for compactness.
+
+**Counts vs Frequencies**: Both raw counts and normalized frequencies are provided:
+- Use **counts** when you need the actual number of comparisons
+- Use **frequencies** when overlaying intra and inter distributions on the same chart (since they have different sample sizes: N² vs N)
+
+**Visualization example**: Render both distributions as overlapping histograms with different colors. A clear barcode gap appears as separation between the two distributions.
+
+```
+Identity %    intra_cluster (blue)    inter_cluster (red)
+100.0         ████████
+99.5          ████████████████████
+99.0          ██████
+98.5          ██
+98.0
+97.5                                  █
+...
+93.0                                  ██
+92.5                                  ████████████████
+92.0                                  ██████
+              ↑ cluster members       ↑ nearest non-members
+```
 
 ### Medoid
 
@@ -253,6 +318,44 @@ def has_clear_boundary(result: dict, min_gap: float = 0.5) -> bool:
         summary["gap_size_percent"] is not None and
         summary["gap_size_percent"] >= min_gap
     )
+```
+
+### Rendering Barcode Gap Visualization
+
+```python
+def get_histogram_data(result: dict) -> tuple[dict, dict]:
+    """Extract histogram data for visualization."""
+    histograms = result["diagnostics"]["histograms"]
+    return histograms["intra_cluster"], histograms["inter_cluster"]
+
+def render_histogram_chart(result: dict):
+    """Example: render overlapping histograms with matplotlib."""
+    import matplotlib.pyplot as plt
+
+    intra, inter = get_histogram_data(result)
+
+    # Use frequencies for normalized comparison
+    fig, ax = plt.subplots()
+
+    # Intra-cluster (blue)
+    ax.bar(intra["bin_starts"], intra["frequencies"],
+           width=0.4, alpha=0.7, label="Intra-cluster", color="blue")
+
+    # Inter-cluster (red)
+    ax.bar(inter["bin_starts"], inter["frequencies"],
+           width=0.4, alpha=0.7, label="Inter-cluster", color="red")
+
+    ax.set_xlabel("Identity %")
+    ax.set_ylabel("Frequency")
+    ax.legend()
+
+    # Mark the gap region
+    gap_start = result["summary"]["nearest_non_member_identity"]
+    gap_end = result["summary"]["intra_cluster_identity"]["min"]
+    if gap_start < gap_end:
+        ax.axvspan(gap_start, gap_end, alpha=0.2, color="green", label="Gap")
+
+    return fig
 ```
 
 ### Handling Edge Cases

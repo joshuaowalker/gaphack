@@ -18,6 +18,24 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class HistogramData:
+    """Histogram data with non-empty bins only."""
+    bin_width_percent: float  # Width of each bin in identity percentage points
+    bin_starts: List[float]  # Starting identity % for each non-empty bin
+    counts: List[int]  # Count of values in each bin
+    frequencies: List[float]  # Normalized frequencies (sum to 1.0)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "bin_width_percent": self.bin_width_percent,
+            "bin_starts": [round(b, 2) for b in self.bin_starts],
+            "counts": self.counts,
+            "frequencies": [round(f, 4) for f in self.frequencies]
+        }
+
+
+@dataclass
 class SequenceResult:
     """Result for a single sequence in the BLAST analysis."""
     index: int  # 0-based position in input (index 0 is the query)
@@ -63,6 +81,10 @@ class BlastAnalysisResult:
     distance_metric: str
     warnings: List[str] = field(default_factory=list)
 
+    # Histograms for visualization (in diagnostics)
+    intra_cluster_histogram: Optional[HistogramData] = None
+    inter_cluster_histogram: Optional[HistogramData] = None
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         def round_identity(val: Optional[float]) -> Optional[float]:
@@ -107,7 +129,11 @@ class BlastAnalysisResult:
                 "max_lump": self.max_lump,
                 "normalization_length": self.normalization_length,
                 "identity_metric": self.distance_metric,
-                "warnings": self.warnings
+                "warnings": self.warnings,
+                "histograms": {
+                    "intra_cluster": self.intra_cluster_histogram.to_dict() if self.intra_cluster_histogram else None,
+                    "inter_cluster": self.inter_cluster_histogram.to_dict() if self.inter_cluster_histogram else None
+                }
             }
         }
 
@@ -121,6 +147,62 @@ def _distance_to_identity(distance: Optional[float]) -> Optional[float]:
     if distance is None or np.isnan(distance):
         return None
     return (1.0 - distance) * 100.0
+
+
+def _build_histogram(values: List[float], bin_width: float = 0.5) -> Optional[HistogramData]:
+    """Build a histogram from identity values, omitting empty bins.
+
+    Args:
+        values: List of identity percentages (0-100)
+        bin_width: Width of each bin in percentage points (default 0.5%)
+
+    Returns:
+        HistogramData with non-empty bins, or None if no valid values
+    """
+    if not values:
+        return None
+
+    # Filter out invalid values
+    valid_values = [v for v in values if v is not None and not np.isnan(v)]
+    if not valid_values:
+        return None
+
+    # Determine bin edges based on data range
+    min_val = min(valid_values)
+    max_val = max(valid_values)
+
+    # Align bin edges to bin_width boundaries
+    # e.g., if min_val=98.3 and bin_width=0.5, start at 98.0
+    bin_start = np.floor(min_val / bin_width) * bin_width
+    bin_end = np.ceil(max_val / bin_width) * bin_width + bin_width
+
+    # Create bin edges
+    bin_edges = np.arange(bin_start, bin_end + bin_width, bin_width)
+
+    # Compute histogram
+    counts, edges = np.histogram(valid_values, bins=bin_edges)
+
+    # Filter to non-empty bins only
+    non_empty_bins = []
+    non_empty_counts = []
+    for i, count in enumerate(counts):
+        if count > 0:
+            non_empty_bins.append(float(edges[i]))
+            non_empty_counts.append(int(count))
+
+    if not non_empty_bins:
+        return None
+
+    # Compute frequencies (normalized to sum to 1.0)
+    total = sum(non_empty_counts)
+    frequencies = [c / total for c in non_empty_counts]
+
+    return HistogramData(
+        bin_width_percent=bin_width,
+        bin_starts=non_empty_bins,
+        counts=non_empty_counts,
+        frequencies=frequencies
+    )
 
 
 class BlastAnalyzer:
@@ -262,6 +344,22 @@ class BlastAnalyzer:
         if nan_count > 0:
             warnings.append(f"{nan_count} sequences had insufficient overlap for distance calculation")
 
+        # Compute histograms for visualization
+        # Intra-cluster: all pairwise identities within the query cluster
+        all_intra_identities = self._compute_all_intra_cluster_identities(
+            distance_provider,
+            list(query_cluster_set)
+        )
+        intra_histogram = _build_histogram(all_intra_identities, bin_width=0.5)
+
+        # Inter-cluster: each member's identity to their nearest non-member
+        inter_identities = [
+            identities_to_nearest_non_member[idx]
+            for idx in query_cluster_set
+            if identities_to_nearest_non_member.get(idx) is not None
+        ]
+        inter_histogram = _build_histogram(inter_identities, bin_width=0.5)
+
         return BlastAnalysisResult(
             query_id=query_id,
             query_length=query_length,
@@ -279,7 +377,9 @@ class BlastAnalyzer:
             max_lump=self.max_lump,
             normalization_length=distance_provider.normalization_length,
             distance_metric="MycoBLAST-adjusted (homopolymer-normalized, indel-normalized)",
-            warnings=warnings
+            warnings=warnings,
+            intra_cluster_histogram=intra_histogram,
+            inter_cluster_histogram=inter_histogram
         )
 
     def _extract_identities_to_query(self,
@@ -409,6 +509,31 @@ class BlastAnalyzer:
                 identities[idx] = None
             else:
                 identities[idx] = _distance_to_identity(min_distance)
+
+        return identities
+
+    def _compute_all_intra_cluster_identities(self,
+                                               distance_provider: MSACachedDistanceProvider,
+                                               query_cluster_indices: List[int]) -> List[float]:
+        """Compute all pairwise identities within the query cluster.
+
+        Args:
+            distance_provider: MSA-based distance provider
+            query_cluster_indices: List of sequence indices in the query cluster
+
+        Returns:
+            List of identity percentages for all pairs within the cluster
+        """
+        identities = []
+        n = len(query_cluster_indices)
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                idx_i = query_cluster_indices[i]
+                idx_j = query_cluster_indices[j]
+                distance = distance_provider.get_distance(idx_i, idx_j)
+                if not np.isnan(distance):
+                    identities.append(_distance_to_identity(distance))
 
         return identities
 
