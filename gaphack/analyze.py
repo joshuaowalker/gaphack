@@ -168,6 +168,9 @@ def create_histogram(distances: np.ndarray,
     """
     fig, ax = plt.subplots(figsize=(10, 6))
 
+    # Ensure distances is a numpy array
+    distances = np.asarray(distances)
+
     # Filter out NaN values
     distances = distances[~np.isnan(distances)] if len(distances) > 0 else distances
 

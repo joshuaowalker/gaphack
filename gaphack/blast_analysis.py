@@ -23,7 +23,8 @@ class SequenceResult:
     index: int  # 0-based position in input (index 0 is the query)
     id: str
     in_query_cluster: bool
-    distance_to_query: Optional[float]
+    distance_to_query: Optional[float]  # Pairwise distance (comparable to BLAST)
+    distance_to_query_normalized: Optional[float]  # Normalized distance (used by clustering)
 
 
 @dataclass
@@ -87,7 +88,8 @@ class BlastAnalysisResult:
                     "index": seq.index,
                     "id": seq.id,
                     "in_query_cluster": seq.in_query_cluster,
-                    "distance_to_query": round_distance(seq.distance_to_query)
+                    "distance_to_query": round_distance(seq.distance_to_query),
+                    "distance_to_query_normalized": round_distance(seq.distance_to_query_normalized)
                 }
                 for seq in self.sequences
             ],
@@ -199,8 +201,10 @@ class BlastAnalyzer:
         if len(target_cluster) == 1:
             warnings.append("Query has no close matches")
 
-        # Check for NaN distances
-        nan_count = sum(1 for d in distances_to_query.values() if d is None or (isinstance(d, float) and np.isnan(d)))
+        # Check for NaN distances (check the pairwise distance)
+        nan_count = sum(1 for d in distances_to_query.values()
+                        if d.get('pairwise') is None or
+                        (isinstance(d.get('pairwise'), float) and np.isnan(d.get('pairwise'))))
         if nan_count > 0:
             warnings.append(f"{nan_count} sequences had insufficient overlap for distance calculation")
 
@@ -225,37 +229,53 @@ class BlastAnalyzer:
 
     def _extract_distances_to_query(self,
                                      distance_provider: MSACachedDistanceProvider,
-                                     n: int) -> Dict[int, Optional[float]]:
-        """Extract distances from all sequences to the query (index 0)."""
+                                     n: int) -> Dict[int, Dict[str, Optional[float]]]:
+        """Extract distances from all sequences to the query (index 0).
+
+        Returns:
+            Dict mapping sequence index to dict with 'pairwise' and 'normalized' distances
+        """
         distances = {}
         for i in range(n):
             if i == 0:
-                distances[i] = 0.0
+                distances[i] = {'pairwise': 0.0, 'normalized': 0.0}
             else:
-                dist = distance_provider.get_distance(0, i)
-                distances[i] = dist if not np.isnan(dist) else None
+                result = distance_provider.get_distance_detailed(0, i)
+                if result.is_valid:
+                    distances[i] = {
+                        'pairwise': result.distance_pairwise,
+                        'normalized': result.distance_normalized
+                    }
+                else:
+                    distances[i] = {'pairwise': None, 'normalized': None}
         return distances
 
     def _compute_gap_metrics(self,
                              query_cluster_set: set,
                              remaining_set: set,
-                             distances_to_query: Dict[int, Optional[float]],
+                             distances_to_query: Dict[int, Dict[str, Optional[float]]],
                              clustering_metrics: Dict) -> Dict[str, Any]:
-        """Compute barcode gap metrics from clustering results."""
+        """Compute barcode gap metrics from clustering results.
+
+        Uses normalized distances since that's what the clustering algorithm uses.
+        """
 
         # Get intra-cluster distances (query cluster members to query)
+        # Use normalized distances since that's what clustering uses
         intra_distances = []
         for idx in query_cluster_set:
             if idx == 0:
                 continue  # Skip query itself
-            dist = distances_to_query.get(idx)
+            dist_info = distances_to_query.get(idx, {})
+            dist = dist_info.get('normalized')
             if dist is not None and not np.isnan(dist):
                 intra_distances.append(dist)
 
         # Get inter-cluster distances (sequences outside query cluster to query)
         inter_distances = []
         for idx in remaining_set:
-            dist = distances_to_query.get(idx)
+            dist_info = distances_to_query.get(idx, {})
+            dist = dist_info.get('normalized')
             if dist is not None and not np.isnan(dist):
                 inter_distances.append(dist)
 
@@ -300,19 +320,20 @@ class BlastAnalyzer:
     def _classify_sequences(self,
                             headers: List[str],
                             query_cluster_set: set,
-                            distances_to_query: Dict[int, Optional[float]]) -> List[SequenceResult]:
+                            distances_to_query: Dict[int, Dict[str, Optional[float]]]) -> List[SequenceResult]:
         """Classify each sequence based on clustering results."""
         results = []
 
         for idx, header in enumerate(headers):
             in_cluster = idx in query_cluster_set
-            distance = distances_to_query.get(idx)
+            dist_info = distances_to_query.get(idx, {})
 
             results.append(SequenceResult(
                 index=idx,
                 id=header,
                 in_query_cluster=in_cluster,
-                distance_to_query=distance
+                distance_to_query=dist_info.get('pairwise'),
+                distance_to_query_normalized=dist_info.get('normalized')
             ))
 
         return results
@@ -330,7 +351,8 @@ class BlastAnalyzer:
                 index=0,
                 id=headers[0],
                 in_query_cluster=True,
-                distance_to_query=0.0
+                distance_to_query=0.0,
+                distance_to_query_normalized=0.0
             ))
 
         return BlastAnalysisResult(
@@ -366,7 +388,8 @@ class BlastAnalyzer:
                 index=i,
                 id=header,
                 in_query_cluster=(i == 0),  # Only query is in cluster
-                distance_to_query=0.0 if i == 0 else None
+                distance_to_query=0.0 if i == 0 else None,
+                distance_to_query_normalized=0.0 if i == 0 else None
             ))
 
         return BlastAnalysisResult(
@@ -427,13 +450,14 @@ def format_text_output(result: BlastAnalysisResult) -> str:
     lines.append("-" * 40)
     lines.append("Sequence Classifications")
     lines.append("-" * 40)
-    lines.append(f"{'Idx':<5} {'ID':<30} {'In Cluster':<12} {'Distance':<10}")
-    lines.append("-" * 57)
+    lines.append(f"{'Idx':<5} {'ID':<30} {'In Cluster':<12} {'Distance':<10} {'Dist (norm)':<12}")
+    lines.append("-" * 70)
 
     for seq in result.sequences:
         in_cluster = "Yes" if seq.in_query_cluster else "No"
         dist = f"{seq.distance_to_query:.4f}" if seq.distance_to_query is not None else "N/A"
-        lines.append(f"{seq.index:<5} {seq.id:<30} {in_cluster:<12} {dist:<10}")
+        dist_norm = f"{seq.distance_to_query_normalized:.4f}" if seq.distance_to_query_normalized is not None else "N/A"
+        lines.append(f"{seq.index:<5} {seq.id:<30} {in_cluster:<12} {dist:<10} {dist_norm:<12}")
 
     lines.append("")
 
@@ -463,12 +487,13 @@ def format_tsv_output(result: BlastAnalysisResult) -> str:
     lines = []
 
     # Header
-    lines.append("index\tid\tin_query_cluster\tdistance_to_query")
+    lines.append("index\tid\tin_query_cluster\tdistance_to_query\tdistance_to_query_normalized")
 
     # Data rows
     for seq in result.sequences:
         in_cluster = "true" if seq.in_query_cluster else "false"
         dist = f"{seq.distance_to_query:.4f}" if seq.distance_to_query is not None else ""
-        lines.append(f"{seq.index}\t{seq.id}\t{in_cluster}\t{dist}")
+        dist_norm = f"{seq.distance_to_query_normalized:.4f}" if seq.distance_to_query_normalized is not None else ""
+        lines.append(f"{seq.index}\t{seq.id}\t{in_cluster}\t{dist}\t{dist_norm}")
 
     return "\n".join(lines)

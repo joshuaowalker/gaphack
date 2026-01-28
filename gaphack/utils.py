@@ -5,6 +5,7 @@ This module provides helper functions for sequence processing and distance calcu
 """
 
 import numpy as np
+from dataclasses import dataclass
 from typing import List, Tuple, Optional, Literal, Dict
 from Bio import SeqIO
 from Bio.Seq import Seq
@@ -239,6 +240,26 @@ class MSAAlignmentError(Exception):
     pass
 
 
+@dataclass
+class MSADistanceResult:
+    """Result of MSA-based distance calculation.
+
+    Attributes:
+        distance_normalized: Distance using global normalization length
+                            (mismatches / median_sequence_length). Used by clustering.
+        distance_pairwise: Distance using pairwise overlap length
+                          (mismatches / pairwise_overlap). Comparable to BLAST.
+        mismatches: Number of adjusted mismatches found
+        pairwise_overlap: Length of the pairwise overlap region
+        is_valid: Whether the distance calculation succeeded
+    """
+    distance_normalized: float
+    distance_pairwise: float
+    mismatches: int
+    pairwise_overlap: int
+    is_valid: bool = True
+
+
 def trim_alignment_by_coverage(aligned_sequences: List[str],
                                coverage_threshold: float = MSA_COVERAGE_THRESHOLD) -> List[str]:
     """Trim alignment to region where sufficient sequences have data.
@@ -349,6 +370,114 @@ def filter_msa_positions(seq1_aligned: str, seq2_aligned: str) -> Tuple[str, str
     return ''.join(cleaned_seq1), ''.join(cleaned_seq2)
 
 
+def compute_msa_distance_detailed(seq1_aligned: str, seq2_aligned: str,
+                                   original_len1: Optional[int] = None,
+                                   original_len2: Optional[int] = None,
+                                   normalization_length: Optional[int] = None) -> MSADistanceResult:
+    """Compute distance between two sequences from an MSA, returning detailed results.
+
+    Uses standardized MycoBLAST-style adjustment parameters to score a
+    pre-existing alignment. Returns both normalized and pairwise distances.
+
+    Args:
+        seq1_aligned: First aligned sequence (with gaps: '-' and '.')
+        seq2_aligned: Second aligned sequence (with gaps: '-' and '.')
+        original_len1: Length of first original sequence (before alignment).
+                      If not provided, will be calculated from aligned sequence.
+        original_len2: Length of second original sequence (before alignment).
+                      If not provided, will be calculated from aligned sequence.
+        normalization_length: Length to use for normalized distance (typically
+                             median sequence length in MSA). Required.
+
+    Returns:
+        MSADistanceResult with both distance metrics, or invalid result if
+        alignment failed (insufficient overlap or no scoreable positions)
+    """
+    # Minimum overlap fraction required for valid alignment
+    MIN_OVERLAP_FRACTION = 0.5
+
+    # Invalid result for failure cases
+    def invalid_result():
+        return MSADistanceResult(
+            distance_normalized=np.nan,
+            distance_pairwise=np.nan,
+            mismatches=0,
+            pairwise_overlap=0,
+            is_valid=False
+        )
+
+    try:
+        from adjusted_identity import score_alignment, AdjustmentParams
+    except ImportError:
+        raise ImportError(
+            "adjusted-identity package is required. "
+            "Install it with: pip install git+https://github.com/joshuaowalker/adjusted-identity.git"
+        )
+
+    # Calculate original sequence lengths if not provided
+    # Original length = count of non-gap characters (excluding both '.' and '-')
+    if original_len1 is None:
+        original_len1 = sum(1 for c in seq1_aligned if c not in ['.', '-'])
+    if original_len2 is None:
+        original_len2 = sum(1 for c in seq2_aligned if c not in ['.', '-'])
+
+    # Handle empty sequences
+    if original_len1 == 0 or original_len2 == 0:
+        logging.debug("Empty sequence detected in MSA alignment")
+        return invalid_result()
+
+    # Filter positions unsuitable for scoring
+    seq1_clean, seq2_clean = filter_msa_positions(seq1_aligned, seq2_aligned)
+    overlap_len = len(seq1_clean)
+
+    # Check minimum overlap - must be ≥50% of the shorter sequence
+    min_required_overlap = min(original_len1, original_len2) * MIN_OVERLAP_FRACTION
+    if overlap_len < min_required_overlap:
+        logging.debug(
+            f"Insufficient overlap: {overlap_len}bp < {min_required_overlap:.0f}bp "
+            f"(original lengths: {original_len1}bp, {original_len2}bp)"
+        )
+        return invalid_result()
+
+    if overlap_len == 0:
+        # No positions to score (should be caught by min_required_overlap check, but defensive)
+        return invalid_result()
+
+    # MycoBLAST-style parameters: end_skip=0, all normalizations=True, max_repeat=1
+    params = AdjustmentParams(
+        end_skip_distance=0,
+        normalize_homopolymers=True,
+        handle_iupac_overlap=True,
+        normalize_indels=True,
+        max_repeat_motif_length=1
+    )
+
+    try:
+        # Score the pre-aligned sequences
+        result = score_alignment(seq1_clean, seq2_clean, adjustment_params=params)
+
+        # Calculate both distance metrics
+        if normalization_length is not None and normalization_length > 0:
+            distance_normalized = result.mismatches / normalization_length
+        else:
+            # Fallback to pairwise if no normalization length
+            distance_normalized = result.mismatches / overlap_len
+
+        distance_pairwise = result.mismatches / overlap_len
+
+        return MSADistanceResult(
+            distance_normalized=distance_normalized,
+            distance_pairwise=distance_pairwise,
+            mismatches=result.mismatches,
+            pairwise_overlap=overlap_len,
+            is_valid=True
+        )
+
+    except Exception as e:
+        logging.warning(f"Alignment scoring failed: {e}")
+        return invalid_result()
+
+
 def compute_msa_distance(seq1_aligned: str, seq2_aligned: str,
                          original_len1: Optional[int] = None,
                          original_len2: Optional[int] = None,
@@ -371,78 +500,22 @@ def compute_msa_distance(seq1_aligned: str, seq2_aligned: str,
                       If not provided, will be calculated from aligned sequence.
         normalization_length: Length to use for distance normalization (typically
                              median sequence length in MSA). If not provided,
-                             uses scored_positions from alignment (legacy behavior).
+                             uses pairwise overlap (legacy behavior).
 
     Returns:
         Distance value (edits / normalization_length), or np.nan if alignment failed
         (insufficient overlap or no scoreable positions)
     """
-    # Minimum overlap fraction required for valid alignment
-    MIN_OVERLAP_FRACTION = 0.5
-
-    try:
-        from adjusted_identity import score_alignment, AdjustmentParams
-    except ImportError:
-        raise ImportError(
-            "adjusted-identity package is required. "
-            "Install it with: pip install git+https://github.com/joshuaowalker/adjusted-identity.git"
-        )
-
-    # Calculate original sequence lengths if not provided
-    # Original length = count of non-gap characters (excluding both '.' and '-')
-    if original_len1 is None:
-        original_len1 = sum(1 for c in seq1_aligned if c not in ['.', '-'])
-    if original_len2 is None:
-        original_len2 = sum(1 for c in seq2_aligned if c not in ['.', '-'])
-
-    # Handle empty sequences
-    if original_len1 == 0 or original_len2 == 0:
-        logging.debug("Empty sequence detected in MSA alignment")
-        return np.nan
-
-    # Filter positions unsuitable for scoring
-    seq1_clean, seq2_clean = filter_msa_positions(seq1_aligned, seq2_aligned)
-    overlap_len = len(seq1_clean)
-
-    # Check minimum overlap - must be ≥50% of the shorter sequence
-    min_required_overlap = min(original_len1, original_len2) * MIN_OVERLAP_FRACTION
-    if overlap_len < min_required_overlap:
-        logging.debug(
-            f"Insufficient overlap: {overlap_len}bp < {min_required_overlap:.0f}bp "
-            f"(original lengths: {original_len1}bp, {original_len2}bp)"
-        )
-        return np.nan
-
-    if overlap_len == 0:
-        # No positions to score (should be caught by min_required_overlap check, but defensive)
-        return np.nan
-
-    # MycoBLAST-style parameters: end_skip=0, all normalizations=True, max_repeat=1
-    params = AdjustmentParams(
-        end_skip_distance=0,
-        normalize_homopolymers=True,
-        handle_iupac_overlap=True,
-        normalize_indels=True,
-        max_repeat_motif_length=1
+    result = compute_msa_distance_detailed(
+        seq1_aligned, seq2_aligned,
+        original_len1, original_len2,
+        normalization_length
     )
 
-    try:
-        # Score the pre-aligned sequences
-        result = score_alignment(seq1_clean, seq2_clean, adjustment_params=params)
+    if not result.is_valid:
+        return np.nan
 
-        # Calculate distance using normalization length if provided
-        if normalization_length is not None:
-            # Normalize to median sequence length in MSA
-            distance = result.mismatches / normalization_length
-        else:
-            # Legacy behavior: convert identity to distance
-            distance = 1.0 - result.identity
-
-    except Exception as e:
-        logging.warning(f"Alignment scoring failed: {e}")
-        return np.nan  # Alignment failed
-
-    return distance
+    return result.distance_normalized
 
 
 def calculate_distance_matrix(sequences: List[str],

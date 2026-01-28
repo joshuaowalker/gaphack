@@ -11,6 +11,7 @@ from gaphack.distance_providers import (
     MSACachedDistanceProvider,
     MSAAlignmentError
 )
+from gaphack.utils import MSADistanceResult
 
 
 class TestDistanceProviderABC:
@@ -68,22 +69,28 @@ class TestMSACachedDistanceProvider:
         mock_spoa.assert_called_once()
 
     @patch('gaphack.utils.run_spoa_msa')
-    @patch('gaphack.utils.compute_msa_distance')
+    @patch('gaphack.utils.compute_msa_distance_detailed')
     @patch('gaphack.utils.replace_terminal_gaps')
-    def test_get_distance_with_msa(self, mock_replace_gaps, mock_msa_distance, mock_spoa):
+    def test_get_distance_with_msa(self, mock_replace_gaps, mock_msa_distance_detailed, mock_spoa):
         """Test distance calculation with MSA."""
         # Mock SPOA success
         aligned = ["ATCG", "ATCC", "TTGG", "TTGT"]
         mock_spoa.return_value = aligned
         mock_replace_gaps.return_value = aligned
-        mock_msa_distance.return_value = 0.15
+        mock_msa_distance_detailed.return_value = MSADistanceResult(
+            distance_normalized=0.15,
+            distance_pairwise=0.16,
+            mismatches=1,
+            pairwise_overlap=6,
+            is_valid=True
+        )
 
         provider = MSACachedDistanceProvider(self.test_sequences)
 
-        # Get distance
+        # Get distance (normalized)
         distance = provider.get_distance(0, 1)
         assert distance == 0.15
-        mock_msa_distance.assert_called_once()
+        mock_msa_distance_detailed.assert_called_once()
 
     @patch('gaphack.utils.run_spoa_msa')
     @patch('gaphack.utils.replace_terminal_gaps')
@@ -94,20 +101,26 @@ class TestMSACachedDistanceProvider:
         mock_spoa.return_value = aligned
         mock_replace_gaps.return_value = aligned
 
-        with patch('gaphack.utils.compute_msa_distance') as mock_msa_distance:
-            mock_msa_distance.return_value = 0.15
+        with patch('gaphack.utils.compute_msa_distance_detailed') as mock_msa_distance_detailed:
+            mock_msa_distance_detailed.return_value = MSADistanceResult(
+                distance_normalized=0.15,
+                distance_pairwise=0.16,
+                mismatches=1,
+                pairwise_overlap=6,
+                is_valid=True
+            )
 
             provider = MSACachedDistanceProvider(self.test_sequences)
 
             # First call should compute
             distance1 = provider.get_distance(0, 1)
             assert distance1 == 0.15
-            assert mock_msa_distance.call_count == 1
+            assert mock_msa_distance_detailed.call_count == 1
 
             # Second call should use cache
             distance2 = provider.get_distance(0, 1)
             assert distance2 == 0.15
-            assert mock_msa_distance.call_count == 1  # No additional calls
+            assert mock_msa_distance_detailed.call_count == 1  # No additional calls
 
     @patch('gaphack.utils.run_spoa_msa')
     @patch('gaphack.utils.replace_terminal_gaps')
@@ -130,8 +143,14 @@ class TestMSACachedDistanceProvider:
         mock_spoa.return_value = aligned
         mock_replace_gaps.return_value = aligned
 
-        with patch('gaphack.utils.compute_msa_distance') as mock_msa_distance:
-            mock_msa_distance.return_value = 0.15
+        with patch('gaphack.utils.compute_msa_distance_detailed') as mock_msa_distance_detailed:
+            mock_msa_distance_detailed.return_value = MSADistanceResult(
+                distance_normalized=0.15,
+                distance_pairwise=0.16,
+                mismatches=1,
+                pairwise_overlap=6,
+                is_valid=True
+            )
 
             provider = MSACachedDistanceProvider(self.test_sequences[:3])
             matrix = provider.build_distance_matrix()

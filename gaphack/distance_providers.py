@@ -4,7 +4,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import List, Dict, Set, Tuple, Optional
 import numpy as np
-from .utils import MSAAlignmentError
+from .utils import MSAAlignmentError, MSADistanceResult
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ class MSACachedDistanceProvider(DistanceProvider):
         self.sequences = sequences
         self.headers = headers if headers is not None else [f"seq_{i}" for i in range(len(sequences))]
         self.n = len(sequences)
-        self._distance_cache: Dict[Tuple[int, int], float] = {}
+        self._distance_cache: Dict[Tuple[int, int], MSADistanceResult] = {}
 
         # Compute median sequence length for distance normalization
         sequence_lengths = [len(seq) for seq in sequences]
@@ -79,20 +79,30 @@ class MSACachedDistanceProvider(DistanceProvider):
         self.aligned_sequences = trim_alignment_by_coverage(self.aligned_sequences)
         logger.debug(f"MSA created successfully, alignment length: {len(self.aligned_sequences[0])}")
 
-    def get_distance(self, idx1: int, idx2: int) -> float:
-        """Get distance between two sequences using cached MSA."""
-        from .utils import compute_msa_distance
+    def get_distance_detailed(self, idx1: int, idx2: int) -> MSADistanceResult:
+        """Get detailed distance result between two sequences using cached MSA.
+
+        Returns:
+            MSADistanceResult with both normalized and pairwise distances
+        """
+        from .utils import compute_msa_distance_detailed
 
         if idx1 == idx2:
-            return 0.0
+            return MSADistanceResult(
+                distance_normalized=0.0,
+                distance_pairwise=0.0,
+                mismatches=0,
+                pairwise_overlap=len(self.sequences[idx1]),
+                is_valid=True
+            )
 
         # Check cache
         cache_key = (min(idx1, idx2), max(idx1, idx2))
         if cache_key in self._distance_cache:
             return self._distance_cache[cache_key]
 
-        # Compute distance from MSA, passing original sequence lengths and normalization length
-        distance = compute_msa_distance(
+        # Compute detailed distance from MSA
+        result = compute_msa_distance_detailed(
             self.aligned_sequences[idx1],
             self.aligned_sequences[idx2],
             original_len1=len(self.sequences[idx1]),
@@ -101,8 +111,25 @@ class MSACachedDistanceProvider(DistanceProvider):
         )
 
         # Cache and return
-        self._distance_cache[cache_key] = distance
-        return distance
+        self._distance_cache[cache_key] = result
+        return result
+
+    def get_distance(self, idx1: int, idx2: int) -> float:
+        """Get normalized distance between two sequences using cached MSA.
+
+        This is the distance used by the clustering algorithm.
+        """
+        result = self.get_distance_detailed(idx1, idx2)
+        return result.distance_normalized if result.is_valid else np.nan
+
+    def get_pairwise_distance(self, idx1: int, idx2: int) -> float:
+        """Get pairwise distance between two sequences.
+
+        This distance uses the actual pairwise overlap as the denominator,
+        making it more comparable to BLAST identity values.
+        """
+        result = self.get_distance_detailed(idx1, idx2)
+        return result.distance_pairwise if result.is_valid else np.nan
 
     def get_distances_from_sequence(self, idx: int, targets: Set[int]) -> Dict[int, float]:
         """Get distances from one sequence to multiple targets."""
@@ -122,6 +149,15 @@ class MSACachedDistanceProvider(DistanceProvider):
                 matrix[i, j] = dist
                 matrix[j, i] = dist
         return matrix
+
+    def get_cache_stats(self) -> Dict[str, int]:
+        """Get statistics about the distance cache."""
+        theoretical_max = (self.n * (self.n - 1)) // 2
+        return {
+            'cached_distances': len(self._distance_cache),
+            'theoretical_max': theoretical_max,
+            'n_sequences': self.n
+        }
 
 
 class PrecomputedDistanceProvider(DistanceProvider):
