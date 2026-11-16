@@ -140,8 +140,18 @@ class MSACachedDistanceProvider(DistanceProvider):
         """No-op for MSA provider - all distances available from MSA."""
         pass
 
+    def prescore_all_pairs(self) -> None:
+        """Score every pair of the MSA up front, in worker processes when worthwhile.
+
+        Optional: call before requesting all pairwise distances (full matrix, medoid
+        search). Distances returned afterwards are the same as without this call.
+        """
+        from .utils import prescore_aligned_pairs
+        prescore_aligned_pairs(self.aligned_sequences)
+
     def build_distance_matrix(self) -> np.ndarray:
         """Build full distance matrix from cached MSA."""
+        self.prescore_all_pairs()
         matrix = np.zeros((self.n, self.n))
         for i in range(self.n):
             for j in range(i + 1, self.n):

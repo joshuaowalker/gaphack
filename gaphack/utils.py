@@ -17,6 +17,8 @@ from itertools import islice
 import subprocess
 import tempfile
 import os
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
 
 
 def load_sequences_from_fasta(fasta_path: str) -> Tuple[List[str], List[str], Dict[str, str]]:
@@ -511,6 +513,103 @@ class PairScoreCache:
 pair_score_cache = PairScoreCache(_read_int_env("GAPHACK_PAIR_CACHE_SIZE", 200_000))
 
 
+# Scoring is spread over worker processes only when an alignment has at least this
+# many pairs that are not in the cache yet; below it the start-up cost is not repaid.
+MIN_PAIRS_FOR_PARALLEL_SCORING = 2000
+
+
+def _default_scoring_workers() -> int:
+    """Worker processes for prescore_aligned_pairs (GAPHACK_SCORING_WORKERS; 0 or 1 = none)."""
+    return _read_int_env("GAPHACK_SCORING_WORKERS", min(os.cpu_count() or 1, 4))
+
+
+def _score_pair_chunk(aligned_sequences: List[str],
+                      index_pairs: List[Tuple[int, int]]) -> List[Tuple[int, Optional[int]]]:
+    """Worker task: (overlap_len, mismatches) for each (i, j) pair of an alignment.
+
+    mismatches is None where there is nothing to score or scoring raised; such a
+    pair is scored (and any error reported) by the caller when it is asked for.
+    """
+    count_mismatches = _get_mismatch_counter()
+    results = []
+    for i, j in index_pairs:
+        seq1_clean, seq2_clean = filter_msa_positions(aligned_sequences[i], aligned_sequences[j])
+        overlap_len = len(seq1_clean)
+        mismatches = None
+        if overlap_len > 0:
+            try:
+                mismatches = count_mismatches(seq1_clean, seq2_clean)
+            except Exception:
+                mismatches = None
+        results.append((overlap_len, mismatches))
+    return results
+
+
+def prescore_aligned_pairs(aligned_sequences: List[str], num_workers: Optional[int] = None) -> int:
+    """Score all pairs of an alignment ahead of time, using worker processes.
+
+    Call this before asking for every pairwise distance of an alignment (a full
+    distance matrix, a medoid search). The scores are put in pair_score_cache, where
+    compute_msa_distance_detailed() finds them; it applies the overlap rule and
+    normalization exactly as it would have without this call, so distances do not
+    depend on whether, or with how many workers, this ran.
+
+    Nothing is done (and 0 returned) when fewer than MIN_PAIRS_FOR_PARALLEL_SCORING
+    pairs are missing from the cache, when one worker or fewer is allowed, when the
+    cache is disabled or too small to hold the alignment's pairs, or when already
+    running inside a worker process. If the workers cannot be used, a warning is
+    logged and pairs are scored one at a time as they are requested.
+
+    Args:
+        aligned_sequences: Aligned sequences as scored by compute_msa_distance_detailed
+                           (terminal gaps marked, trimmed)
+        num_workers: Worker processes to use (default: GAPHACK_SCORING_WORKERS, or
+                     the CPU count up to 4)
+
+    Returns:
+        Number of pairs scored by workers
+    """
+    if num_workers is None:
+        num_workers = _default_scoring_workers()
+    if num_workers <= 1 or multiprocessing.parent_process() is not None:
+        return 0
+
+    # Unique aligned pairs not scored yet. Identical sequences give identical keys.
+    todo: Dict[Tuple[str, str], Tuple[int, int]] = {}
+    n = len(aligned_sequences)
+    for i in range(n):
+        seq_i = aligned_sequences[i]
+        for j in range(i + 1, n):
+            key = (seq_i, aligned_sequences[j])
+            if key not in pair_score_cache and key not in todo:
+                todo[key] = (i, j)
+
+    if len(todo) < MIN_PAIRS_FOR_PARALLEL_SCORING or len(todo) > pair_score_cache.max_entries:
+        return 0
+
+    keys = list(todo)
+    index_pairs = list(todo.values())
+    n_chunks = min(len(index_pairs), num_workers * 4)
+
+    try:
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            futures = [
+                executor.submit(_score_pair_chunk, aligned_sequences, index_pairs[k::n_chunks])
+                for k in range(n_chunks)
+            ]
+            chunk_results = [future.result() for future in futures]
+    except Exception as e:
+        logging.warning(f"Parallel pair scoring unavailable ({e}); scoring pairs one at a time")
+        return 0
+
+    for k, results in enumerate(chunk_results):
+        for key, (overlap_len, mismatches) in zip(keys[k::n_chunks], results):
+            pair_score_cache.put(key, overlap_len, mismatches)
+
+    logging.debug(f"Scored {len(keys)} aligned pairs using {num_workers} worker processes")
+    return len(keys)
+
+
 def compute_msa_distance_detailed(seq1_aligned: str, seq2_aligned: str,
                                    original_len1: Optional[int] = None,
                                    original_len2: Optional[int] = None,
@@ -717,6 +816,9 @@ def calculate_distance_matrix(sequences: List[str],
         pbar = tqdm(total=total_comparisons,
                     desc="Calculating MSA-based distances",
                     unit=" comparisons")
+
+    # Score the pairs in worker processes first when there are enough of them to pay off
+    prescore_aligned_pairs(aligned_sequences)
 
     # Compute pairwise distances from MSA
     for i in range(n):

@@ -5,6 +5,7 @@ adjusted_identity.score_alignment().
 """
 
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -19,6 +20,7 @@ from gaphack.utils import (
     compute_msa_distance_detailed,
     filter_msa_positions,
     load_sequences_from_fasta,
+    prescore_aligned_pairs,
     replace_terminal_gaps,
     run_spoa_msa,
     trim_alignment_by_coverage,
@@ -277,3 +279,114 @@ class TestPairScoreCache:
 
         assert len(cache) == 4
         assert cache.get(("a0", "b")) == (0, 7)
+
+
+class TestPrescoreAlignedPairs:
+    """Scoring pairs in worker processes must leave exactly the sequential results."""
+
+    @pytest.fixture(autouse=True)
+    def low_threshold(self, monkeypatch):
+        # The 50-sequence test alignment has 1,225 pairs; let it qualify for workers.
+        monkeypatch.setattr(utils, "MIN_PAIRS_FOR_PARALLEL_SCORING", 100)
+
+    @staticmethod
+    def all_results(sequences, aligned):
+        normalization_length = int(np.median([len(s) for s in sequences]))
+        return [
+            as_tuple(compute_msa_distance_detailed(
+                aligned[i], aligned[j], len(sequences[i]), len(sequences[j]), normalization_length))
+            for i in range(len(aligned)) for j in range(i + 1, len(aligned))
+        ]
+
+    def test_workers_give_the_same_distances_as_sequential(self, russula_msa, monkeypatch, counted_scorer):
+        sequences, aligned = russula_msa
+        sequential = self.all_results(sequences, aligned)
+        scored_sequentially = len(counted_scorer)
+        assert scored_sequentially > 0
+
+        monkeypatch.setattr(utils, "pair_score_cache", PairScoreCache(200_000))
+        counted_scorer.clear()
+        scored_by_workers = prescore_aligned_pairs(aligned, num_workers=2)
+
+        assert scored_by_workers >= 100
+        assert self.all_results(sequences, aligned) == sequential
+        # Workers did the scoring; the main process had nothing left to score
+        assert len(counted_scorer) == 0
+
+    def test_worker_count_does_not_change_cache_contents(self, russula_msa, monkeypatch):
+        _, aligned = russula_msa
+        contents = []
+        for workers in (2, 3):
+            cache = PairScoreCache(200_000)
+            monkeypatch.setattr(utils, "pair_score_cache", cache)
+            assert prescore_aligned_pairs(aligned, num_workers=workers) > 0
+            contents.append(dict(cache._entries))
+
+        assert contents[0] == contents[1]
+
+    def test_identical_sequences_are_scored_once(self, russula_msa):
+        _, aligned = russula_msa
+        doubled = aligned[:20] + aligned[:20]
+
+        # 40 sequences make 780 index pairs, but only 20 distinct strings:
+        # every (first, second) combination of them is one key, 20 * 20 = 400.
+        assert prescore_aligned_pairs(doubled, num_workers=2) == 400
+
+    def test_already_cached_pairs_are_not_rescored(self, russula_msa):
+        _, aligned = russula_msa
+        first = prescore_aligned_pairs(aligned, num_workers=2)
+
+        assert first > 0
+        assert prescore_aligned_pairs(aligned, num_workers=2) == 0
+
+    def test_small_alignments_are_left_to_the_sequential_path(self, russula_msa, fresh_pair_score_cache):
+        _, aligned = russula_msa
+
+        assert prescore_aligned_pairs(aligned[:5], num_workers=2) == 0   # 10 pairs < 100
+        assert len(fresh_pair_score_cache) == 0
+
+    @pytest.mark.parametrize("workers", [0, 1])
+    def test_one_or_no_workers_means_sequential(self, russula_msa, workers, fresh_pair_score_cache):
+        _, aligned = russula_msa
+
+        assert prescore_aligned_pairs(aligned, num_workers=workers) == 0
+        assert len(fresh_pair_score_cache) == 0
+
+    def test_worker_count_comes_from_environment(self, russula_msa, monkeypatch):
+        _, aligned = russula_msa
+        monkeypatch.setenv("GAPHACK_SCORING_WORKERS", "1")
+        assert prescore_aligned_pairs(aligned) == 0
+
+        monkeypatch.setenv("GAPHACK_SCORING_WORKERS", "2")
+        assert prescore_aligned_pairs(aligned) > 0
+
+    def test_skipped_when_cache_cannot_hold_the_alignment(self, russula_msa, monkeypatch):
+        _, aligned = russula_msa
+        for small_cache in (PairScoreCache(0), PairScoreCache(500)):
+            monkeypatch.setattr(utils, "pair_score_cache", small_cache)
+            assert prescore_aligned_pairs(aligned, num_workers=2) == 0
+
+    def test_falls_back_to_sequential_when_workers_cannot_start(self, russula_msa, caplog):
+        sequences, aligned = russula_msa
+        with patch("gaphack.utils.ProcessPoolExecutor", side_effect=OSError("no processes for you")):
+            assert prescore_aligned_pairs(aligned, num_workers=2) == 0
+
+        assert "Parallel pair scoring unavailable" in caplog.text
+        # Distances are still produced, one pair at a time
+        results = self.all_results(sequences, aligned)
+        assert sum(1 for r in results if r[0]) > 1000
+
+    def test_distance_matrix_is_identical_with_and_without_workers(self, russula_msa, monkeypatch):
+        from gaphack.distance_providers import MSACachedDistanceProvider
+        sequences, _ = russula_msa
+
+        monkeypatch.setenv("GAPHACK_SCORING_WORKERS", "1")
+        sequential = MSACachedDistanceProvider(sequences).build_distance_matrix()
+
+        monkeypatch.setattr(utils, "pair_score_cache", PairScoreCache(200_000))
+        monkeypatch.setenv("GAPHACK_SCORING_WORKERS", "2")
+        with patch("gaphack.utils.prescore_aligned_pairs", wraps=utils.prescore_aligned_pairs) as prescore:
+            parallel = MSACachedDistanceProvider(sequences).build_distance_matrix()
+
+        assert prescore.call_count == 1
+        np.testing.assert_array_equal(parallel, sequential)   # NaNs in the same places too

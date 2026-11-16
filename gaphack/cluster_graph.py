@@ -367,6 +367,8 @@ class ClusterGraph:
 
         cluster_sequences = [self.sequences[idx] for idx in cluster_indices]
         msa_provider = MSACachedDistanceProvider(cluster_sequences, cluster_headers)
+        # Every pairwise distance in the cluster is needed below
+        msa_provider.prescore_all_pairs()
 
         min_total_distance = float('inf')
         medoid_idx = cluster_indices[0]
