@@ -339,20 +339,13 @@ def trim_alignment_by_coverage(aligned_sequences: List[str],
     return trimmed_sequences
 
 
-def filter_msa_positions(seq1_aligned: str, seq2_aligned: str) -> Tuple[str, str]:
-    """Remove positions unsuitable for pairwise scoring from MSA.
+# Byte values of the two gap characters used in processed alignments
+_TERMINAL_GAP = ord('.')
+_INDEL_GAP = ord('-')
 
-    Removes positions where:
-    - Either sequence has a terminal gap ('.') - represents missing data
-    - Both sequences have indel gaps ('-') - no information to compare
 
-    Args:
-        seq1_aligned: First aligned sequence (with gaps)
-        seq2_aligned: Second aligned sequence (with gaps)
-
-    Returns:
-        Tuple of (cleaned_seq1, cleaned_seq2) ready for scoring
-    """
+def _filter_msa_positions_python(seq1_aligned: str, seq2_aligned: str) -> Tuple[str, str]:
+    """Reference implementation of filter_msa_positions (one position at a time)."""
     cleaned_seq1 = []
     cleaned_seq2 = []
 
@@ -368,6 +361,86 @@ def filter_msa_positions(seq1_aligned: str, seq2_aligned: str) -> Tuple[str, str
         cleaned_seq2.append(seq2_aligned[i])
 
     return ''.join(cleaned_seq1), ''.join(cleaned_seq2)
+
+
+def filter_msa_positions(seq1_aligned: str, seq2_aligned: str) -> Tuple[str, str]:
+    """Remove positions unsuitable for pairwise scoring from MSA.
+
+    Removes positions where:
+    - Either sequence has a terminal gap ('.') - represents missing data
+    - Both sequences have indel gaps ('-') - no information to compare
+
+    Args:
+        seq1_aligned: First aligned sequence (with gaps)
+        seq2_aligned: Second aligned sequence (with gaps)
+
+    Returns:
+        Tuple of (cleaned_seq1, cleaned_seq2) ready for scoring
+    """
+    # This runs once per sequence pair, so it is done as a single vectorized mask
+    # rather than a per-character Python loop. Anything the fast path cannot
+    # represent (non-ASCII input, unequal lengths) goes to the reference loop.
+    if len(seq1_aligned) == len(seq2_aligned):
+        try:
+            a = np.frombuffer(seq1_aligned.encode('ascii'), dtype=np.uint8)
+            b = np.frombuffer(seq2_aligned.encode('ascii'), dtype=np.uint8)
+        except UnicodeEncodeError:
+            pass
+        else:
+            keep = ((a != _TERMINAL_GAP) & (b != _TERMINAL_GAP) &
+                    ((a != _INDEL_GAP) | (b != _INDEL_GAP)))
+            return a[keep].tobytes().decode('ascii'), b[keep].tobytes().decode('ascii')
+
+    return _filter_msa_positions_python(seq1_aligned, seq2_aligned)
+
+
+_mismatch_counter = None
+
+
+def _get_mismatch_counter():
+    """Return a function (seq1_clean, seq2_clean) -> adjusted mismatch count.
+
+    Uses the standardized MycoBLAST-style adjustment parameters:
+    end_skip=0, all normalizations=True, max_repeat=1.
+
+    adjusted_identity.score_alignment() runs the scoring analysis and then builds
+    annotated alignment strings for display. Distance calculation only needs the
+    mismatch count, so the analysis step is called on its own when the installed
+    adjusted-identity exposes it; score_alignment() is the fallback. Both give the
+    same count.
+    """
+    global _mismatch_counter
+    if _mismatch_counter is not None:
+        return _mismatch_counter
+
+    try:
+        import adjusted_identity
+    except ImportError:
+        raise ImportError(
+            "adjusted-identity package is required. "
+            "Install it with: pip install git+https://github.com/joshuaowalker/adjusted-identity.git"
+        )
+
+    params = adjusted_identity.AdjustmentParams(
+        end_skip_distance=0,
+        normalize_homopolymers=True,
+        handle_iupac_overlap=True,
+        normalize_indels=True,
+        max_repeat_motif_length=1
+    )
+
+    analyze = getattr(adjusted_identity, '_analyze_alignment', None)
+    if analyze is not None:
+        def count_mismatches(seq1_clean: str, seq2_clean: str) -> int:
+            return analyze(seq1_clean, seq2_clean, params).mismatches
+    else:
+        def count_mismatches(seq1_clean: str, seq2_clean: str) -> int:
+            return adjusted_identity.score_alignment(
+                seq1_clean, seq2_clean, adjustment_params=params
+            ).mismatches
+
+    _mismatch_counter = count_mismatches
+    return _mismatch_counter
 
 
 def compute_msa_distance_detailed(seq1_aligned: str, seq2_aligned: str,
@@ -406,13 +479,7 @@ def compute_msa_distance_detailed(seq1_aligned: str, seq2_aligned: str,
             is_valid=False
         )
 
-    try:
-        from adjusted_identity import score_alignment, AdjustmentParams
-    except ImportError:
-        raise ImportError(
-            "adjusted-identity package is required. "
-            "Install it with: pip install git+https://github.com/joshuaowalker/adjusted-identity.git"
-        )
+    count_mismatches = _get_mismatch_counter()
 
     # Calculate original sequence lengths if not provided
     # Original length = count of non-gap characters (excluding both '.' and '-')
@@ -443,39 +510,29 @@ def compute_msa_distance_detailed(seq1_aligned: str, seq2_aligned: str,
         # No positions to score (should be caught by min_required_overlap check, but defensive)
         return invalid_result()
 
-    # MycoBLAST-style parameters: end_skip=0, all normalizations=True, max_repeat=1
-    params = AdjustmentParams(
-        end_skip_distance=0,
-        normalize_homopolymers=True,
-        handle_iupac_overlap=True,
-        normalize_indels=True,
-        max_repeat_motif_length=1
-    )
-
     try:
-        # Score the pre-aligned sequences
-        result = score_alignment(seq1_clean, seq2_clean, adjustment_params=params)
-
-        # Calculate both distance metrics
-        if normalization_length is not None and normalization_length > 0:
-            distance_normalized = result.mismatches / normalization_length
-        else:
-            # Fallback to pairwise if no normalization length
-            distance_normalized = result.mismatches / overlap_len
-
-        distance_pairwise = result.mismatches / overlap_len
-
-        return MSADistanceResult(
-            distance_normalized=distance_normalized,
-            distance_pairwise=distance_pairwise,
-            mismatches=result.mismatches,
-            pairwise_overlap=overlap_len,
-            is_valid=True
-        )
-
+        # Score the pre-aligned sequences (MycoBLAST-style adjusted mismatch count)
+        mismatches = count_mismatches(seq1_clean, seq2_clean)
     except Exception as e:
         logging.warning(f"Alignment scoring failed: {e}")
         return invalid_result()
+
+    # Calculate both distance metrics
+    if normalization_length is not None and normalization_length > 0:
+        distance_normalized = mismatches / normalization_length
+    else:
+        # Fallback to pairwise if no normalization length
+        distance_normalized = mismatches / overlap_len
+
+    distance_pairwise = mismatches / overlap_len
+
+    return MSADistanceResult(
+        distance_normalized=distance_normalized,
+        distance_pairwise=distance_pairwise,
+        mismatches=mismatches,
+        pairwise_overlap=overlap_len,
+        is_valid=True
+    )
 
 
 def compute_msa_distance(seq1_aligned: str, seq2_aligned: str,
