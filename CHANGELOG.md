@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   iteration until `--max-iterations` and reported "Reached iteration limit without convergence".
   Identical clusterings are now reported as exactly 1.0. Final clusters are unchanged.
 
+- **scikit-learn missing from the package dependencies**: `gaphack-refine` imports
+  `sklearn.metrics`, but `pip install` did not install scikit-learn, so on a clean environment
+  `gaphack-refine` failed at start-up with `ModuleNotFoundError: No module named 'sklearn'`.
+
 ### Performance
 Pairwise scoring of aligned sequences was ~90% of `gaphack-refine` and `gaphack-analyze` runtime.
 None of these changes alters a distance or a clustering result.
