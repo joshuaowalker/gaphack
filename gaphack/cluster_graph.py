@@ -218,7 +218,8 @@ class ClusterGraph:
                  headers: List[str], k_neighbors: int = 20,
                  blast_evalue: float = 1e-5, blast_identity: float = 90.0,
                  cache_dir: Optional[Path] = None, search_method: str = "blast",
-                 show_progress: bool = False, close_threshold: Optional[float] = None):
+                 show_progress: bool = False, close_threshold: Optional[float] = None,
+                 medoid_computation_cache: Optional[Dict[frozenset, int]] = None):
         """Initialize K-NN proximity graph.
 
         Args:
@@ -234,6 +235,10 @@ class ClusterGraph:
             close_threshold: Distance threshold for including all neighbors (optional).
                             If set, stores ALL edges within threshold (minimum k_neighbors).
                             If None, stores exactly k_neighbors edges.
+            medoid_computation_cache: Optional dict of frozenset(cluster headers) -> medoid index
+                            to read from and add to. Pass the same dict to successive graphs
+                            built over the same sequences/headers (e.g. one per refinement
+                            iteration) so that medoids of unchanged clusters are not recomputed.
         """
         self.clusters = clusters
         self.sequences = sequences
@@ -248,7 +253,10 @@ class ClusterGraph:
 
         # Initialize data structures
         self.medoid_cache: Dict[str, int] = {}
-        self.medoid_computation_cache: Dict[frozenset, int] = {}  # Cache: frozenset(headers) -> medoid_idx
+        # Cache: frozenset(headers) -> medoid_idx (shared with other graphs when passed in)
+        self.medoid_computation_cache: Dict[frozenset, int] = (
+            medoid_computation_cache if medoid_computation_cache is not None else {}
+        )
         self.knn_graph: Dict[str, List[Tuple[str, float]]] = {}
         self.neighborhood_finder: Optional[NeighborhoodFinder] = None
 

@@ -1025,6 +1025,11 @@ def iterative_refinement(
     # Maps cluster_id -> metrics dict for reuse in skipped seeds
     convergence_metrics_cache = {}
 
+    # Cluster medoids found so far, keyed by cluster membership. The proximity graph is
+    # rebuilt every iteration, but most clusters are unchanged from one iteration to the
+    # next (all of them in the final, confirming iteration), so their medoids are reused.
+    medoid_computation_cache: Dict[frozenset, int] = {}
+
     while global_iteration < max_iterations:
         iteration_start = time.time()
         global_iteration += 1
@@ -1037,7 +1042,8 @@ def iterative_refinement(
             k_neighbors=config.k_neighbors,
             search_method=config.search_method,
             show_progress=True,
-            close_threshold=close_threshold  # Include all neighbors within close_threshold
+            close_threshold=close_threshold,  # Include all neighbors within close_threshold
+            medoid_computation_cache=medoid_computation_cache
         )
         graph_time = time.time() - graph_start
         timing['proximity_graphs'].append(graph_time)

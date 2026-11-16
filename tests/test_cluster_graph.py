@@ -16,6 +16,68 @@ from gaphack.cluster_graph import ClusterGraph
 from gaphack.blast_neighborhood import SequenceCandidate
 
 
+class TestSharedMedoidCache:
+    """Medoids of unchanged clusters are reused by later graphs given the same cache."""
+
+    def setup_method(self):
+        self.sequences = [
+            "ATGCGATCGATCGATCGATCGATCG",
+            "ATGCGATCGATCGATCGATCGATCC",
+            "ATGCGATCGATCGATCGATCGTTCC",
+            "TTTTGGGGCCCCAAAATTTTGGGGC",
+            "TTTTGGGGCCCCAAAATTTTGGGGA",
+        ]
+        self.headers = [f"seq_{i}" for i in range(len(self.sequences))]
+        self.clusters = {
+            "cluster_1": ["seq_0", "seq_1", "seq_2"],
+            "cluster_2": ["seq_3", "seq_4"],
+        }
+
+    def _graph(self, clusters, cache=None):
+        with patch('gaphack.cluster_graph.BlastNeighborhoodFinder'):
+            return ClusterGraph(clusters=clusters, sequences=self.sequences, headers=self.headers,
+                                medoid_computation_cache=cache)
+
+    def test_second_graph_reuses_medoids_without_realigning(self):
+        shared = {}
+        first = self._graph(self.clusters, shared)
+        assert set(shared) == {frozenset(c) for c in self.clusters.values()}
+
+        # Same memberships under new cluster IDs, as after a refinement iteration
+        renamed = {"cluster_1R1": ["seq_0", "seq_1", "seq_2"], "cluster_2R1": ["seq_4", "seq_3"]}
+        with patch('gaphack.distance_providers.MSACachedDistanceProvider',
+                   side_effect=AssertionError("medoid was recomputed")):
+            second = self._graph(renamed, shared)
+
+        assert second.medoid_cache["cluster_1R1"] == first.medoid_cache["cluster_1"]
+        assert second.medoid_cache["cluster_2R1"] == first.medoid_cache["cluster_2"]
+
+    def test_changed_cluster_is_recomputed(self):
+        shared = {}
+        self._graph(self.clusters, shared)
+
+        changed = {"a": ["seq_0", "seq_1"], "b": ["seq_2", "seq_3", "seq_4"]}
+        second = self._graph(changed, shared)
+
+        assert frozenset(["seq_0", "seq_1"]) in shared
+        assert second.medoid_cache["a"] in (0, 1)
+        assert second.medoid_cache["b"] in (2, 3, 4)
+
+    def test_shared_cache_gives_same_medoids_as_no_cache(self):
+        shared = {}
+        self._graph(self.clusters, shared)
+        with_cache = self._graph(self.clusters, shared)
+        without_cache = self._graph(self.clusters)
+
+        assert with_cache.medoid_cache == without_cache.medoid_cache
+
+    def test_graphs_do_not_share_medoids_by_default(self):
+        first = self._graph(self.clusters)
+        second = self._graph(self.clusters)
+
+        assert first.medoid_computation_cache is not second.medoid_computation_cache
+
+
 class TestClusterGraph:
     """Test ClusterGraph initialization and basic functionality."""
 
