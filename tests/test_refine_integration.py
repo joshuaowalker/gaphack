@@ -70,3 +70,42 @@ class TestRefineWithVsearch:
 
         assert "vsearch_cluster_0" in mapping_content
         assert "vsearch_cluster_1" in mapping_content
+
+
+@pytest.mark.integration
+class TestRefinementConvergence:
+    """Refinement must stop as soon as an iteration leaves the clustering unchanged."""
+
+    def test_stops_before_iteration_limit_and_reuses_medoids(self):
+        from unittest.mock import patch
+        from gaphack import cluster_refinement
+        from gaphack.cluster_refinement import RefinementConfig, refine_clusters
+        from gaphack.utils import load_sequences_from_fasta
+
+        fasta = Path(__file__).parent.parent / "examples" / "data" / "collybia_nuda_test.fasta"
+        sequences, headers, _ = load_sequences_from_fasta(str(fasta))
+        half = len(headers) // 2
+        start = {"start_a": headers[:half], "start_b": headers[half:]}
+
+        config = RefinementConfig(close_threshold=0.02, max_iterations=10)
+        with patch.object(cluster_refinement, "ClusterGraph",
+                          wraps=cluster_refinement.ClusterGraph) as graph_spy:
+            refined, info = refine_clusters(
+                all_clusters=start, sequences=sequences, headers=headers,
+                min_split=0.005, max_lump=0.02, target_percentile=95, config=config,
+            )
+
+        # Every sequence is still in exactly one cluster
+        assert sorted(h for members in refined.values() for h in members) == sorted(headers)
+
+        # This dataset settles on cluster sizes for which sklearn's AMI of two identical
+        # partitions is 1.0000000000000002; the loop used to miss that and run all 10 iterations.
+        assert sorted((len(m) for m in refined.values()), reverse=True) == [65, 20, 3, 1, 1, 1]
+        assert info.summary_stats["convergence_reason"] == "ami_convergence"
+        assert info.summary_stats["iterations"] < config.max_iterations
+
+        # One proximity graph per iteration, all sharing one medoid cache
+        assert graph_spy.call_count == info.summary_stats["iterations"]
+        medoid_caches = [call.kwargs["medoid_computation_cache"] for call in graph_spy.call_args_list]
+        assert all(cache is medoid_caches[0] for cache in medoid_caches)
+        assert len(medoid_caches[0]) > 0
