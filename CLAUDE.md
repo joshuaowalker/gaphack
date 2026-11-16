@@ -79,6 +79,17 @@ This architecture provides:
 - Efficient on-demand computation with caching
 - Clean abstraction via `DistanceProvider` base class
 
+#### Pair Scoring (`utils.py`)
+Scoring aligned pairs is the dominant cost of refinement and analysis, so it has two layers:
+- `compute_msa_distance_detailed()` counts adjusted mismatches without building the annotated
+  display strings (`_get_mismatch_counter`), after a numpy column filter (`filter_msa_positions`)
+- `pair_score_cache` (`PairScoreCache`) remembers `(overlap_len, mismatches)` per aligned pair of
+  strings; the overlap rule and normalization are applied per call, never cached
+  (`GAPHACK_PAIR_CACHE_SIZE`, default 200000 pairs, 0 disables)
+
+Both must leave distances bit-identical; `tests/test_pair_scoring.py` checks each against
+`adjusted_identity.score_alignment()`.
+
 #### Distance Cache in Core Algorithm
 The multiprocessing implementation uses a specialized `DistanceCache` class (`core.py:171`):
 - Maintains persistent worker caches across parallel operations
@@ -263,9 +274,9 @@ The refinement system includes infrastructure for incremental/streaming clusteri
    - Could parallelize neighborhood discovery across multiple targets
    - Would improve refinement iteration speed
 
-2. **Incremental medoid updates**: Currently recomputes all medoids
-   - After small refinements, most medoids unchanged
-   - Could track which clusters changed and update selectively
+2. **Incremental medoid updates**: Done - `iterative_refinement` passes one
+   `medoid_computation_cache` to every `ClusterGraph` it builds, so only clusters
+   whose membership changed are realigned
 
 3. **Approximate nearest neighbor search**: Currently exact BLAST K-NN
    - LSH or other ANN methods could speed up very large datasets

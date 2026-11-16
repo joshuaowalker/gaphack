@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Refinement ran to the iteration limit after converging**: the loop tests `AMI == 1.0`, but
+  scikit-learn can return `1.0000000000000002` for identical clusterings, depending on label
+  order (which varies with `PYTHONHASHSEED`). `gaphack-refine` then repeated the final
+  iteration until `--max-iterations` and reported "Reached iteration limit without convergence".
+  Identical clusterings are now reported as exactly 1.0. Final clusters are unchanged.
+
+### Performance
+Pairwise scoring of aligned sequences was ~90% of `gaphack-refine` and `gaphack-analyze` runtime.
+None of these changes alters a distance or a clustering result.
+- **Score without display strings**: distances only need the adjusted mismatch count, so the
+  annotated alignment strings that `score_alignment()` also builds are no longer generated.
+- **Vectorized column filter**: `filter_msa_positions()` uses a numpy mask instead of a
+  per-character loop.
+- **Pair score cache**: results are remembered per aligned pair, so alignments that are rebuilt
+  with the same sequences (every refinement iteration, and again in analysis) are not rescored.
+  `GAPHACK_PAIR_CACHE_SIZE` sets the maximum number of pairs kept (default 200000, 0 disables).
+- **Medoids reused across refinement iterations**: only clusters whose membership changed are
+  realigned when the proximity graph is rebuilt.
+
+### Tests
+- `tests/test_pair_scoring.py`: the fast scoring path and the cache are each compared against
+  the `score_alignment()` path on every pair of a real 50-sequence alignment
+- Convergence tests for `compute_ami_for_refinement` and an end-to-end refinement run
+
 ## [0.7.0] - 2026-01-27
 
 ### Added
