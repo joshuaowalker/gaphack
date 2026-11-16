@@ -14,6 +14,7 @@ from gaphack.cluster_refinement import (
     RefinementConfig,
     apply_full_gaphack_to_scope,
     apply_full_gaphack_to_scope_with_metadata,
+    compute_ami_for_refinement,
     verify_no_conflicts
 )
 
@@ -364,3 +365,54 @@ class TestEdgeCases:
         assert result['conflict_count'] == 0
         assert result['total_sequences'] == 0
         assert result['total_assignments'] == 0
+
+
+def _clusters_of_sizes(sizes, prefix):
+    """Build {cluster_id: [headers]} with the given cluster sizes over headers s0, s1, ..."""
+    clusters = {}
+    next_header = 0
+    for i, size in enumerate(sizes):
+        clusters[f"{prefix}{i}"] = [f"s{next_header + j}" for j in range(size)]
+        next_header += size
+    return clusters
+
+
+class TestAmiForRefinement:
+    """compute_ami_for_refinement drives the refinement loop's convergence check (== 1.0)."""
+
+    @pytest.mark.parametrize("sizes", [
+        # For these size distributions sklearn's AMI returns 1.0000000000000002 (or ...04)
+        # for identical partitions, which made the loop run to the iteration limit.
+        [65, 20, 3, 1, 1, 1],
+        [106, 9, 8, 8, 6, 4, 2, 2, 1, 1, 1, 1, 1],
+        [37, 29, 28, 21, 18, 16, 15, 15, 15, 5, 1],
+        [5, 5],
+    ])
+    def test_identical_clustering_is_exactly_one(self, sizes):
+        """An unchanged clustering must compare equal to 1.0 so refinement stops."""
+        before = _clusters_of_sizes(sizes, "old_")
+        after = _clusters_of_sizes(sizes, "new_")  # same members, different cluster IDs
+
+        assert compute_ami_for_refinement(set(before), after, before) == 1.0
+
+    def test_split_cluster_is_below_one(self):
+        """A clustering that split a cluster must not be reported as converged."""
+        before = _clusters_of_sizes([6, 4], "old_")
+        after = {"a": before["old_0"][:3], "b": before["old_0"][3:], "c": before["old_1"]}
+
+        assert compute_ami_for_refinement(set(before), after, before) < 1.0
+
+    def test_merged_clusters_are_below_one(self):
+        """A clustering that merged two clusters must not be reported as converged."""
+        before = _clusters_of_sizes([6, 4, 3], "old_")
+        after = {"a": before["old_0"] + before["old_1"], "b": before["old_2"]}
+
+        assert compute_ami_for_refinement(set(before), after, before) < 1.0
+
+    def test_moved_sequence_is_below_one(self):
+        """Same cluster count and sizes, one sequence swapped between clusters."""
+        before = _clusters_of_sizes([5, 5], "old_")
+        a, b = list(before["old_0"]), list(before["old_1"])
+        a[0], b[0] = b[0], a[0]
+
+        assert compute_ami_for_refinement(set(before), {"a": a, "b": b}, before) < 1.0
