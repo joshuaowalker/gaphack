@@ -13,6 +13,7 @@ from Bio.SeqRecord import SeqRecord
 import logging
 from tqdm import tqdm
 import hashlib
+from itertools import islice
 import subprocess
 import tempfile
 import os
@@ -443,6 +444,73 @@ def _get_mismatch_counter():
     return _mismatch_counter
 
 
+def _read_int_env(name: str, default: int) -> int:
+    """Read a non-negative integer setting from the environment."""
+    try:
+        return max(0, int(os.environ.get(name, default)))
+    except ValueError:
+        logging.warning(f"Ignoring invalid {name}={os.environ.get(name)!r}; using {default}")
+        return default
+
+
+class PairScoreCache:
+    """Bounded cache of pairwise scoring results, keyed by the aligned pair.
+
+    For a pair of aligned sequences, the scored overlap and the adjusted mismatch
+    count depend only on the two aligned strings (the adjustment parameters are
+    fixed), so a result can be reused whenever the same two strings are scored
+    again. That happens a lot: refinement rebuilds the same alignments on every
+    iteration (cluster medoids, converging scopes), and analysis repeats the
+    alignment of an unchanged set of sequences.
+
+    Keys hold references to the aligned strings rather than copies, so an entry
+    costs little beyond the alignment it came from. When full, the oldest quarter
+    of the entries is dropped.
+
+    Each value is (overlap_len, mismatches); mismatches is None when the pair has
+    been filtered but not (successfully) scored.
+    """
+
+    def __init__(self, max_entries: int):
+        self.max_entries = max_entries
+        self._entries: Dict[Tuple[str, str], Tuple[int, Optional[int]]] = {}
+        self.hits = 0
+        self.misses = 0
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def __contains__(self, key: Tuple[str, str]) -> bool:
+        return key in self._entries
+
+    def get(self, key: Tuple[str, str]) -> Optional[Tuple[int, Optional[int]]]:
+        entry = self._entries.get(key)
+        if entry is None:
+            self.misses += 1
+        else:
+            self.hits += 1
+        return entry
+
+    def put(self, key: Tuple[str, str], overlap_len: int, mismatches: Optional[int]) -> None:
+        if self.max_entries <= 0:
+            return
+        if key not in self._entries and len(self._entries) >= self.max_entries:
+            # dicts iterate in insertion order, so these are the oldest entries
+            for old_key in list(islice(self._entries, max(1, self.max_entries // 4))):
+                del self._entries[old_key]
+        self._entries[key] = (overlap_len, mismatches)
+
+    def clear(self) -> None:
+        self._entries.clear()
+        self.hits = 0
+        self.misses = 0
+
+
+# Process-wide cache used by compute_msa_distance_detailed().
+# GAPHACK_PAIR_CACHE_SIZE sets the maximum number of pairs kept (0 disables it).
+pair_score_cache = PairScoreCache(_read_int_env("GAPHACK_PAIR_CACHE_SIZE", 200_000))
+
+
 def compute_msa_distance_detailed(seq1_aligned: str, seq2_aligned: str,
                                    original_len1: Optional[int] = None,
                                    original_len2: Optional[int] = None,
@@ -493,9 +561,18 @@ def compute_msa_distance_detailed(seq1_aligned: str, seq2_aligned: str,
         logging.debug("Empty sequence detected in MSA alignment")
         return invalid_result()
 
-    # Filter positions unsuitable for scoring
-    seq1_clean, seq2_clean = filter_msa_positions(seq1_aligned, seq2_aligned)
-    overlap_len = len(seq1_clean)
+    # Reuse the result if this exact aligned pair has been scored before
+    cache_key = (seq1_aligned, seq2_aligned)
+    cached = pair_score_cache.get(cache_key)
+    if cached is not None:
+        overlap_len, mismatches = cached
+        seq1_clean = seq2_clean = None
+    else:
+        # Filter positions unsuitable for scoring
+        seq1_clean, seq2_clean = filter_msa_positions(seq1_aligned, seq2_aligned)
+        overlap_len = len(seq1_clean)
+        mismatches = None
+        pair_score_cache.put(cache_key, overlap_len, None)
 
     # Check minimum overlap - must be ≥50% of the shorter sequence
     min_required_overlap = min(original_len1, original_len2) * MIN_OVERLAP_FRACTION
@@ -510,12 +587,16 @@ def compute_msa_distance_detailed(seq1_aligned: str, seq2_aligned: str,
         # No positions to score (should be caught by min_required_overlap check, but defensive)
         return invalid_result()
 
-    try:
-        # Score the pre-aligned sequences (MycoBLAST-style adjusted mismatch count)
-        mismatches = count_mismatches(seq1_clean, seq2_clean)
-    except Exception as e:
-        logging.warning(f"Alignment scoring failed: {e}")
-        return invalid_result()
+    if mismatches is None:
+        if seq1_clean is None:
+            seq1_clean, seq2_clean = filter_msa_positions(seq1_aligned, seq2_aligned)
+        try:
+            # Score the pre-aligned sequences (MycoBLAST-style adjusted mismatch count)
+            mismatches = count_mismatches(seq1_clean, seq2_clean)
+        except Exception as e:
+            logging.warning(f"Alignment scoring failed: {e}")
+            return invalid_result()
+        pair_score_cache.put(cache_key, overlap_len, mismatches)
 
     # Calculate both distance metrics
     if normalization_length is not None and normalization_length > 0:
