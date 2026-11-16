@@ -500,10 +500,22 @@ def compute_ami_for_refinement(input_clusters: Set[str], output_clusters: Dict[s
     if valid_mask.sum() < 2:
         return 1.0  # Perfect agreement if too few sequences
 
+    valid_input = input_labels[valid_mask]
+    valid_output = output_labels[valid_mask]
+
+    # Identical partitions are reported as exactly 1.0. sklearn's AMI is not guaranteed
+    # to return exactly 1.0 for them (it can return e.g. 1.0000000000000002), and the
+    # refinement loop tests for == 1.0 to decide that clustering has converged.
+    # Two labelings describe the same partition iff every input label maps to exactly
+    # one output label and vice versa.
+    n_pairs = len(set(zip(valid_input.tolist(), valid_output.tolist())))
+    if n_pairs == len(set(valid_input.tolist())) == len(set(valid_output.tolist())):
+        return 1.0
+
     # Suppress sklearn warning about many clusters looking like regression
     with warnings.catch_warnings():
         warnings.filterwarnings('ignore', category=UserWarning, module='sklearn')
-        return adjusted_mutual_info_score(input_labels[valid_mask], output_labels[valid_mask])
+        return adjusted_mutual_info_score(valid_input, valid_output)
 
 
 def checkpoint_iteration(
