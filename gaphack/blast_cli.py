@@ -86,10 +86,15 @@ Examples:
   # Adjust clustering thresholds
   gaphack-blast blast_results.fasta --min-split 0.003 --max-lump 0.03
 
+  # Also find the cluster nearest to the query's and compare the two
+  gaphack-blast blast_results.fasta --nearest-cluster
+
 Output fields:
   - in_query_cluster: Whether the sequence clusters with the query
   - identity_to_query: MycoBLAST-adjusted identity (e.g., 99.63%)
   - gap_size_percent: Barcode gap magnitude in percentage points
+  - nearest_cluster (with --nearest-cluster): the nearest cluster, and the gap
+    between it and the query cluster at P90, P95 and P100
         """
     )
 
@@ -124,6 +129,19 @@ Output fields:
         type=float,
         default=0.02,
         help='Maximum distance to lump clusters (default: 0.02 = 98%% identity)'
+    )
+    parser.add_argument(
+        '--target-percentile',
+        type=int,
+        default=100,
+        help='Percentile for linkage and gap optimization when growing a cluster '
+             '(default: 100 = complete linkage; gaphack --target uses 95)'
+    )
+    parser.add_argument(
+        '--nearest-cluster',
+        action='store_true',
+        help='Also grow the cluster nearest to the query cluster from the closest '
+             'outside sequence, and report the gap between the two at P90, P95 and P100'
     )
 
     # Verbosity
@@ -171,7 +189,9 @@ Output fields:
         analyzer = BlastAnalyzer(
             min_split=args.min_split,
             max_lump=args.max_lump,
-            show_progress=not args.quiet
+            target_percentile=args.target_percentile,
+            show_progress=not args.quiet,
+            find_nearest_cluster=args.nearest_cluster
         )
 
         result = analyzer.analyze(sequences, headers)
@@ -201,6 +221,11 @@ Output fields:
                 logging.info(f"Barcode gap found: {result.gap_size_percent:.2f}%")
             else:
                 logging.info("No barcode gap found")
+            if args.nearest_cluster and result.nearest_cluster is not None:
+                gap = result.nearest_cluster.gaps.get(95)
+                gap_text = f", P95 gap {gap.gap_size_percent:.2f}%" if gap else ""
+                logging.info(f"Nearest cluster: {len(result.nearest_cluster.member_indices)} sequences "
+                             f"(seed {result.nearest_cluster.seed_id}){gap_text}")
 
     except KeyboardInterrupt:
         logging.info("Interrupted by user")

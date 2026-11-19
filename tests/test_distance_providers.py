@@ -158,3 +158,20 @@ class TestMSACachedDistanceProvider:
             assert matrix.shape == (3, 3)
             assert np.all(np.diag(matrix) == 0.0)  # Diagonal should be zero
             assert matrix[0, 1] == matrix[1, 0]  # Should be symmetric
+
+
+class TestSubsetDistanceProvider:
+    """A subset view maps local indices to the base provider's."""
+
+    def test_maps_indices_to_base(self):
+        from gaphack.distance_providers import PrecomputedDistanceProvider, SubsetDistanceProvider
+        matrix = np.array([
+            [0.0, 0.1, 0.2, 0.3],
+            [0.1, 0.0, 0.4, 0.5],
+            [0.2, 0.4, 0.0, 0.6],
+            [0.3, 0.5, 0.6, 0.0],
+        ])
+        subset = SubsetDistanceProvider(PrecomputedDistanceProvider(matrix), [3, 1])
+        assert subset.n == 2
+        assert subset.get_distance(0, 1) == 0.5
+        assert subset.get_distances_from_sequence(0, {1}) == {1: 0.5}

@@ -7,11 +7,11 @@ the query using gap-optimized clustering.
 
 import logging
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 import numpy as np
 
 from .target_clustering import TargetModeClustering
-from .distance_providers import MSACachedDistanceProvider
+from .distance_providers import MSACachedDistanceProvider, SubsetDistanceProvider
 from .utils import MSAAlignmentError
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,120 @@ class HistogramData:
         }
 
 
+# Percentiles at which the query cluster is compared with the nearest cluster
+GAP_PERCENTILES = (90, 95, 100)
+
+# Named percentiles reported for every identity distribution
+_SUMMARY_PERCENTILES = (("p5", 5), ("p10", 10), ("p25", 25), ("median", 50),
+                        ("p75", 75), ("p90", 90), ("p95", 95))
+
+
+def _round_identity(val: Optional[float]) -> Optional[float]:
+    """Round identity to 2 decimal places (e.g., 99.63%)."""
+    return round(val, 2) if val is not None else None
+
+
+@dataclass
+class IdentityDistribution:
+    """Identity % (normalized, as used by clustering) of every pair in a set of pairs."""
+    values: List[float]
+
+    def summary(self) -> Dict[str, Optional[float]]:
+        """count, min, p5, p10, p25, median, p75, p90, p95, max and mean (None when empty)."""
+        result: Dict[str, Optional[float]] = {"count": len(self.values)}
+        if not self.values:
+            result.update({"min": None, **{name: None for name, _ in _SUMMARY_PERCENTILES},
+                           "max": None, "mean": None})
+            return result
+        arr = np.asarray(self.values, dtype=float)
+        result["min"] = float(arr.min())
+        for name, pct in _SUMMARY_PERCENTILES:
+            result[name] = float(np.percentile(arr, pct))
+        result["max"] = float(arr.max())
+        result["mean"] = float(arr.mean())
+        return result
+
+    def summary_dict(self) -> Dict[str, Any]:
+        """summary() rounded for JSON."""
+        return {k: (v if k == "count" else _round_identity(v)) for k, v in self.summary().items()}
+
+    def histogram(self, bin_width: float = 0.5) -> Optional["HistogramData"]:
+        return _build_histogram(self.values, bin_width=bin_width)
+
+
+@dataclass
+class PercentileGap:
+    """Barcode gap at one percentile, in identity percentage points.
+
+    At percentile P, the query cluster's within-cluster identities are cut at their
+    (100-P)th percentile and the between-cluster identities at their Pth percentile, so
+    P100 compares the lowest identity within the query cluster with the highest identity
+    between the clusters. A positive gap means the clusters separate at that percentile.
+    """
+    percentile: int
+    intra_lower_identity: float
+    inter_upper_identity: float
+    gap_size_percent: float
+    gap_exists: bool
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "intra_lower_identity": _round_identity(self.intra_lower_identity),
+            "inter_upper_identity": _round_identity(self.inter_upper_identity),
+            "gap_size_percent": _round_identity(self.gap_size_percent),
+            "gap_exists": self.gap_exists,
+        }
+
+
+def _percentile_gap(intra: List[float], inter: List[float], percentile: int) -> Optional[PercentileGap]:
+    """Gap between within-cluster and between-cluster identities at one percentile."""
+    if not intra or not inter:
+        return None
+    intra_lower = float(np.percentile(intra, 100 - percentile))
+    inter_upper = float(np.percentile(inter, percentile))
+    gap = intra_lower - inter_upper
+    return PercentileGap(percentile=percentile, intra_lower_identity=intra_lower,
+                         inter_upper_identity=inter_upper, gap_size_percent=gap,
+                         gap_exists=gap > 0)
+
+
+@dataclass
+class NearestClusterResult:
+    """The cluster nearest to the query cluster, and how the two compare.
+
+    The seed is the sequence outside the query cluster that is closest to it (the same
+    percentile linkage target mode uses to grow a cluster). The nearest cluster is then
+    grown from that seed by target mode over the sequences outside the query cluster,
+    with the same thresholds and the same alignment.
+    """
+    seed_index: int
+    seed_id: str
+    seed_linkage_identity: Optional[float]  # Identity % of the seed to the query cluster (linkage)
+    member_indices: List[int]  # 0-based input positions, sorted
+    medoid_index: int
+    medoid_id: str
+    nearest_pairwise: IdentityDistribution  # Pairs within the nearest cluster
+    query_pairwise: IdentityDistribution  # Pairs within the query cluster
+    between: IdentityDistribution  # Every query-cluster member against every nearest-cluster member
+    gaps: Dict[int, Optional[PercentileGap]]  # Keyed by percentile (GAP_PERCENTILES)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "seed_id": self.seed_id,
+            "seed_index": self.seed_index,
+            "seed_linkage_identity": _round_identity(self.seed_linkage_identity),
+            "size": len(self.member_indices),
+            "medoid_id": self.medoid_id,
+            "medoid_index": self.medoid_index,
+            "pairwise_identity": self.nearest_pairwise.summary_dict(),
+            "comparison": {
+                "query_cluster_pairwise_identity": self.query_pairwise.summary_dict(),
+                "between_clusters_identity": self.between.summary_dict(),
+                "gaps": {f"p{p}": (gap.to_dict() if gap else None) for p, gap in self.gaps.items()},
+            },
+        }
+
+
 @dataclass
 class SequenceResult:
     """Result for a single sequence in the BLAST analysis."""
@@ -45,6 +159,7 @@ class SequenceResult:
     identity_to_query_normalized: Optional[float]  # Normalized identity % (used by clustering)
     identity_to_medoid_normalized: Optional[float]  # Identity % to query cluster medoid
     identity_to_nearest_non_member_normalized: Optional[float]  # For members: identity % to nearest non-member
+    in_nearest_cluster: Optional[bool] = None  # None unless a nearest cluster was found
 
 
 @dataclass
@@ -85,18 +200,23 @@ class BlastAnalysisResult:
     intra_cluster_histogram: Optional[HistogramData] = None
     inter_cluster_histogram: Optional[HistogramData] = None
 
+    # Linkage/gap percentile used to grow the cluster(s)
+    target_percentile: Optional[int] = None
+
+    # Nearest cluster (only when requested; None if none could be formed)
+    nearest_cluster_requested: bool = False
+    nearest_cluster: Optional[NearestClusterResult] = None
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
-        def round_identity(val: Optional[float]) -> Optional[float]:
-            """Round identity to 2 decimal places (e.g., 99.63%)."""
-            return round(val, 2) if val is not None else None
+        round_identity = _round_identity
 
         # Round intra_cluster_identity values
         intra_rounded = {
             k: round_identity(v) for k, v in self.intra_cluster_identity.items()
         }
 
-        return {
+        result = {
             "query": {
                 "id": self.query_id,
                 "length": self.query_length
@@ -127,6 +247,7 @@ class BlastAnalysisResult:
                 "method": self.method,
                 "min_split": self.min_split,
                 "max_lump": self.max_lump,
+                "target_percentile": self.target_percentile,
                 "normalization_length": self.normalization_length,
                 "identity_metric": self.distance_metric,
                 "warnings": self.warnings,
@@ -136,6 +257,21 @@ class BlastAnalysisResult:
                 }
             }
         }
+
+        # Nearest-cluster output appears only when it was requested, so the default
+        # output is unchanged; when requested, null marks "no nearest cluster found".
+        if self.nearest_cluster_requested:
+            nearest = self.nearest_cluster
+            result["nearest_cluster"] = nearest.to_dict() if nearest else None
+            for seq_dict, seq in zip(result["sequences"], self.sequences):
+                seq_dict["in_nearest_cluster"] = seq.in_nearest_cluster
+            histograms = result["diagnostics"]["histograms"]
+            nearest_hist = nearest.nearest_pairwise.histogram() if nearest else None
+            between_hist = nearest.between.histogram() if nearest else None
+            histograms["nearest_cluster_intra"] = nearest_hist.to_dict() if nearest_hist else None
+            histograms["between_clusters"] = between_hist.to_dict() if between_hist else None
+
+        return result
 
 
 def _distance_to_identity(distance: Optional[float]) -> Optional[float]:
@@ -217,18 +353,23 @@ class BlastAnalyzer:
                  min_split: float = 0.005,
                  max_lump: float = 0.02,
                  target_percentile: int = 100,
-                 show_progress: bool = True):
+                 show_progress: bool = True,
+                 find_nearest_cluster: bool = False):
         """
         Initialize the BLAST analyzer.
 
         Args:
             min_split: Minimum distance to split clusters (sequences closer are lumped)
             max_lump: Maximum distance to lump clusters (sequences farther are split)
-            target_percentile: Percentile for gap optimization (default: 100 for complete linkage)
+            target_percentile: Percentile for linkage and gap optimization
+                (default: 100 for complete linkage)
             show_progress: Whether to show progress bars
+            find_nearest_cluster: Also grow the cluster nearest to the query cluster and
+                compare the two (see NearestClusterResult)
 
         Raises:
-            ValueError: If min_split or max_lump are negative, or if min_split >= max_lump
+            ValueError: If min_split or max_lump are negative, if min_split >= max_lump,
+                or if target_percentile is not in 1-100
         """
         if min_split < 0:
             raise ValueError("min_split must be non-negative")
@@ -236,11 +377,14 @@ class BlastAnalyzer:
             raise ValueError("max_lump must be non-negative")
         if min_split >= max_lump:
             raise ValueError("min_split must be less than max_lump")
+        if not 1 <= target_percentile <= 100:
+            raise ValueError("target_percentile must be between 1 and 100")
 
         self.min_split = min_split
         self.max_lump = max_lump
         self.target_percentile = target_percentile
         self.show_progress = show_progress
+        self.find_nearest_cluster = find_nearest_cluster
 
     def analyze(self,
                 sequences: List[str],
@@ -333,6 +477,18 @@ class BlastAnalyzer:
             identities_to_nearest_non_member
         )
 
+        # Nearest cluster (optional)
+        nearest = None
+        if self.find_nearest_cluster:
+            nearest = self._analyze_nearest_cluster(
+                distance_provider, sequences, headers, sorted(query_cluster_set),
+                sorted(remaining_set), warnings
+            )
+            nearest_members = set(nearest.member_indices) if nearest else None
+            for seq_result in sequence_results:
+                seq_result.in_nearest_cluster = (seq_result.index in nearest_members
+                                                 if nearest_members is not None else None)
+
         # Check for warnings
         if len(target_cluster) == 1:
             warnings.append("Query has no close matches")
@@ -379,7 +535,97 @@ class BlastAnalyzer:
             distance_metric="MycoBLAST-adjusted (homopolymer-normalized, indel-normalized)",
             warnings=warnings,
             intra_cluster_histogram=intra_histogram,
-            inter_cluster_histogram=inter_histogram
+            inter_cluster_histogram=inter_histogram,
+            target_percentile=self.target_percentile,
+            nearest_cluster_requested=self.find_nearest_cluster,
+            nearest_cluster=nearest
+        )
+
+    def _closest_outsider(self,
+                          distance_provider,
+                          cluster_indices: List[int],
+                          outsider_indices: List[int]) -> Tuple[Optional[int], Optional[float]]:
+        """The outsider with the smallest percentile linkage distance to the cluster.
+
+        Same measure target mode uses to pick the next sequence to add. An outsider with
+        any distance that could not be computed (NaN) is never chosen; on a tie the
+        earlier input position wins. Returns (None, None) when no outsider qualifies.
+        """
+        best_index, best_linkage = None, float('inf')
+        for idx in outsider_indices:
+            distances = [distance_provider.get_distance(idx, member) for member in cluster_indices]
+            if any(np.isnan(d) for d in distances):
+                continue
+            linkage = float(np.percentile(distances, self.target_percentile))
+            if linkage < best_linkage:
+                best_index, best_linkage = idx, linkage
+        if best_index is None:
+            return None, None
+        return best_index, best_linkage
+
+    def _between_identities(self, distance_provider, indices_a: List[int],
+                            indices_b: List[int]) -> List[float]:
+        """Identity % of every pair with one sequence from each set (NaN pairs skipped)."""
+        identities = []
+        for a in indices_a:
+            for b in indices_b:
+                distance = distance_provider.get_distance(a, b)
+                if not np.isnan(distance):
+                    identities.append(_distance_to_identity(distance))
+        return identities
+
+    def _analyze_nearest_cluster(self,
+                                 distance_provider,
+                                 sequences: List[str],
+                                 headers: List[str],
+                                 query_cluster: List[int],
+                                 outsiders: List[int],
+                                 warnings: List[str]) -> Optional[NearestClusterResult]:
+        """Grow the cluster nearest to the query cluster and compare the two.
+
+        Returns None (with a warning) when there is no sequence outside the query cluster,
+        or none with usable distances to it.
+        """
+        if not outsiders:
+            warnings.append("No sequences outside the query cluster; no nearest cluster")
+            return None
+
+        seed, seed_linkage = self._closest_outsider(distance_provider, query_cluster, outsiders)
+        if seed is None:
+            warnings.append("No sequence outside the query cluster has usable distances to it; "
+                            "no nearest cluster")
+            return None
+
+        logger.info("Running target mode clustering for the nearest cluster...")
+        subset = SubsetDistanceProvider(distance_provider, outsiders)
+        clustering = TargetModeClustering(
+            min_split=self.min_split,
+            max_lump=self.max_lump,
+            target_percentile=self.target_percentile,
+            show_progress=self.show_progress
+        )
+        local_cluster, _, _ = clustering.cluster(
+            subset,
+            target_indices=[outsiders.index(seed)],
+            sequences=[sequences[i] for i in outsiders]
+        )
+        members = sorted(outsiders[i] for i in local_cluster)
+        medoid = self._find_query_cluster_medoid(distance_provider, members)
+
+        query_pairwise = self._compute_all_intra_cluster_identities(distance_provider, query_cluster)
+        between = self._between_identities(distance_provider, query_cluster, members)
+
+        return NearestClusterResult(
+            seed_index=seed,
+            seed_id=headers[seed],
+            seed_linkage_identity=_distance_to_identity(seed_linkage),
+            member_indices=members,
+            medoid_index=medoid,
+            medoid_id=headers[medoid],
+            nearest_pairwise=IdentityDistribution(self._compute_all_intra_cluster_identities(distance_provider, members)),
+            query_pairwise=IdentityDistribution(query_pairwise),
+            between=IdentityDistribution(between),
+            gaps={p: _percentile_gap(query_pairwise, between, p) for p in GAP_PERCENTILES},
         )
 
     def _extract_identities_to_query(self,
@@ -667,7 +913,9 @@ class BlastAnalyzer:
             max_lump=self.max_lump,
             normalization_length=query_length,
             distance_metric="MycoBLAST-adjusted (homopolymer-normalized, indel-normalized)",
-            warnings=["Insufficient data - need at least 2 sequences for analysis"]
+            warnings=["Insufficient data - need at least 2 sequences for analysis"],
+            target_percentile=self.target_percentile,
+            nearest_cluster_requested=self.find_nearest_cluster
         )
 
     def _create_alignment_error_result(self,
@@ -707,7 +955,9 @@ class BlastAnalyzer:
             max_lump=self.max_lump,
             normalization_length=query_length,
             distance_metric="MycoBLAST-adjusted (homopolymer-normalized, indel-normalized)",
-            warnings=[f"MSA alignment failed: {error_msg}"]
+            warnings=[f"MSA alignment failed: {error_msg}"],
+            target_percentile=self.target_percentile,
+            nearest_cluster_requested=self.find_nearest_cluster
         )
 
 
@@ -757,13 +1007,16 @@ def format_text_output(result: BlastAnalysisResult) -> str:
     lines.append("-" * 85)
 
     for seq in result.sequences:
-        in_cluster = "Yes" if seq.in_query_cluster else "No"
+        in_cluster = "Yes" if seq.in_query_cluster else ("Nearest" if seq.in_nearest_cluster else "No")
         id_query = f"{seq.identity_to_query_normalized:.2f}%" if seq.identity_to_query_normalized is not None else "N/A"
         id_medoid = f"{seq.identity_to_medoid_normalized:.2f}%" if seq.identity_to_medoid_normalized is not None else "N/A"
         id_non_mem = f"{seq.identity_to_nearest_non_member_normalized:.2f}%" if seq.identity_to_nearest_non_member_normalized is not None else "N/A"
         lines.append(f"{seq.index:<5} {seq.id:<30} {in_cluster:<8} {id_query:<10} {id_medoid:<10} {id_non_mem:<10}")
 
     lines.append("")
+
+    if result.nearest_cluster_requested:
+        lines.extend(_format_nearest_cluster_text(result))
 
     # Diagnostics
     lines.append("-" * 40)
@@ -772,6 +1025,8 @@ def format_text_output(result: BlastAnalysisResult) -> str:
     lines.append(f"Method: {result.method}")
     lines.append(f"min_split: {result.min_split}")
     lines.append(f"max_lump: {result.max_lump}")
+    if result.target_percentile is not None:
+        lines.append(f"target_percentile: {result.target_percentile}")
     lines.append(f"Normalization length: {result.normalization_length} bp")
     lines.append(f"Identity metric: {result.distance_metric}")
 
@@ -786,12 +1041,56 @@ def format_text_output(result: BlastAnalysisResult) -> str:
     return "\n".join(lines)
 
 
+def _format_nearest_cluster_text(result: BlastAnalysisResult) -> List[str]:
+    """Text section for the nearest cluster."""
+    lines = ["-" * 40, "Nearest Cluster", "-" * 40]
+    nearest = result.nearest_cluster
+    if nearest is None:
+        lines.append("No nearest cluster (see warnings)")
+        lines.append("")
+        return lines
+
+    def fmt(val: Optional[float]) -> str:
+        return f"{val:.2f}%" if val is not None else "N/A"
+
+    linkage = f"P{result.target_percentile} " if result.target_percentile is not None else ""
+    lines.append(f"Seed: {nearest.seed_id} (index {nearest.seed_index}), "
+                 f"{fmt(nearest.seed_linkage_identity)} identity to the query cluster ({linkage}linkage)")
+    lines.append(f"Nearest cluster size: {len(nearest.member_indices)}")
+    lines.append(f"Nearest cluster medoid: {nearest.medoid_id} (index {nearest.medoid_index})")
+    for label, dist in (("Within query cluster", nearest.query_pairwise),
+                        ("Within nearest cluster", nearest.nearest_pairwise),
+                        ("Between clusters", nearest.between)):
+        s = dist.summary()
+        if s["count"]:
+            lines.append(f"{label}: min={fmt(s['min'])}, median={fmt(s['median'])}, "
+                         f"max={fmt(s['max'])} ({s['count']} pairs)")
+    lines.append("Barcode gap, query cluster vs nearest cluster:")
+    for pct, gap in nearest.gaps.items():
+        if gap is None:
+            lines.append(f"  P{pct}: N/A")
+            continue
+        status = "gap" if gap.gap_exists else "no gap"
+        lines.append(f"  P{pct}: {gap.gap_size_percent:.2f}% ({status}; query cluster "
+                     f"P{100 - pct} {fmt(gap.intra_lower_identity)} vs between P{pct} "
+                     f"{fmt(gap.inter_upper_identity)})")
+    lines.append("")
+    return lines
+
+
 def format_tsv_output(result: BlastAnalysisResult) -> str:
-    """Format analysis result as TSV (tab-separated values)."""
+    """Format analysis result as TSV (tab-separated values).
+
+    An in_nearest_cluster column is appended when the nearest cluster was requested.
+    """
     lines = []
+    nearest_column = result.nearest_cluster_requested
 
     # Header
-    lines.append("index\tid\tin_query_cluster\tidentity_to_query\tidentity_to_query_normalized\tidentity_to_medoid_normalized\tidentity_to_nearest_non_member_normalized")
+    header = "index\tid\tin_query_cluster\tidentity_to_query\tidentity_to_query_normalized\tidentity_to_medoid_normalized\tidentity_to_nearest_non_member_normalized"
+    if nearest_column:
+        header += "\tin_nearest_cluster"
+    lines.append(header)
 
     # Data rows
     for seq in result.sequences:
@@ -800,6 +1099,9 @@ def format_tsv_output(result: BlastAnalysisResult) -> str:
         identity_norm = f"{seq.identity_to_query_normalized:.2f}" if seq.identity_to_query_normalized is not None else ""
         identity_medoid = f"{seq.identity_to_medoid_normalized:.2f}" if seq.identity_to_medoid_normalized is not None else ""
         identity_non_mem = f"{seq.identity_to_nearest_non_member_normalized:.2f}" if seq.identity_to_nearest_non_member_normalized is not None else ""
-        lines.append(f"{seq.index}\t{seq.id}\t{in_cluster}\t{identity}\t{identity_norm}\t{identity_medoid}\t{identity_non_mem}")
+        row = f"{seq.index}\t{seq.id}\t{in_cluster}\t{identity}\t{identity_norm}\t{identity_medoid}\t{identity_non_mem}"
+        if nearest_column:
+            row += "\t" + ("" if seq.in_nearest_cluster is None else ("true" if seq.in_nearest_cluster else "false"))
+        lines.append(row)
 
     return "\n".join(lines)

@@ -156,6 +156,7 @@ Human-readable report for debugging.
 | `method` | string | Always "gap-optimized-target-clustering" |
 | `min_split` | float | Distance threshold below which sequences always merge |
 | `max_lump` | float | Distance threshold above which sequences never merge |
+| `target_percentile` | int | Linkage/gap percentile used to grow the cluster(s) |
 | `normalization_length` | int | Median sequence length used for normalization |
 | `identity_metric` | string | Description of identity calculation method |
 | `warnings` | array | Any issues encountered during analysis |
@@ -169,6 +170,8 @@ The `histograms` object contains pre-binned identity distributions for visualiza
 |-------|------|-------------|
 | `intra_cluster` | object | Distribution of identities within query cluster |
 | `inter_cluster` | object | Distribution of identities from cluster members to non-members |
+| `nearest_cluster_intra` | object | With `--nearest-cluster`: identities of all pairs within the nearest cluster |
+| `between_clusters` | object | With `--nearest-cluster`: identities of every query-cluster member to every nearest-cluster member |
 
 Each histogram object contains:
 
@@ -180,6 +183,47 @@ Each histogram object contains:
 | `frequencies` | array | Normalized frequencies (sum to 1.0) |
 
 **Note**: Empty bins are omitted from the output for compactness.
+
+### Nearest Cluster Fields (`--nearest-cluster`)
+
+These appear only when the nearest cluster is requested, so the default output is
+unchanged. When requested, `nearest_cluster` is `null` if no nearest cluster could be
+formed (every sequence is in the query cluster, or no outside sequence has usable
+distances to it; a warning says which), and each sequence gets `in_nearest_cluster`
+(`null` when there is no nearest cluster). TSV output gains a trailing
+`in_nearest_cluster` column and text output a "Nearest Cluster" section.
+
+How it is formed: the **seed** is the sequence outside the query cluster with the
+smallest linkage distance to it (the `target_percentile` of its distances to the
+members, the same measure target mode uses to choose its next merge; earliest input
+position wins ties). The nearest cluster is then grown from the seed by target mode over
+the sequences outside the query cluster, with the same thresholds and the same
+alignment and distances. Sequences in neither cluster are the "other" sequences.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `seed_id`, `seed_index` | string, int | The closest sequence outside the query cluster |
+| `seed_linkage_identity` | float | Identity % of the seed to the query cluster (linkage) |
+| `size` | int | Sequences in the nearest cluster |
+| `medoid_id`, `medoid_index` | string, int | Medoid of the nearest cluster |
+| `pairwise_identity` | object | Identities of all pairs within the nearest cluster |
+| `comparison.query_cluster_pairwise_identity` | object | Identities of all pairs within the query cluster |
+| `comparison.between_clusters_identity` | object | Identities of every query-cluster member to every nearest-cluster member |
+| `comparison.gaps` | object | Barcode gap at `p90`, `p95` and `p100` (below) |
+
+Each identity distribution has `count`, `min`, `p5`, `p10`, `p25`, `median`, `p75`,
+`p90`, `p95`, `max` and `mean` (identity %, normalized; `null` when there are no pairs).
+
+Each gap entry has `intra_lower_identity`, `inter_upper_identity`, `gap_size_percent`
+and `gap_exists`, or is `null` when either side has no pairs (a query cluster of one).
+At percentile P the query cluster's within-cluster identities are cut at their
+(100−P)th percentile and the between-cluster identities at their Pth percentile, so
+`p100` compares the lowest identity within the query cluster with the highest identity
+between the clusters. `gap_size_percent` is signed: negative means the distributions
+overlap at that percentile. Percentiles interpolate linearly (numpy's default).
+
+This is a different measure from the summary `gap_size_percent`, which compares the
+members' and non-members' identities **to the query**.
 
 ## Understanding the Metrics
 
@@ -252,10 +296,14 @@ The **medoid** is the sequence with minimum total distance to all other cluster 
 ### Cluster Membership Decision
 
 A sequence is classified as `in_query_cluster: true` if:
-1. Its **maximum** distance to any cluster member is within threshold (complete linkage)
+1. Its **maximum** distance to any cluster member is within threshold (complete linkage;
+   with `--target-percentile P`, the Pth percentile of those distances)
 2. Adding it doesn't destroy the barcode gap
 
-The algorithm explores all possible merges up to `max_lump` and returns the configuration with the best gap.
+The algorithm explores all possible merges up to `max_lump` and returns the configuration
+with the best gap among those that include every merge made within `min_split`:
+sequences that close always join the cluster, even when leaving one out would give a
+wider gap.
 
 ## Algorithm Parameters
 
@@ -263,7 +311,8 @@ The algorithm explores all possible merges up to `max_lump` and returns the conf
 |-----------|---------|----------|--------|
 | `min_split` | 0.005 (99.5%) | `--min-split` | Sequences within this distance always merge |
 | `max_lump` | 0.02 (98.0%) | `--max-lump` | Sequences beyond this distance never merge |
-| `target_percentile` | 100 | (not exposed) | Uses complete linkage (max distance) |
+| `target_percentile` | 100 | `--target-percentile` | Linkage/gap percentile; 100 is complete linkage (`gaphack --target` uses 95) |
+| `find_nearest_cluster` | False | `--nearest-cluster` | Also form and report the nearest cluster |
 
 **Tuning guidance**:
 - Decrease `min_split` for more conservative clustering (fewer false positives)
@@ -293,6 +342,30 @@ def analyze_blast_results(query_fasta: str, hits_fasta: str) -> dict:
         raise RuntimeError(f"gaphack-blast failed: {result.stderr}")
 
     return json.loads(result.stdout)
+```
+
+### In-Process (Python) Integration
+
+Calling the analyzer directly avoids a subprocess and gives the unrounded values,
+including every pairwise identity behind the nearest-cluster statistics:
+
+```python
+from gaphack.blast_analysis import BlastAnalyzer
+
+analyzer = BlastAnalyzer(show_progress=False, find_nearest_cluster=True)
+result = analyzer.analyze(sequences, headers)   # first sequence is the query
+
+query_ids = [s.id for s in result.sequences if s.in_query_cluster]
+nearest = result.nearest_cluster
+if nearest is not None:
+    nearest_ids = [headers[i] for i in nearest.member_indices]
+    other_ids = [s.id for s in result.sequences
+                 if not s.in_query_cluster and not s.in_nearest_cluster]
+    p95 = nearest.gaps[95]                # PercentileGap or None
+    between = nearest.between.values      # identity % of every between-cluster pair
+    within = nearest.query_pairwise.values
+
+payload = result.to_dict()                # the same JSON the CLI writes
 ```
 
 ### Extracting Conspecific Sequences
@@ -391,6 +464,8 @@ def interpret_result(result: dict) -> str:
 | "Query has no close matches" | Query alone in cluster | Check query quality; may be novel species |
 | "N sequences had insufficient overlap" | Short/divergent sequences | May need to filter input |
 | "MSA alignment failed" | SPOA couldn't align sequences | Check for chimeras or non-homologous sequences |
+| "No sequences outside the query cluster; no nearest cluster" | `--nearest-cluster` with every sequence in the query cluster | None needed |
+| "No sequence outside the query cluster has usable distances to it; no nearest cluster" | `--nearest-cluster`, but every outside sequence lacks overlap with some member | May need to filter input |
 
 ## Comparison with BLAST Identity
 

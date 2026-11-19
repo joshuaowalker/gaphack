@@ -969,3 +969,162 @@ class TestHistograms:
             assert result.inter_cluster_histogram is not None
             # One entry per cluster member
             assert sum(result.inter_cluster_histogram.counts) == result.query_cluster_size
+
+
+from gaphack.distance_providers import PrecomputedDistanceProvider
+
+
+class _MatrixProvider(PrecomputedDistanceProvider):
+    """A real DistanceProvider over a matrix, with the extras BlastAnalyzer reads."""
+    normalization_length = 100
+
+    def get_distance_detailed(self, i, j):
+        d = float(self.distance_matrix[i][j])
+        return MSADistanceResult(distance_normalized=d, distance_pairwise=d,
+                                 mismatches=int(round(d * 100)), pairwise_overlap=100, is_valid=True)
+
+
+def _three_groups_matrix():
+    """Query group 0-3, nearest group 4-7 (0.03 away), far pair 8-9 (0.08 / 0.06 away).
+    Pairs within a group are 0.004 apart."""
+    groups = [range(0, 4), range(4, 8), range(8, 10)]
+    between = {(0, 1): 0.03, (0, 2): 0.08, (1, 2): 0.06}
+    m = np.zeros((10, 10))
+    for gi, a in enumerate(groups):
+        for gj, b in enumerate(groups):
+            for i in a:
+                for j in b:
+                    if i != j:
+                        m[i][j] = 0.004 if gi == gj else between[tuple(sorted((gi, gj)))]
+    return m
+
+
+class TestNearestCluster:
+    """Optional nearest cluster: grown from the closest outsider, compared at P90/P95/P100."""
+
+    def _analyze(self, matrix, **kwargs):
+        n = len(matrix)
+        analyzer = BlastAnalyzer(min_split=0.005, max_lump=0.02, show_progress=False, **kwargs)
+        with patch('gaphack.blast_analysis.MSACachedDistanceProvider',
+                   return_value=_MatrixProvider(matrix)):
+            return analyzer.analyze([f"SEQ{i}" for i in range(n)], [f"seq{i}" for i in range(n)])
+
+    def test_nearest_cluster_and_gaps(self):
+        result = self._analyze(_three_groups_matrix(), find_nearest_cluster=True)
+
+        assert [s.index for s in result.sequences if s.in_query_cluster] == [0, 1, 2, 3]
+        nearest = result.nearest_cluster
+        assert nearest is not None
+        assert nearest.seed_index == 4  # all of 4-7 tie; the earliest wins
+        assert nearest.member_indices == [4, 5, 6, 7]
+        assert nearest.seed_linkage_identity == pytest.approx(97.0)
+        assert [s.in_nearest_cluster for s in result.sequences] == [False] * 4 + [True] * 4 + [False] * 2
+
+        assert len(nearest.query_pairwise.values) == 6
+        assert len(nearest.nearest_pairwise.values) == 6
+        assert len(nearest.between.values) == 16
+        for pct in (90, 95, 100):
+            gap = nearest.gaps[pct]
+            assert gap.intra_lower_identity == pytest.approx(99.6)
+            assert gap.inter_upper_identity == pytest.approx(97.0)
+            assert gap.gap_size_percent == pytest.approx(2.6)
+            assert gap.gap_exists
+
+        d = result.to_dict()
+        assert d["nearest_cluster"]["size"] == 4
+        assert d["nearest_cluster"]["seed_id"] == "seq4"
+        assert d["nearest_cluster"]["comparison"]["gaps"]["p95"]["gap_size_percent"] == 2.6
+        assert d["nearest_cluster"]["comparison"]["between_clusters_identity"]["count"] == 16
+        assert [s["in_nearest_cluster"] for s in d["sequences"]][4] is True
+        assert d["diagnostics"]["histograms"]["between_clusters"] is not None
+        assert d["diagnostics"]["target_percentile"] == 100
+        assert json.loads(json.dumps(d)) == d
+
+        tsv = format_tsv_output(result).split("\n")
+        assert tsv[0].endswith("\tin_nearest_cluster")
+        assert tsv[5].split("\t")[-1] == "true"
+        assert tsv[1].split("\t")[-1] == "false"
+
+        text = format_text_output(result)
+        assert "Nearest Cluster" in text
+        assert "Nearest cluster size: 4" in text
+        assert "P95: 2.60% (gap" in text
+
+    def test_gap_percentiles_use_the_tails(self):
+        # One loose pair within the query cluster and one close pair between the clusters:
+        # P100 compares those two extremes, P90 cuts them off.
+        from gaphack.blast_analysis import _percentile_gap
+        intra = [98.8] + [99.6] * 9
+        inter = [98.9] + [97.0] * 19
+        p100 = _percentile_gap(intra, inter, 100)
+        assert p100.intra_lower_identity == pytest.approx(98.8)
+        assert p100.inter_upper_identity == pytest.approx(98.9)
+        assert p100.gap_size_percent == pytest.approx(-0.1)
+        assert not p100.gap_exists
+        p90 = _percentile_gap(intra, inter, 90)
+        assert p90.intra_lower_identity == pytest.approx(np.percentile(intra, 10))
+        assert p90.inter_upper_identity == pytest.approx(np.percentile(inter, 90))
+        assert p90.gap_exists
+        assert _percentile_gap([], inter, 95) is None
+        assert _percentile_gap(intra, [], 95) is None
+
+    def test_no_outsiders(self):
+        m = np.full((3, 3), 0.004)
+        np.fill_diagonal(m, 0.0)
+        result = self._analyze(m, find_nearest_cluster=True)
+        assert result.query_cluster_size == 3
+        assert result.nearest_cluster is None
+        assert any("no nearest cluster" in w for w in result.warnings)
+        d = result.to_dict()
+        assert d["nearest_cluster"] is None
+        assert all(s["in_nearest_cluster"] is None for s in d["sequences"])
+        assert format_tsv_output(result).split("\n")[1].endswith("\t")
+
+    def test_not_requested_leaves_output_unchanged(self):
+        result = self._analyze(_three_groups_matrix())
+        assert result.nearest_cluster is None
+        d = result.to_dict()
+        assert "nearest_cluster" not in d
+        assert all("in_nearest_cluster" not in s for s in d["sequences"])
+        assert set(d["diagnostics"]["histograms"]) == {"intra_cluster", "inter_cluster"}
+        assert not format_tsv_output(result).split("\n")[0].endswith("in_nearest_cluster")
+        assert "Nearest Cluster" not in format_text_output(result)
+
+    def test_target_percentile_validated(self):
+        with pytest.raises(ValueError):
+            BlastAnalyzer(target_percentile=0)
+        with pytest.raises(ValueError):
+            BlastAnalyzer(target_percentile=101)
+
+    def test_real_sequences(self):
+        fasta_path = TEST_DATA_DIR / "russula_diverse_50.fasta"
+        if not fasta_path.exists():
+            pytest.skip(f"Test data not found: {fasta_path}")
+        records = list(SeqIO.parse(fasta_path, "fasta"))[:30]
+        sequences = [str(r.seq).upper() for r in records]
+        headers = [r.id for r in records]
+        result = BlastAnalyzer(show_progress=False, find_nearest_cluster=True).analyze(sequences, headers)
+
+        query = {s.index for s in result.sequences if s.in_query_cluster}
+        nearest = result.nearest_cluster
+        assert nearest is not None
+        members = set(nearest.member_indices)
+        assert nearest.seed_index in members
+        assert not (members & query)
+        assert len(nearest.between.values) <= len(query) * len(members)
+        assert set(nearest.gaps) == {90, 95, 100}
+
+    def test_cli_nearest_cluster(self, tmp_path, capsys):
+        from gaphack import blast_cli
+        fasta_path = TEST_DATA_DIR / "russula_diverse_50.fasta"
+        if not fasta_path.exists():
+            pytest.skip(f"Test data not found: {fasta_path}")
+        records = list(SeqIO.parse(fasta_path, "fasta"))[:20]
+        small = tmp_path / "hits.fasta"
+        SeqIO.write(records, small, "fasta")
+        with patch("sys.argv", ["gaphack-blast", str(small), "--nearest-cluster",
+                                "--target-percentile", "95", "-q"]):
+            blast_cli.main()
+        d = json.loads(capsys.readouterr().out)
+        assert d["diagnostics"]["target_percentile"] == 95
+        assert "nearest_cluster" in d

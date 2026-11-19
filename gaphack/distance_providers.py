@@ -194,3 +194,26 @@ class PrecomputedDistanceProvider(DistanceProvider):
         return self.distance_matrix
 
 
+
+
+class SubsetDistanceProvider(DistanceProvider):
+    """A view of another provider restricted to some of its sequences.
+
+    Local index i is the base provider's index ``indices[i]``. Distances come from the
+    base provider (and its cache), so a subset clustered on its own keeps the distances
+    of the full alignment rather than realigning.
+    """
+
+    def __init__(self, base: DistanceProvider, indices: List[int]):
+        self.base = base
+        self.indices = list(indices)
+        self.n = len(self.indices)
+
+    def get_distance(self, idx1: int, idx2: int) -> float:
+        return self.base.get_distance(self.indices[idx1], self.indices[idx2])
+
+    def get_distances_from_sequence(self, idx: int, targets: Set[int]) -> Dict[int, float]:
+        return {target_idx: self.get_distance(idx, target_idx) for target_idx in targets}
+
+    def ensure_distances_computed(self, indices: Set[int]) -> None:
+        self.base.ensure_distances_computed({self.indices[i] for i in indices})
