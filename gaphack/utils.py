@@ -419,7 +419,7 @@ def _get_mismatch_counter():
     except ImportError:
         raise ImportError(
             "adjusted-identity package is required. "
-            "Install it with: pip install git+https://github.com/joshuaowalker/adjusted-identity.git"
+            "Install it with: pip install adjusted-identity"
         )
 
     params = adjusted_identity.AdjustmentParams(

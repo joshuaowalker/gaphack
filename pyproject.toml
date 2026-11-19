@@ -28,7 +28,7 @@ classifiers = [
 dependencies = [
     "numpy>=1.20.0",
     "biopython>=1.79",
-    "adjusted-identity @ git+https://github.com/joshuaowalker/adjusted-identity.git",
+    "adjusted-identity>=0.2.6",
     "tqdm>=4.65.0",
     "matplotlib>=3.5.0",
     "scikit-learn>=1.0",

@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   iteration until `--max-iterations` and reported "Reached iteration limit without convergence".
   Identical clusterings are now reported as exactly 1.0. Final clusters are unchanged.
 
+- **adjusted-identity declared as a git URL**: the dependency pointed at the repository's
+  default branch, so installs were unpinned and package indexes and `pip install --no-deps`
+  setups could not resolve it. It is now the PyPI requirement `adjusted-identity>=0.2.6`
+  (0.2.6 and 0.2.9 give identical scores on gapHACk's scoring path: 194,276 aligned pairs
+  from seven datasets compared).
+
 - **scikit-learn missing from the package dependencies**: `gaphack-refine` imports
   `sklearn.metrics`, but `pip install` did not install scikit-learn, so on a clean environment
   `gaphack-refine` failed at start-up with `ModuleNotFoundError: No module named 'sklearn'`.
