@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.1] - Unreleased
 
 ### Fixed
 - **Refinement ran to the iteration limit after converging**: the loop tests `AMI == 1.0`, but
@@ -37,6 +37,12 @@ None of these changes alters a distance or a clustering result.
   `GAPHACK_PAIR_CACHE_SIZE` sets the maximum number of pairs kept (default 200000, 0 disables).
 - **Medoids reused across refinement iterations**: only clusters whose membership changed are
   realigned when the proximity graph is rebuilt.
+
+Measured on `gaphack --target` → `gaphack-refine --search-method vsearch` → `gaphack-analyze`
+(median of 2 runs, 8-CPU Mac, adjusted-identity 0.2.10), with byte-identical output files:
+91 sequences 17.4 s → 9.6 s, 150 sequences 39.2 s → 23.6 s, 200 sequences 62.3 s → 31.3 s,
+300 sequences 171.0 s → 75.8 s (1.7–2.3×). Part of the gain on the 91- and 300-sequence sets is
+the convergence fix: 0.7.0 ran to the iteration limit in 3 of those 4 runs.
 
 ### Tests
 - `tests/test_pair_scoring.py`: the fast scoring path and the cache are each compared against
