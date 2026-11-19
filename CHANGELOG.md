@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.7.1] - Unreleased
 
+### Added
+- **Published on PyPI** (`pip install gaphack`): a GitHub Actions workflow
+  (`.github/workflows/publish.yml`) runs the tests on Python 3.8, 3.10 and 3.12, checks that the
+  release tag matches the package version, and uploads to PyPI with trusted publishing when a
+  GitHub release is published.
+- README lists the external programs gapHACk runs (SPOA, BLAST+, vsearch), which pip does not
+  install.
+
 ### Fixed
 - **Refinement ran to the iteration limit after converging**: the loop tests `AMI == 1.0`, but
   scikit-learn can return `1.0000000000000002` for identical clusterings, depending on label
@@ -48,6 +56,7 @@ the convergence fix: 0.7.0 ran to the iteration limit in 3 of those 4 runs.
 - `tests/test_pair_scoring.py`: the fast scoring path and the cache are each compared against
   the `score_alignment()` path on every pair of a real 50-sequence alignment
 - Convergence tests for `compute_ami_for_refinement` and an end-to-end refinement run
+- The `dev` extra installs `hypothesis`, which `tests/test_pair_scoring.py` imports
 
 ## [0.7.0] - 2026-01-27
 

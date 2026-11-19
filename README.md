@@ -127,18 +127,31 @@ The gap-aware clustering phase scales with O(n³) complexity, making the two-sta
 
 ## Installation
 
+### From PyPI
+
+```bash
+pip install gaphack
+```
+
+### External Tools
+
+gapHACk runs these programs, which pip does not install; they must be on your `PATH`:
+
+| Program | Needed for |
+|---------|------------|
+| [SPOA](https://github.com/rvaser/spoa) | All distance calculations (multiple sequence alignment) |
+| [BLAST+](https://blast.ncbi.nlm.nih.gov/doc/blast-help/downloadblastdata.html) (`makeblastdb`, `blastn`) | `gaphack-refine` with the default `--search-method blast` |
+| [vsearch](https://github.com/torognes/vsearch) | `gaphack-refine --search-method vsearch` |
+
+For example, `conda install -c bioconda spoa blast vsearch`, or on Debian/Ubuntu
+`sudo apt-get install spoa ncbi-blast+ vsearch`.
+
 ### From Source
 
 ```bash
 git clone https://github.com/joshuaowalker/gaphack.git
 cd gaphack
 pip install -e .
-```
-
-### Using pip (once published)
-
-```bash
-pip install gaphack
 ```
 
 ## Quick Start

@@ -38,6 +38,7 @@ dependencies = [
 dev = [
     "pytest>=7.0",
     "pytest-cov",
+    "hypothesis",
     "black",
     "flake8",
     "mypy",
