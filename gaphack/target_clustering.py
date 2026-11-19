@@ -63,6 +63,11 @@ class TargetModeClustering:
             target_indices: List of sequence indices that form the initial seed cluster
             sequences: List of sequences (required if distance_provider is not a DistanceProvider)
         
+        The cluster grows one sequence at a time, closest first, until the closest
+        remaining sequence is farther than max_lump. The result is the configuration with
+        the widest gap among those that include every merge made within min_split (ties
+        go to the larger cluster).
+
         Returns:
             Tuple of (target_cluster, remaining_sequences, clustering_history) where:
             - target_cluster is List[int] of indices in the final target cluster
@@ -210,9 +215,16 @@ class TargetModeClustering:
                     'merge_reason': merge_reason
                 })
                 
-                # Track best configuration (prefer larger clusters when gaps are equal)
+                # Track best configuration (prefer larger clusters when gaps are equal).
+                # A merge within min_split is mandatory: sequences that close always belong
+                # together, so no configuration that leaves this sequence out may be chosen.
+                # The best configuration therefore restarts here, whatever its gap; only this
+                # and later configurations remain candidates. Full gapHACk gets the same
+                # effect by finishing all merges within min_split before it tracks gaps.
                 update_best = False
-                if current_gap > best_config['gap_size']:
+                if closest_distance <= self.min_split:
+                    update_best = True
+                elif current_gap > best_config['gap_size']:
                     # Strictly better gap
                     update_best = True
                 elif current_gap == best_config['gap_size'] and len(target_cluster) > len(best_config['target_cluster']):

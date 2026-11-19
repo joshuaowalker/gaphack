@@ -243,6 +243,8 @@ gaphack input.fasta --target seeds.fasta -o target_results
 
 Target mode focuses on growing one cluster from the provided seed sequences, making it suitable for cases where you want to extract sequences similar to specific targets without attempting to cluster all remaining sequences.
 
+The cluster grows one sequence at a time, closest first, up to `--max-lump`. The result is the size with the widest gap among those that include every merge made within `--min-split`: sequences that close to the cluster always join it.
+
 ### Iterative Refinement (`gaphack-refine`)
 
 The `gaphack-refine` tool optimizes cluster boundaries through iterative neighborhood-based refinement. It works with any input clustering (vsearch, CD-HIT, MMseqs2, or gaphack output).
@@ -383,6 +385,9 @@ gaphack-blast sequences.fasta --format text
 
 # Tab-separated for spreadsheets
 gaphack-blast sequences.fasta --format tsv
+
+# Also find the cluster nearest to the query's and compare the two
+gaphack-blast sequences.fasta --nearest-cluster
 ```
 
 **Key output fields:**
@@ -390,6 +395,8 @@ gaphack-blast sequences.fasta --format tsv
 - `identity_to_query`: MycoBLAST-adjusted identity percentage
 - `barcode_gap_found`: Whether a clear species boundary was detected
 - `gap_size_percent`: Magnitude of the barcode gap
+- `nearest_cluster` (with `--nearest-cluster`): the cluster grown from the closest
+  sequence outside the query cluster, and the barcode gap between the two at P90, P95 and P100
 
 For detailed field documentation and integration patterns, see [docs/blast_analysis_integration.md](docs/blast_analysis_integration.md).
 

@@ -284,3 +284,104 @@ class TestTargetModeClustering:
         sizes = [entry['target_cluster_size'] for entry in gap_history]
         for i in range(1, len(sizes)):
             assert sizes[i] == sizes[i-1] + 1
+
+def _best_with_mandatory_merges(seed, gap_history, min_split):
+    """Reference rule, computed from the history alone: the widest-gap configuration at or
+    after the last merge within min_split (ties to the larger cluster). Returns None when no
+    merge was within min_split."""
+    last_mandatory = None
+    for position, step in enumerate(gap_history):
+        if step['merge_distance'] <= min_split:
+            last_mandatory = position
+    if last_mandatory is None:
+        return None
+    best = last_mandatory
+    for position in range(last_mandatory, len(gap_history)):
+        if gap_history[position]['gap_size'] >= gap_history[best]['gap_size']:
+            best = position
+    return set(seed) | {step['merged_sequence'] for step in gap_history[:best + 1]}
+
+
+class TestMandatoryMerges:
+    """Merges within min_split are mandatory: the chosen cluster always includes them."""
+
+    @staticmethod
+    def _sequences(n):
+        return [f"SEQ{i}" for i in range(n)]
+
+    def test_mandatory_merge_kept_when_it_narrows_the_gap(self):
+        # 1 is 0.001 from the target and 2 exactly min_split from both: two mandatory merges.
+        # The gap is wider after the first (0.005 - 0.001) than after the second
+        # (0.008 - 0.005), so choosing by gap alone would leave out sequence 2.
+        distance_matrix = np.array([
+            [0.0,   0.001, 0.005, 0.008],
+            [0.001, 0.0,   0.005, 0.008],
+            [0.005, 0.005, 0.0,   0.008],
+            [0.008, 0.008, 0.008, 0.0],
+        ])
+        clustering = TargetModeClustering(min_split=0.005, max_lump=0.006,
+                                          target_percentile=100, show_progress=False)
+        cluster, remaining, metrics = clustering.cluster(
+            PrecomputedDistanceProvider(distance_matrix), [0], self._sequences(4))
+
+        history = metrics['gap_history']
+        assert [step['merged_sequence'] for step in history] == [1, 2]
+        assert history[0]['gap_size'] > history[1]['gap_size']
+        assert sorted(cluster) == [0, 1, 2]
+        assert remaining == [3]
+        assert sorted(metrics['best_config']['target_cluster']) == [0, 1, 2]
+        assert metrics['best_config']['merge_distance'] == pytest.approx(0.005)
+
+    def test_without_mandatory_merges_the_widest_gap_wins(self):
+        # Nothing within min_split: the choice is by gap alone, as before.
+        distance_matrix = np.array([
+            [0.0,  0.01, 0.03],
+            [0.01, 0.0,  0.03],
+            [0.03, 0.03, 0.0],
+        ])
+        clustering = TargetModeClustering(min_split=0.005, max_lump=0.02,
+                                          target_percentile=100, show_progress=False)
+        cluster, remaining, _ = clustering.cluster(
+            PrecomputedDistanceProvider(distance_matrix), [0], self._sequences(3))
+        assert sorted(cluster) == [0, 1]
+        assert remaining == [2]
+
+    def test_random_matrices_match_reference_rule(self):
+        """On random clustered data (percentile linkage, so merges within min_split can
+        follow wider ones), the result is the reference rule's, and always contains every
+        sequence merged within min_split."""
+        rng = np.random.default_rng(20261119)
+        min_split, max_lump = 0.005, 0.02
+        differs_from_gap_only = 0
+        checked = 0
+        for _ in range(300):
+            n = int(rng.integers(8, 30))
+            centers = rng.normal(0.0, 0.012, size=(int(rng.integers(1, 4)), 2))
+            points = centers[rng.integers(0, len(centers), size=n)] + rng.normal(0.0, 0.003, size=(n, 2))
+            distance_matrix = np.sqrt(((points[:, None, :] - points[None, :, :]) ** 2).sum(-1))
+            percentile = int(rng.choice([90, 95, 100]))
+            clustering = TargetModeClustering(min_split=min_split, max_lump=max_lump,
+                                              target_percentile=percentile, show_progress=False)
+            cluster, _, metrics = clustering.cluster(
+                PrecomputedDistanceProvider(distance_matrix), [0], self._sequences(n))
+            history = metrics['gap_history']
+
+            mandatory = {step['merged_sequence'] for step in history
+                         if step['merge_distance'] <= min_split}
+            assert mandatory <= set(cluster)
+
+            expected = _best_with_mandatory_merges([0], history, min_split)
+            if expected is None:
+                continue
+            checked += 1
+            assert set(cluster) == expected
+
+            # Gap-only choice (the pre-0.7.2 rule), to confirm the data exercises the fix
+            gaps = [0.0] + [step['gap_size'] for step in history]
+            best = max(range(len(gaps)), key=lambda i: (gaps[i], i))
+            if best < len(history) and best <= max(i for i, s in enumerate(history)
+                                                    if s['merge_distance'] <= min_split):
+                differs_from_gap_only += 1
+
+        assert checked > 100
+        assert differs_from_gap_only > 0
