@@ -16,9 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **adjusted-identity declared as a git URL**: the dependency pointed at the repository's
   default branch, so installs were unpinned and package indexes and `pip install --no-deps`
-  setups could not resolve it. It is now the PyPI requirement `adjusted-identity>=0.2.6`
-  (0.2.6 and 0.2.9 give identical scores on gapHACk's scoring path: 194,276 aligned pairs
-  from seven datasets compared).
+  setups could not resolve it. It is now the PyPI requirement `adjusted-identity>=0.2.10`
+  (for the scoring API below). Scores are unchanged from 0.2.6: 0.2.6 and 0.2.9 agree on all
+  194,276 aligned pairs from seven datasets, and 0.2.10 adds no scoring change.
 
 - **scikit-learn missing from the package dependencies**: `gaphack-refine` imports
   `sklearn.metrics`, but `pip install` did not install scikit-learn, so on a clean environment
@@ -27,8 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Performance
 Pairwise scoring of aligned sequences was ~90% of `gaphack-refine` and `gaphack-analyze` runtime.
 None of these changes alters a distance or a clustering result.
-- **Score without display strings**: distances only need the adjusted mismatch count, so the
-  annotated alignment strings that `score_alignment()` also builds are no longer generated.
+- **Score without display strings**: distances only need the adjusted mismatch count, so they
+  use adjusted-identity's `score_alignment_metrics()` (new in 0.2.10), which returns the same
+  metrics as `score_alignment()` without building the annotated alignment strings.
 - **Vectorized column filter**: `filter_msa_positions()` uses a numpy mask instead of a
   per-character loop.
 - **Pair score cache**: results are remembered per aligned pair, so alignments that are rebuilt

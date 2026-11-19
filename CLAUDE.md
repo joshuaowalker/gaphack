@@ -81,8 +81,10 @@ This architecture provides:
 
 #### Pair Scoring (`utils.py`)
 Scoring aligned pairs is the dominant cost of refinement and analysis, so it has two layers:
-- `compute_msa_distance_detailed()` counts adjusted mismatches without building the annotated
-  display strings (`_get_mismatch_counter`), after a numpy column filter (`filter_msa_positions`)
+- `compute_msa_distance_detailed()` counts adjusted mismatches with
+  `adjusted_identity.score_alignment_metrics()` (no annotated display strings; public API since
+  adjusted-identity 0.2.10, see `_get_mismatch_counter`), after a numpy column filter
+  (`filter_msa_positions`)
 - `pair_score_cache` (`PairScoreCache`) remembers `(overlap_len, mismatches)` per aligned pair of
   strings; the overlap rule and normalization are applied per call, never cached
   (`GAPHACK_PAIR_CACHE_SIZE`, default 200000 pairs, 0 disables)

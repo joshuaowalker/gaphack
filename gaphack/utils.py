@@ -404,11 +404,10 @@ def _get_mismatch_counter():
     Uses the standardized MycoBLAST-style adjustment parameters:
     end_skip=0, all normalizations=True, max_repeat=1.
 
-    adjusted_identity.score_alignment() runs the scoring analysis and then builds
-    annotated alignment strings for display. Distance calculation only needs the
-    mismatch count, so the analysis step is called on its own when the installed
-    adjusted-identity exposes it; score_alignment() is the fallback. Both give the
-    same count.
+    Distance calculation only needs the mismatch count, so it uses
+    adjusted_identity.score_alignment_metrics() (adjusted-identity 0.2.10+), which
+    returns the same metrics as score_alignment() without building the annotated
+    alignment strings.
     """
     global _mismatch_counter
     if _mismatch_counter is not None:
@@ -422,6 +421,13 @@ def _get_mismatch_counter():
             "Install it with: pip install adjusted-identity"
         )
 
+    score_metrics = getattr(adjusted_identity, 'score_alignment_metrics', None)
+    if score_metrics is None:
+        raise ImportError(
+            "adjusted-identity 0.2.10 or later is required (score_alignment_metrics). "
+            "Upgrade it with: pip install --upgrade adjusted-identity"
+        )
+
     params = adjusted_identity.AdjustmentParams(
         end_skip_distance=0,
         normalize_homopolymers=True,
@@ -430,15 +436,8 @@ def _get_mismatch_counter():
         max_repeat_motif_length=1
     )
 
-    analyze = getattr(adjusted_identity, '_analyze_alignment', None)
-    if analyze is not None:
-        def count_mismatches(seq1_clean: str, seq2_clean: str) -> int:
-            return analyze(seq1_clean, seq2_clean, params).mismatches
-    else:
-        def count_mismatches(seq1_clean: str, seq2_clean: str) -> int:
-            return adjusted_identity.score_alignment(
-                seq1_clean, seq2_clean, adjustment_params=params
-            ).mismatches
+    def count_mismatches(seq1_clean: str, seq2_clean: str) -> int:
+        return score_metrics(seq1_clean, seq2_clean, params).mismatches
 
     _mismatch_counter = count_mismatches
     return _mismatch_counter
