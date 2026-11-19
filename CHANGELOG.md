@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-11-19
+
+**Results can change:** the target-mode fix below can make the cluster that `gaphack --target`
+and `gaphack-blast` report larger (never smaller), so that it includes every sequence merged
+within `min_split`.
+
+### Fixed
+- **Target mode could leave out sequences within `min_split`**: `gaphack --target` (and
+  `gaphack-blast`) report the cluster size with the widest gap, but the choice also considered
+  sizes before a mandatory merge (distance ≤ `min_split`), so a sequence a fraction of a
+  percent from the cluster could be left out. The result is now the widest-gap size among
+  those that include every merge within `min_split`, as full gapHACk does. Merge history is
+  unchanged. On a 200-sequence Russula test set the query's cluster grows from 18 to 40
+  members with `gaphack --target` (10 to 34 with `gaphack-blast`), all of the query's species
+  (47 in the set); on seven other test sets results are unchanged or gain one member.
+
+- **`gaphack.__version__` was wrong in 0.7.1**: it still read 0.7.0 (the CLIs' `--version` was
+  right). It now comes from `gaphack/version.py`, and a test checks it against `pyproject.toml`.
+
+### Added
+- **`gaphack-blast --nearest-cluster`** (`BlastAnalyzer(find_nearest_cluster=True)`): grows the
+  cluster nearest to the query's from the closest outside sequence (target mode, same
+  thresholds and alignment) and reports its seed, size, medoid and within-cluster identities,
+  the identity distributions within the query cluster and between the two, and the barcode
+  gap between them at P90, P95 and P100. Output appears only when requested.
+- **`gaphack-blast --target-percentile`**: the linkage/gap percentile (default 100, complete
+  linkage; `gaphack --target` uses 95). Reported as `diagnostics.target_percentile`.
+- `SubsetDistanceProvider`: a view of a distance provider restricted to some sequences.
+
 ## [0.7.1] - 2026-11-19
 
 ### Added
